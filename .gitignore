@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IL2CPP dumps (large, contains real game internals)
+pragmata_dump/
+il2cpp_dump.json
+*_dump.json
+
+# REFramework runtime artifacts (in case anything ends up alongside)
+reframework/data/
+*.log
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
