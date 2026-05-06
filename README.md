@@ -13,6 +13,7 @@ A REFramework Lua mod for [Pragmata](https://www.capcom-games.com/pragmata/) tha
 | `pragmata_ping` | Sanity check; returns `pong`. |
 | `pragmata_scan` | Triggers Diana's environmental scan. |
 | `pragmata_auto_hack` | Auto-hacks a target (requires the in-game Auto-Hack upgrade). |
+| `pragmata_hack_plan` | Plans a path through the active hacking grid. Auto-forced on grid-start. |
 | `pragmata_overdrive` | Fires Diana's Overdrive Protocol (requires gauge to be full). |
 
 **Context emitted to the AI** (as Neuro-SDK `context` messages):
@@ -111,6 +112,19 @@ The mod uses an optional `lane` field on Neuro-SDK `context` messages to disting
 - **`transient`** — replaceable state snapshots (current gauge %, in-combat hints). Each new transient message conceptually supersedes the prior one of the same kind.
 
 This is a forward-compatible extension. Lane-aware consumers can implement replacement semantics for `transient`; pure Neuro-SDK consumers ignore the field and treat every line as cumulative context. The mod functions correctly either way — `transient` just helps avoid context bloat for state-style updates if your integration supports it.
+
+## Hacking integration
+
+The hacking minigame (the `app.PuzzleSnake` cursor-routing puzzle that pops up when Diana initiates a hack) is the most fully-integrated subsystem. The flow:
+
+1. The mod observes `_StartTrg` on the active `PuzzleSnake` instance and, the moment a grid appears, sends an `actions/force` to the AI peer with the rendered grid as the `state` field and `pragmata_hack_plan` as the only allowed action.
+2. The peer returns a list of cardinal moves (`up` / `down` / `left` / `right`).
+3. The mod dispatches the moves one cell per ~130ms via `app.PuzzleSnake.Unit.move(via.Int2)`, with each move passing the cursor's current `_Position` mutated by the direction delta.
+4. When the cursor reaches the goal cell, the mod writes `PuzzleBase._RequestForceSuccess = true` on the `PuzzleSnake` instance. The engine polls this field each tick and runs its full natural completion flow (COMPLETE overlay, hack damage commit, dialogue progression, auto-reset for chain-hacking).
+
+Why step 4 is necessary: calling `Unit.move` directly bypasses the engine's per-cell goal-detection. The engine's natural input pipeline (controller → `updatePuzzleMovement` → cursor) sets internal flags that fire goal detection on arrival; programmatic cursor moves don't, so the puzzle would otherwise just sit on the goal cell with no completion. `_RequestForceSuccess` is the engine's own request-flag for forcing that completion path.
+
+For full schemas, message shapes, and integration notes, see [ACTIONS.md](ACTIONS.md#pragmata_hack_plan).
 
 ## Files referencing game internals
 

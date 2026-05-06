@@ -26,4 +26,18 @@ M.autonomy_nudges = false
 --   1800 = 30 seconds. Lower = more frequent reminders.
 M.autonomy_nudge_interval_frames = 1800
 
+-- ----------------------------------------------------------------
+-- Hacking (PuzzleSnake) integration
+-- ----------------------------------------------------------------
+-- When true, the mod emits an actions/force the moment a hacking grid
+-- appears in-game, prompting the AI to plan a route immediately. When
+-- false, the AI only sees a narrative event and must be asked to plan
+-- via an out-of-band tool call.
+M.hacking_auto_force = true
+
+-- Whether to include the cell-glyph legend in each grid render. Useful
+-- the first few hacks while the AI is learning the format; can be
+-- turned off later to save tokens.
+M.hacking_render_legend = true
+
 return M

@@ -40,6 +40,39 @@ Auto-hacks a target. Consumes part of the hacking gauge to bypass the manual min
 - **Result:** returns success on precondition pass (gauge non-empty, not jammed, target reachable). **Success here means preconditions passed; it does NOT guarantee the engine actually completed the hack.** Look for follow-up context updates to confirm.
 - **Confidence:** medium — preconditions are high-confidence; the actual start transition may require an input-synthesis follow-up at higher load levels.
 
+### `pragmata_hack_plan`
+
+Plan a path through an active hacking grid (the `app.PuzzleSnake` minigame). Fired automatically by the mod via `actions/force` the moment a grid appears in-game (controlled by `mod_config.hacking_auto_force`, on by default). The peer reads the grid render from the force's `state` field — including cursor `@`, Goal `G`, walls `#`, EraseCode traps `X`, an "Adjacency from cursor" block listing legal first-moves, and a glyph legend — and returns an ordered list of cardinal moves.
+
+- **Schema:**
+  ```json
+  {
+    "type": "object",
+    "required": ["reasoning", "moves"],
+    "properties": {
+      "reasoning": {
+        "type": "string",
+        "description": "Step-by-step trace of the planned path. Format: '1:down(1,2)open; 2:right(2,2)open; 3:down(2,3)G'. ~150 chars."
+      },
+      "moves": {
+        "type": "array",
+        "items": {"enum": ["up", "down", "left", "right"]},
+        "minItems": 1, "maxItems": 32
+      }
+    }
+  }
+  ```
+- **Result:** the mod queues the returned plan and dispatches the moves one cell per ~130ms via `app.PuzzleSnake.Unit.move(via.Int2)`. When the cursor reaches the goal cell, the mod writes `_RequestForceSuccess = true` on the active `PuzzleSnake` instance — the engine polls this field each tick and runs the full natural completion flow (COMPLETE overlay, hack damage commit, dialogue progression, auto-reset for chain-hacking). Until that field write, the engine treats `Unit.move` as out-of-band cursor manipulation and does not auto-complete on goal arrival.
+- **Confidence:** HIGH on the full pipeline (grid read → plan return → cursor dispatch → natural completion). One known caveat: directional cells (`OneWay` / `TwoWay*` arrows) are present in the dump's enum but render with a generic `?` glyph because we haven't seen them in test grids — refine if you observe them in production. Grid-state extraction reads the `_ActualGrid` jagged array directly because REFramework can't reliably dispatch `executeEachGrid`'s `System.Action<Grid>` callback; falls back gracefully to narrative-only if reflection fails.
+
+#### Notable engine-internals findings
+
+These came up during development and may be useful for other RE Engine modders building Neuro-SDK integrations:
+
+- **`Unit.move(via.Int2)` accepts an absolute target, not a delta.** The `via.Int2` argument must be obtained from `_CurrentUnit:get_Position()` and mutated in place — fresh `sdk.create_instance("via.Int2")` wrappers don't have writable fields on REFramework builds we tested.
+- **`PuzzleBase._RequestForceSuccess` is the natural-completion entry point.** Naming convention distinguishes polled request fields (`Request*`) from one-frame edge outputs (`*Trg` / `*Trigger`); writes to edge fields are silently dropped, but writes to request fields propagate and are honored by the engine's tick loop.
+- **`_StartTrg` can be cleared faster than ~10 Hz polling catches.** The observer polls every frame to reliably catch the false→true transition at puzzle creation.
+
 ### `pragmata_overdrive`
 
 Fires Diana's Overdrive Protocol. AoE pulse that stuns and exposes weak points on nearby enemies and grants Hugh a brief energy / Suit Integrity buffer. Requires the hacking gauge to be full (the Overdrive ability itself unlocks during the Sector 1 boss fight).

@@ -1,6 +1,6 @@
 -- World-state context emitters.
 --
--- Polls Phase 2 bindings each frame and emits narrative context updates on
+-- Polls bindings each frame and emits narrative context updates on
 -- transitions:
 --   - Scene/area change   -> "Hugh and Diana entered a new area."
 --   - Checkpoint change   -> "Checkpoint reached."

@@ -1,4 +1,4 @@
--- Pragmata mod entrypoint (Phase 0).
+-- Pragmata mod entrypoint.
 --
 -- Boots the file-mailbox transport, sends startup + actions/register to the
 -- bridge via the Python sidecar, and pumps the inbox each frame to dispatch
@@ -14,6 +14,8 @@ package.path = package.path .. ";reframework/autorun/?.lua;./reframework/autorun
 local log = require("pragmata.util.log")
 local mailbox = require("pragmata.bridge_mailbox")
 local dispatcher = require("pragmata.dispatcher")
+local gamepad = require("pragmata.bindings.gamepad")
+local puzzle_snake = require("pragmata.bindings.puzzle_snake")
 
 -- Dialogue capture binding. Pulls subtitle text from UI/Asset/ui2000/gui/ui2010
 -- and forwards each new line to the AI as a silent context message.
@@ -30,6 +32,17 @@ require("pragmata.world_state")
 -- in-combat ability hints on the transient lane while enabled.
 require("pragmata.autonomy")
 
+-- Hacking observer. Watches the active PuzzleSnake instance for lifecycle
+-- triggers; on grid-start emits the rendered grid as a transient context
+-- and fires actions/force so the AI peer plans a route automatically.
+require("pragmata.hacking_observer")
+
+-- Hacking debug panel (ImGui). Renders under "Pragmata Hacking Debug" in
+-- the REFramework menu; shows real-time binding state, trigger field
+-- values, instance-cache status, and provides a "send synthetic test grid"
+-- button for end-to-end pipeline verification.
+require("pragmata.hacking_debug")
+
 -- ====================================================================
 -- GUI probe is loaded but DISABLED by default. Re-enable from the
 -- in-game ImGui panel (Pragmata Probe -> Enable) when you want to do
@@ -39,14 +52,14 @@ require("pragmata.autonomy")
 require("pragmata.probe_gui")  -- registers UI panel; remains disabled until clicked
 -- ====================================================================
 
-log.info("booting (Phase 1)")
+log.info("booting")
 
 -- --------------------------------------------------------------------
--- Phase 0 actions
+-- Sanity check
 -- --------------------------------------------------------------------
 
 dispatcher.register("pragmata_ping", {
-    description = "Phase 0 sanity check. Confirms the mod, sidecar, and bridge are wired up. Returns 'pong' as the result message.",
+    description = "Sanity check. Confirms the mod, sidecar, and bridge are wired up. Returns 'pong' as the result message.",
     -- Empty Lua tables encode ambiguously in some JSON encoders ([] vs {}).
     -- Plain {type = "object"} avoids that without losing meaning here.
     schema = { type = "object" },
@@ -57,7 +70,7 @@ dispatcher.register("pragmata_ping", {
 })
 
 -- --------------------------------------------------------------------
--- Phase 1 actions: Diana abilities
+-- Diana abilities
 -- --------------------------------------------------------------------
 -- Bindings live in spoiler-isolation under bindings/. Failures at load time
 -- shouldn't take down the rest of the mod, so each is loaded via pcall and
@@ -112,6 +125,83 @@ dispatcher.register("pragmata_overdrive", {
 })
 
 -- --------------------------------------------------------------------
+-- Hacking action
+-- --------------------------------------------------------------------
+-- The hacking observer fires actions/force on grid-start, listing this
+-- action as the only allowed name. The handler validates the returned
+-- plan and queues it for cursor-movement dispatch via puzzle_snake.tick_plan.
+
+dispatcher.register("pragmata_hack_plan", {
+    description = (
+        "Plan a path through the active hacking grid from cursor @ to Goal G.\n"
+        .. "Coordinates: (0,0) is TOP-LEFT. x=column (left->right). y=row "
+        .. "(top->bottom). 'up' decreases y by 1; 'down' increases y by 1; "
+        .. "'left' decreases x by 1; 'right' increases x by 1. The first row "
+        .. "is y=0; the last row is y=height-1. You cannot move 'up' from "
+        .. "y=0 or 'down' from y=height-1.\n"
+        .. "Read the state field carefully — the cursor and goal positions "
+        .. "are given there, and the Adjacency block lists which first-moves "
+        .. "are legal. Use those positions verbatim; do not infer or guess.\n"
+        .. "Avoid # walls, X EraseCode traps, and ~ trail cells. Plan ends on G."
+    ),
+    schema = {
+        type = "object",
+        required = { "reasoning", "moves" },
+        properties = {
+            reasoning = {
+                type = "string",
+                description = (
+                    "Trace your plan one step at a time, copying the cursor "
+                    .. "and goal coordinates from the state field exactly. "
+                    .. "Format: '1:down(1,2)open; 2:right(2,2)open; 3:down(2,3)G'. "
+                    .. "Aim for ~150 chars; one line per move."
+                ),
+            },
+            moves = {
+                type = "array",
+                items = { ["enum"] = { "up", "down", "left", "right" } },
+                minItems = 1,
+                maxItems = 32,
+            },
+        },
+    },
+    handler = function(args)
+        -- Check the observer's stale-plan flag: if the puzzle ended (player
+        -- dropped aim, target died) while the AI was generating, this reply
+        -- is stale and should be discarded rather than attempted.
+        local hacking_observer = package.loaded["pragmata.hacking_observer"]
+        local was_stale = false
+        if hacking_observer and hacking_observer.on_plan_received then
+            was_stale = hacking_observer.on_plan_received()
+        end
+
+        local moves = args.moves or {}
+        local count = #moves
+
+        if was_stale then
+            log.info("pragmata_hack_plan: received plan with " .. tostring(count)
+                  .. " moves, but the puzzle ended before the AI responded; discarding")
+            return true, ("plan discarded as stale (puzzle ended before reply): "
+                       .. tostring(count) .. " moves")
+        end
+
+        if count == 0 then
+            return true, "empty plan; nothing to dispatch"
+        end
+
+        -- Drop any previous in-flight plan before queuing the new one.
+        puzzle_snake.clear_plan()
+
+        local queued = puzzle_snake.queue_plan(moves)
+        local skipped = count - queued
+        log.info(string.format("pragmata_hack_plan: queued %d/%d moves (%d skipped as invalid)",
+                               queued, count, skipped))
+        return true, string.format("plan dispatched: %d moves queued (%d skipped)",
+                                   queued, skipped)
+    end,
+})
+
+-- --------------------------------------------------------------------
 -- Boot + frame loop
 -- --------------------------------------------------------------------
 
@@ -148,4 +238,14 @@ re.on_frame(function()
         if msg == nil then break end
         dispatcher.handle_incoming(msg, mailbox.send)
     end
+
+    -- Drive the gamepad-injection state machine. Cheap when idle (early-out
+    -- if queue is empty); does the per-frame button writes when a press is
+    -- in flight. (Now mostly unused — left in for general gamepad-mod
+    -- use since puzzle dispatch went elsewhere.)
+    pcall(gamepad.tick)
+
+    -- Drive the puzzle-snake plan dispatcher. Pulls moves off the queue,
+    -- calls Unit.move() with proper cursor-settle timing.
+    pcall(puzzle_snake.tick_plan)
 end)

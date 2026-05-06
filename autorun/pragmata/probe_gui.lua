@@ -1,4 +1,4 @@
--- Phase 1 GUI element probe (v2).
+-- GUI element probe.
 --
 -- Hooks re.on_pre_gui_draw_element. For every drawn GUI panel it logs the
 -- panel's *asset path* (e.g. GUI/HUD/Reticle), counted per unique path. The

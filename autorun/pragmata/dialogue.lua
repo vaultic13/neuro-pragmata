@@ -1,4 +1,4 @@
--- Phase 1 dialogue capture.
+-- Dialogue (subtitle) capture.
 --
 -- Subtitles in Pragmata render through GUI panel UI/Asset/ui2000/gui/ui2010,
 -- which holds 8 via.gui.Text controls (all named "text"). One subtitle can
