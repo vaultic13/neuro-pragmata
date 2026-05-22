@@ -978,6 +978,114 @@ function M.move(direction)
 end
 
 
+-- ---------------------------------------------------------------------------
+-- Input-pipeline move via _NextMovePosition (PRIMARY MOVE PATH)
+-- ---------------------------------------------------------------------------
+-- Writing absolute target coords into PuzzleSnake._NextMovePosition causes
+-- the engine to process the move through its natural input pipeline:
+--   updateInput → updateNextPosition → updatePuzzleMovement → onEnterGrid
+-- which gives us, free, every cell side-effect the player would get:
+--   - walls block (canReachStraight gating)
+--   - OneWay/TwoWay directional gates enforced
+--   - IsPassed flags set on traversed cells (trail rendering)
+--   - ActiveSkill bonuses applied (chain/damage cells)
+--   - EraseCode traps trigger
+--   - Goal arrival auto-completes the puzzle (full COMPLETE animation)
+--
+-- This is the path `tick_plan` uses for AI-dispatched moves. The older
+-- `M.move()` (Unit.move(via.Int2) direct write) remains available for
+-- manual debug poking but is NOT used in production — it bypasses every
+-- one of the above effects.
+--
+-- Field mechanics: PuzzleSnake._NextMovePosition is a via.Int2 value-type
+-- field at offset 0x1ac (Private). REFramework's get_field returns a
+-- writable wrapper over engine storage on tested builds, so mutating
+-- x/y in place propagates; we also call set_field defensively in case a
+-- future build returns a copy.
+
+-- Read the current _NextMovePosition as {x, y} or nil.
+function M.read_next_move_position()
+    local inst = get_instance()
+    if inst == nil then return nil end
+    local ok, raw = pcall(function() return inst:get_field("_NextMovePosition") end)
+    if not ok or raw == nil then return nil end
+    return read_int2(raw)
+end
+
+
+-- Write absolute target coords into _NextMovePosition. Returns
+-- (true, message) on a successful write (readback included so the caller
+-- can see whether the field actually accepted the value), or
+-- (false, error_string) otherwise.
+function M.write_next_move_position(target_x, target_y)
+    local inst = get_instance()
+    if inst == nil then return false, "no active puzzle" end
+
+    -- Read the current field. For value-type fields, REFramework typically
+    -- returns a wrapper over the engine's storage; mutating it in place
+    -- propagates. We also call set_field afterwards in case this build returns a copy.
+    local ok_g, current = pcall(function() return inst:get_field("_NextMovePosition") end)
+    if not ok_g or current == nil then
+        return false, "couldn't read _NextMovePosition for write"
+    end
+
+    local ok_set = pcall(function()
+        current:set_field("x", target_x)
+        current:set_field("y", target_y)
+    end)
+    if not ok_set then
+        pcall(function()
+            current.x = target_x
+            current.y = target_y
+        end)
+    end
+
+    -- Defensive: write the wrapper back. Harmless if get_field returned
+    -- a reference (no-op); needed if it returned a copy.
+    pcall(function() inst:set_field("_NextMovePosition", current) end)
+
+    -- Readback for diagnostics.
+    local ok_after, after = pcall(function() return inst:get_field("_NextMovePosition") end)
+    local rx, ry = nil, nil
+    if ok_after and after ~= nil then
+        local p = read_int2(after)
+        if p ~= nil then rx, ry = p.x, p.y end
+    end
+
+    return true, string.format(
+        "_NextMovePosition <- (%d,%d) [readback: x=%s y=%s]",
+        target_x, target_y, tostring(rx), tostring(ry))
+end
+
+
+-- Direction-style wrapper around write_next_move_position. Resolves the
+-- absolute target from the current cursor + delta, bounds-checks, then
+-- delegates. Use this from debug buttons / experimental tick paths.
+function M.move_via_next_position(direction)
+    local delta = DIR_DELTAS[direction]
+    if delta == nil then return false, "invalid direction: " .. tostring(direction) end
+
+    local unit, err = _resolve_unit()
+    if unit == nil then return false, err end
+
+    local pos = _read_cursor_pos(unit)
+    if pos == nil then return false, "couldn't read cursor position" end
+    local target_x = pos.x + delta.x
+    local target_y = pos.y + delta.y
+
+    local w, h = _read_grid_dims()
+    if w ~= nil and h ~= nil then
+        if target_x < 0 or target_x >= w or target_y < 0 or target_y >= h then
+            return false, string.format(
+                "move %s rejected: target (%d,%d) out of bounds (grid %dx%d)",
+                direction, target_x, target_y, w, h)
+        end
+    end
+
+    return M.write_next_move_position(target_x, target_y)
+end
+
+
 -- Currently-cached Int2 strategy name (or nil). For the debug panel.
 function M.int2_strategy_in_use()
     if _int2_strategy_winner == nil then return nil end
@@ -1003,8 +1111,9 @@ end
 -- Plan dispatch
 -- ---------------------------------------------------------------------------
 -- Queues a sequence of directions and dispatches them one at a time via
--- M.move(), with a small inter-move cooldown plus a wait for the cursor's
--- isMove flag to clear.
+-- M.move_via_next_position() — the input-pipeline path that mimics player
+-- input. A small inter-move cooldown plus a wait for the cursor's isMove
+-- flag prevents us from outpacing the engine's per-cell transition.
 
 local _plan_queue = {}
 local _plan_dispatch_cooldown = 0   -- frames remaining before next dispatch
@@ -1061,7 +1170,7 @@ function M.tick_plan()
     if M.is_unit_moving() then return end
 
     local dir = table.remove(_plan_queue, 1)
-    local ok, msg = M.move(dir)
+    local ok, msg = M.move_via_next_position(dir)
     _plan_last_msg = string.format("move %s: %s",
                                    dir, tostring(msg or (ok and "ok" or "error")))
     log.info("tick_plan: " .. _plan_last_msg)
@@ -1077,29 +1186,13 @@ function M.tick_plan()
         return
     end
 
-    -- If this was the last move AND the cursor is now on the Goal, set
-    -- _RequestForceSuccess=true on the PuzzleSnake instance. The engine
-    -- polls this field each tick and runs the full natural completion
-    -- flow when set: COMPLETE overlay, hack damage commit, dialogue
-    -- progression, and auto-reset for chain-hacking.
-    if #_plan_queue == 0 then
-        local on_goal = false
-        local unit = _resolve_unit()
-        if unit ~= nil then
-            local pos = _read_cursor_pos(unit)
-            if pos ~= nil then
-                local state = M.get_state()
-                if state and state.goal then
-                    on_goal = (pos.x == state.goal.x and pos.y == state.goal.y)
-                end
-            end
-        end
-        if on_goal then
-            local fok, fmsg = M.try_set_request_force_success()
-            log.info("tick_plan: cursor reached Goal — _RequestForceSuccess: "
-                  .. tostring(fok) .. " " .. tostring(fmsg))
-        end
-    end
+    -- Goal arrival auto-completes the puzzle now — the engine's
+    -- updatePuzzleMovement → onEnterGrid pipeline runs the full natural
+    -- completion (COMPLETE overlay, hack damage commit, dialogue
+    -- progression, auto-reset) when the cursor enters the Goal cell.
+    -- The old code wrote _RequestForceSuccess on goal arrival as a
+    -- workaround for Unit.move(via.Int2) bypassing the goal check;
+    -- that's unnecessary on the input-pipeline path.
 end
 
 

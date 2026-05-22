@@ -317,7 +317,7 @@ re.on_draw_ui(function()
     imgui.same_line()
     if imgui.button("Can-reach right") then try_can_reach("right") end
 
-    imgui.text("Move (cursor must be in a hack):")
+    imgui.text("Move (Unit.move direct — bypasses cell side-effects):")
     if imgui.button("Move up") then try_move("up") end
     imgui.same_line()
     if imgui.button("Move down") then try_move("down") end
@@ -325,6 +325,35 @@ re.on_draw_ui(function()
     if imgui.button("Move left") then try_move("left") end
     imgui.same_line()
     if imgui.button("Move right") then try_move("right") end
+
+    -- Experimental: write _NextMovePosition and let the engine's input
+    -- pipeline (updateInput → updatePuzzleMovement → onEnterGrid) process
+    -- the move. If this works, cell side-effects (walls, skill cells,
+    -- goal auto-complete) should engage naturally and the tick_plan path
+    -- can be migrated to use it.
+    local nmp = snake.read_next_move_position()
+    if nmp then
+        imgui.text(string.format("_NextMovePosition (current): (%d, %d)", nmp.x, nmp.y))
+    else
+        imgui.text("_NextMovePosition (current): <unreadable>")
+    end
+
+    local function try_nmp_move(dir)
+        local ok, msg = snake.move_via_next_position(dir)
+        log.info("hacking_debug: move_via_next_position(" .. dir .. ") ok="
+              .. tostring(ok) .. " msg=" .. tostring(msg))
+        _last_test_outcome = (ok and "nmp " or "nmp " .. dir .. " FAILED: ")
+                          .. dir .. ": " .. tostring(msg)
+    end
+
+    imgui.text("Move (_NextMovePosition write — experimental, engine handles cell logic):")
+    if imgui.button("NMP up") then try_nmp_move("up") end
+    imgui.same_line()
+    if imgui.button("NMP down") then try_nmp_move("down") end
+    imgui.same_line()
+    if imgui.button("NMP left") then try_nmp_move("left") end
+    imgui.same_line()
+    if imgui.button("NMP right") then try_nmp_move("right") end
 
     imgui.separator()
     if imgui.tree_node("Plan dispatch (Unit.move sequence)") then
