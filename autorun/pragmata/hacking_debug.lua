@@ -143,13 +143,25 @@ re.on_draw_ui(function()
 
     imgui.separator()
 
+    imgui.text("HackingManager singleton: " .. bool_text(s.hacking_mgr_present))
+    imgui.text("IsTargetedEnemy: " .. bool_text(s.is_targeted_enemy))
+    imgui.text("LastHackingTarget set: " .. bool_text(s.has_target_unit))
+    imgui.text("Known PuzzleSnake instances: " .. tostring(s.known_instance_count or 0))
     if s.instance_cached then
-        imgui.text("Active instance: CACHED (alive)")
+        imgui.text("Active instance (matched to target): YES")
     else
-        imgui.text("Active instance: <none cached>")
+        imgui.text("Active instance (matched to target): no")
     end
     imgui.text("GUI handle present: " .. bool_text(s.gui_handle_present))
     imgui.text("is_active(): " .. bool_text(s.active))
+
+    -- _State reading. Per the il2cpp dump, PuzzleState is Play|Stop; the
+    -- format strongly suggests Play=1, Stop=0. Confirm visually by watching
+    -- this value flip as a puzzle starts/ends.
+    local state_val = snake.read_state_value()
+    imgui.text("_State (PuzzleBase): " .. tostring(state_val)
+            .. "  (best inference: Play=1, Stop=0)")
+    imgui.text("is_interactive(): " .. bool_text(snake.is_interactive()))
 
     if s.grid_dims then
         imgui.text(string.format("Grid: %dx%d", s.grid_dims.width, s.grid_dims.height))

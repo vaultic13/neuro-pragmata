@@ -64,6 +64,7 @@ local _sdk = {
     grid_cell_td = nil,      -- app.PuzzleSnake.Grid (per-cell type)
     unit_td = nil,           -- app.PuzzleSnake.Unit
     grid_type_td = nil,      -- app.PuzzleSnakeGridType (for getName)
+    hacking_mgr_td = nil,    -- app.HackingManager
     m_get_size_x = nil,
     m_get_size_y = nil,
     m_get_start_pos = nil,
@@ -74,10 +75,13 @@ local _sdk = {
     m_get_name = nil,
 }
 
--- Most recently constructed PuzzleSnake instance. Updated on .ctor hook;
--- the engine reuses the same object across hack sessions on the same enemy,
--- so we mostly just keep tracking the last-seen one.
-local _active_instance = nil
+-- All PuzzleSnake instances we've observed via hooks. The engine keeps one
+-- alive per hackable enemy in the level, so we can't pick a single "active"
+-- one — instead we collect every instance the hooks fire on and pick the
+-- right one at lookup time using HackingManager.LastHackingTarget as the
+-- discriminator. (Earlier attempts to filter by `_GuiHandle` or other
+-- per-instance flags fail because every enemy's puzzle has them set.)
+local _known_instances = {}
 
 -- Track init outcomes for the debug panel.
 local _init_report = {
@@ -106,6 +110,74 @@ local function log_discovery(line)
 end
 
 
+-- Add `inst` to the known-instances set. Hooks call this; lookup is later.
+local function _track_instance(inst, source)
+    if inst == nil then return end
+
+    -- Sweep dead entries while we're here; managed-object handles become
+    -- invalid when the engine destroys them, and get_type_definition() is
+    -- the cheapest test for liveness.
+    for i = #_known_instances, 1, -1 do
+        local existing = _known_instances[i]
+        if existing == inst then
+            return  -- already tracked
+        end
+        local ok = pcall(function() return existing:get_type_definition() end)
+        if not ok then
+            table.remove(_known_instances, i)
+            log_discovery("dropped dead instance (remaining=" .. #_known_instances .. ")")
+        end
+    end
+
+    table.insert(_known_instances, inst)
+    log_discovery("instance tracked via " .. source
+               .. " (total=" .. #_known_instances .. ")")
+end
+
+
+-- Resolve the singleton HackingManager. Cached after first success.
+local _hacking_mgr = nil
+local function _get_hacking_manager()
+    if _hacking_mgr ~= nil then
+        local ok = pcall(function() return _hacking_mgr:get_type_definition() end)
+        if ok then return _hacking_mgr end
+        _hacking_mgr = nil
+    end
+    local ok, mgr = pcall(function()
+        return sdk.get_managed_singleton("app.HackingManager")
+    end)
+    if ok and mgr ~= nil then
+        _hacking_mgr = mgr
+    end
+    return _hacking_mgr
+end
+
+
+-- Returns (target_unit, is_targeted) where target_unit is the PuzzleUnit
+-- that HackingManager currently considers the hacking target, or nil if no
+-- enemy is currently being aimed at. The is_targeted flag distinguishes
+-- "no current target" from "target set but stale" — when false, callers
+-- should treat the answer as "no active puzzle" regardless of target.
+local function _resolve_target_unit()
+    local mgr = _get_hacking_manager()
+    if mgr == nil then return nil, false end
+
+    local is_targeted = false
+    local ok_t, t = pcall(function()
+        return mgr:get_field("<IsTargetedEnemy>k__BackingField")
+    end)
+    if ok_t and t == true then is_targeted = true end
+
+    local target = nil
+    local ok_l, l = pcall(function()
+        return mgr:get_field("<LastHackingTarget>k__BackingField")
+    end)
+    if ok_l then target = l end
+
+    return target, is_targeted
+end
+
+
 local function ensure_init()
     if _sdk.inited then return _sdk.snake_td ~= nil end
     _sdk.inited = true
@@ -127,6 +199,7 @@ local function ensure_init()
     _sdk.grid_cell_td     = td("app.PuzzleSnake.Grid")
     _sdk.unit_td          = td("app.PuzzleSnake.Unit")
     _sdk.grid_type_td     = td("app.PuzzleSnakeGridType")
+    _sdk.hacking_mgr_td   = td("app.HackingManager")
 
     _init_report.snake_td     = _sdk.snake_td ~= nil
     _init_report.accessor_td  = _sdk.grid_accessor_td ~= nil
@@ -156,7 +229,11 @@ local function ensure_init()
     _init_report.m_unit_can_reach   = _sdk.m_unit_can_reach   ~= nil
     _init_report.m_unit_get_is_move = _sdk.m_unit_get_is_move ~= nil
 
-    -- Two parallel instance-discovery paths. Whichever fires first wins.
+    -- Two instance-discovery paths feed _track_instance. The engine keeps
+    -- one PuzzleSnake per hackable enemy in the level — both hooks simply
+    -- ADD to a known-instances set rather than trying to pick "the" current
+    -- one. Lookup-time discrimination via HackingManager.LastHackingTarget
+    -- does that job.
 
     -- Hook the constructor. Catches NEW instances on creation.
     local ctor_method = _sdk.snake_td:get_method(".ctor")
@@ -168,8 +245,7 @@ local function ensure_init()
                     -- pre-hook: capture `this` while it's still alive in args[2]
                     local ok_t, inst = pcall(function() return sdk.to_managed_object(args[2]) end)
                     if ok_t and inst ~= nil then
-                        _active_instance = inst
-                        log_discovery("instance cached via .ctor pre-hook")
+                        _track_instance(inst, ".ctor")
                     end
                 end,
                 function(retval) return retval end
@@ -180,10 +256,9 @@ local function ensure_init()
         _init_report.ctor_hook = "ctor method not resolvable"
     end
 
-    -- Hook a periodic update method. Catches existing instances even if the
-    -- ctor hook missed them (e.g. if the puzzle was constructed before the
-    -- mod loaded). PuzzleBase is the parent class; we try a few likely-named
-    -- update methods in order.
+    -- Hook a periodic update method. Picks up instances the ctor hook missed
+    -- (mod loaded after puzzle creation, instance pooled across hacks, etc.).
+    -- Firing for every ticked instance is fine here — _track_instance dedupes.
     local update_method = method(_sdk.snake_td, "update()")
                        or method(_sdk.snake_td, "lateUpdate()")
                        or method(_sdk.snake_td, "doUpdate()")
@@ -195,9 +270,8 @@ local function ensure_init()
                 update_method,
                 function(args)
                     local ok_t, inst = pcall(function() return sdk.to_managed_object(args[2]) end)
-                    if ok_t and inst ~= nil and _active_instance ~= inst then
-                        _active_instance = inst
-                        log_discovery("instance cached via update-method hook")
+                    if ok_t and inst ~= nil then
+                        _track_instance(inst, "update hook")
                     end
                 end,
                 function(retval) return retval end
@@ -215,23 +289,52 @@ end
 -- ---------------------------------------------------------------------------
 -- Instance lookup
 -- ---------------------------------------------------------------------------
+-- Returns the PuzzleSnake whose target PuzzleUnit matches HackingManager's
+-- current LastHackingTarget, or nil if no enemy is being aimed at (or no
+-- known instance corresponds to the target).
+--
+-- This is the linchpin of the multi-instance design: every enemy in the
+-- level has its own PuzzleSnake with its own GUI handle and trigger fields,
+-- so any per-instance "is this the active one" check is unreliable. The
+-- HackingManager singleton tracks which enemy the player is currently
+-- aimed at; we match that against PuzzleBase._TargetPuzzleUnit on each
+-- candidate.
 
 local function get_instance()
     if not ensure_init() then return nil end
 
-    if _active_instance ~= nil then
-        -- Verify the cached instance is still a valid managed object.
-        local ok = pcall(function() return _active_instance:get_type_definition() end)
-        if ok then return _active_instance end
-        _active_instance = nil
+    -- Garbage-collect dead handles before the lookup, so a stale entry
+    -- doesn't shadow a live one that happens to share a target reference.
+    for i = #_known_instances, 1, -1 do
+        local existing = _known_instances[i]
+        local ok = pcall(function() return existing:get_type_definition() end)
+        if not ok then
+            table.remove(_known_instances, i)
+            log_discovery("dropped dead instance (remaining=" .. #_known_instances .. ")")
+        end
     end
 
-    -- Last-resort: try a managed-singleton lookup. PuzzleSnake isn't normally
-    -- a singleton, but some engine configs expose it that way.
-    local ok, inst = pcall(function() return sdk.get_managed_singleton("app.PuzzleSnake") end)
-    if ok and inst ~= nil then
-        _active_instance = inst
-        return inst
+    -- Look up the most recently targeted enemy. We don't gate on
+    -- `IsTargetedEnemy` — observed in testing, that bool means something
+    -- narrower than "the player is currently aimed at an enemy" (likely
+    -- "actively in the hack-input phase"). LastHackingTarget is set
+    -- whenever the player has aimed at any hackable enemy in the level,
+    -- which is the lookup we want. The "is this puzzle currently on
+    -- screen" check happens in is_active() via the matched instance's
+    -- _GuiHandle.
+    local target_unit, _is_targeted = _resolve_target_unit()
+    if target_unit == nil then return nil end
+
+    -- Find the PuzzleSnake whose _TargetPuzzleUnit (inherited from
+    -- PuzzleBase) is the targeted enemy. == on managed-object handles is
+    -- reference equality, which is what we want.
+    for _, inst in ipairs(_known_instances) do
+        local ok, this_target = pcall(function()
+            return inst:get_field("_TargetPuzzleUnit")
+        end)
+        if ok and this_target == target_unit then
+            return inst
+        end
     end
 
     return nil
@@ -253,10 +356,15 @@ end
 -- Lifecycle queries
 -- ---------------------------------------------------------------------------
 
--- Active means: a hack is currently running. We approximate this by checking
--- that the instance is alive AND a finish hasn't been triggered. The triggers
--- are EDGE booleans set by the engine for one frame; the observer tracks them
--- across frames. For one-shot queries, "active" is best-effort.
+-- Active means: the player is currently aimed at the matched enemy AND
+-- the puzzle's UI is up. `get_instance()` returns whoever is the most
+-- recently aimed-at puzzle even after the player drops aim, so we
+-- additionally check `_GuiHandle` (the engine's "this puzzle is on
+-- screen" signal). With instance discovery stable via the multi-instance
+-- set, the GUI handle is now a reliable per-instance signal — the
+-- earlier "GUI handle lingers indefinitely" symptom was caused by the
+-- cache thrashing between enemies, not by the field being set on all of
+-- them at once.
 function M.is_active()
     local inst = get_instance()
     if inst == nil then return false end
@@ -264,13 +372,49 @@ function M.is_active()
     if read_bool(inst, "_SuccessTrigger", false) then return false end
     if read_bool(inst, "_FailedTrigger", false) then return false end
 
-    -- _StartTrg is a one-frame edge, so we can't rely on its current value to
-    -- mean "still active". Heuristic: if the GUI handle is non-nil, the
-    -- puzzle UI is up.
     local ok, gui = pcall(function() return inst:get_field("_GuiHandle") end)
     if ok and gui ~= nil then return true end
 
     return false
+end
+
+
+-- Return an identity-comparable handle for the puzzle that's *currently
+-- on screen* (matched to LastHackingTarget AND has a live GUI handle),
+-- or nil. The observer uses this to detect target switches without
+-- relying on _StartTrg firing twice. Gating on is_active() (rather than
+-- raw IsTargetedEnemy) avoids both directions of error: false during
+-- aim-without-hack-input, and false-positive across aim-drop windows.
+function M.get_active_target_handle()
+    if not M.is_active() then return nil end
+    return get_instance()
+end
+
+
+-- Read PuzzleBase._State (an Int32-backed enum, PuzzleState: Play|Stop).
+-- Per the il2cpp dump, encoded values strongly suggest Play=1 and Stop=0.
+-- Returns the raw integer, or nil if unreadable.
+function M.read_state_value()
+    local inst = get_instance()
+    if inst == nil then return nil end
+    local ok, v = pcall(function() return inst:get_field("_State") end)
+    if not ok then return nil end
+    if type(v) == "number" then return v end
+    return nil
+end
+
+
+-- True iff the puzzle is currently in the Play state (i.e. accepting input,
+-- not in a post-hack disabled / cooldown state). Conservatively returns
+-- true when `_State` is unreadable so we don't false-negative on a future
+-- build where the field name has changed — the alternative would silently
+-- break every legitimate hack force. The debug panel surfaces the raw
+-- value so divergence is easy to spot.
+function M.is_interactive()
+    if not M.is_active() then return false end
+    local v = M.read_state_value()
+    if v == nil then return true end
+    return v ~= 0
 end
 
 
@@ -769,11 +913,33 @@ function M.can_move(direction)
 end
 
 
+-- Read grid dimensions cheaply (no full cell iteration).
+local function _read_grid_dims()
+    local inst = get_instance()
+    if inst == nil then return nil, nil end
+    local acc = get_accessor(inst)
+    if acc == nil then return nil, nil end
+    if _sdk.m_get_size_x == nil or _sdk.m_get_size_y == nil then
+        return nil, nil
+    end
+    local ok_w, w = pcall(function() return _sdk.m_get_size_x:call(acc) end)
+    local ok_h, h = pcall(function() return _sdk.m_get_size_y:call(acc) end)
+    if not ok_w or not ok_h or type(w) ~= "number" or type(h) ~= "number" then
+        return nil, nil
+    end
+    return w, h
+end
+
+
 -- Move the cursor one cell in `direction`. Returns:
 --   (true, result_string) on a successful engine call (note: "successful
 --     call" doesn't mean the move was *legal* — read result_string for the
 --     move-result enum value the engine returned)
---   (false, error_string) if the call couldn't be made at all
+--   (false, error_string) if the call couldn't be made at all OR the
+--     target is out of bounds (we reject OOB locally so the cursor doesn't
+--     get stuck — Unit.move(via.Int2) is an absolute-target API and
+--     happily accepts coords outside the grid, leaving the cursor in a
+--     position no further input can rescue)
 function M.move(direction)
     local delta = DIR_DELTAS[direction]
     if delta == nil then return false, "invalid direction: " .. tostring(direction) end
@@ -789,6 +955,18 @@ function M.move(direction)
     if pos == nil then return false, "couldn't read cursor position" end
     local target_x = pos.x + delta.x
     local target_y = pos.y + delta.y
+
+    -- Bounds check. If dims are unreadable we let the call through —
+    -- safer to risk one OOB move than to false-negative a legitimate
+    -- one when introspection is broken.
+    local w, h = _read_grid_dims()
+    if w ~= nil and h ~= nil then
+        if target_x < 0 or target_x >= w or target_y < 0 or target_y >= h then
+            return false, string.format(
+                "move %s rejected: target (%d,%d) out of bounds (grid %dx%d)",
+                direction, target_x, target_y, w, h)
+        end
+    end
 
     local ok, name, result = _try_call_with_int2(unit, _sdk.m_unit_move, target_x, target_y)
     if not ok then
@@ -889,6 +1067,16 @@ function M.tick_plan()
     log.info("tick_plan: " .. _plan_last_msg)
     _plan_dispatch_cooldown = _plan_cooldown_frames
 
+    -- Abort the rest of the queue on a rejected move (OOB, no unit, etc.).
+    -- Continuing would dispatch follow-up moves from a position the plan
+    -- didn't expect — better to stop and let the AI replan if it wants.
+    if not ok then
+        log.warn("tick_plan: move rejected; dropping remaining "
+              .. tostring(#_plan_queue) .. " queued moves")
+        _plan_queue = {}
+        return
+    end
+
     -- If this was the last move AND the cursor is now on the Goal, set
     -- _RequestForceSuccess=true on the PuzzleSnake instance. The engine
     -- polls this field each tick and runs the full natural completion
@@ -956,20 +1144,26 @@ end
 -- Debug introspection (used by hacking_debug.lua ImGui panel)
 -- ---------------------------------------------------------------------------
 
--- Force a re-discovery attempt, returning a snapshot of what worked.
+-- Clear the entire known-instances set. The hooks will repopulate as the
+-- engine ticks PuzzleSnake instances. Useful for debugging cache-vs-engine
+-- divergence — production code shouldn't need it now that lookup is
+-- discriminated by HackingManager.
+function M.invalidate_instance()
+    if #_known_instances > 0 then
+        log_discovery("known-instances set cleared by caller")
+        _known_instances = {}
+    end
+    _hacking_mgr = nil
+end
+
+
+-- Force a re-discovery attempt, returning a snapshot of state.
 function M.debug_discover()
     ensure_init()
     log_discovery("manual discover requested")
-
-    -- Try the singleton path again (it's cheap and might succeed late).
-    local ok, inst = pcall(function() return sdk.get_managed_singleton("app.PuzzleSnake") end)
-    if ok and inst ~= nil then
-        _active_instance = inst
-        log_discovery("instance resolved via get_managed_singleton")
-    end
-
     return {
-        instance_cached = _active_instance ~= nil,
+        instance_cached = get_instance() ~= nil,
+        known_count     = #_known_instances,
         init_report     = _init_report,
         log             = _discovery_log,
     }
@@ -1032,14 +1226,19 @@ end
 -- Return a status snapshot for the debug panel. Cheap to call every frame.
 function M.debug_status()
     ensure_init()
-    local inst = _active_instance
+    local inst = get_instance()
+    local target_unit, is_targeted = _resolve_target_unit()
     local s = {
-        init_report     = _init_report,
-        instance_cached = inst ~= nil,
-        triggers        = {},
-        active          = false,
-        grid_dims       = nil,
-        cursor          = nil,
+        init_report          = _init_report,
+        instance_cached      = inst ~= nil,
+        known_instance_count = #_known_instances,
+        hacking_mgr_present  = _get_hacking_manager() ~= nil,
+        is_targeted_enemy    = is_targeted,
+        has_target_unit      = target_unit ~= nil,
+        triggers             = {},
+        active               = false,
+        grid_dims            = nil,
+        cursor               = nil,
     }
     if inst == nil then return s end
 
