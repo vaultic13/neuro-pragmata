@@ -101,6 +101,13 @@ User-tunable settings live in [`autorun/pragmata/mod_config.lua`](autorun/pragma
 
 - `autonomy_nudges` (default `false`) — when true, the mod emits an in-combat hint listing which abilities are currently available, encouraging the AI to use them proactively. When false, the AI only acts on direct request.
 - `autonomy_nudge_interval_frames` — minimum frames between consecutive nudges (default `1800`, i.e. ~30s at 60fps).
+- `hacking_auto_force` (default `true`) — auto-send an `actions/force` the moment a hacking grid appears, prompting the peer to plan immediately.
+- `hacking_render_legend` (default `true`) — include the cell-glyph legend in each grid render.
+- `hacking_require_reasoning` (default `false`) — require a step-by-step `reasoning` string alongside the moves (more accurate, slower).
+- `hacking_show_overlay` (default `true`) — draw the on-screen "Vera is hacking" banner while the peer is planning/executing a hack. No-ops on builds without REFramework's `draw` API.
+- `hacking_overlay_y_fraction` (default `0.10`) — vertical placement of that banner as a fraction of screen height; nudge it if it overlaps the game HUD.
+
+Two ImGui diagnostic panels are available in the REFramework menu (Insert): **Pragmata Hacking Debug** and **Pragmata Abilities Debug** (live Scan / Overdrive binding state + manual trigger buttons).
 
 Edit this file in the deployed mod directory (`reframework/autorun/pragmata/mod_config.lua`); it's re-read each game launch.
 
@@ -118,11 +125,10 @@ This is a forward-compatible extension. Lane-aware consumers can implement repla
 The hacking minigame (the `app.PuzzleSnake` cursor-routing puzzle that pops up when Diana initiates a hack) is the most fully-integrated subsystem. The flow:
 
 1. The mod observes `_StartTrg` on the active `PuzzleSnake` instance and, the moment a grid appears, sends an `actions/force` to the AI peer with the rendered grid as the `state` field and `pragmata_hack_plan` as the only allowed action.
-2. The peer returns a list of cardinal moves (`up` / `down` / `left` / `right`).
-3. The mod dispatches the moves one cell per ~130ms via `app.PuzzleSnake.Unit.move(via.Int2)`, with each move passing the cursor's current `_Position` mutated by the direction delta.
-4. When the cursor reaches the goal cell, the mod writes `PuzzleBase._RequestForceSuccess = true` on the `PuzzleSnake` instance. The engine polls this field each tick and runs its full natural completion flow (COMPLETE overlay, hack damage commit, dialogue progression, auto-reset for chain-hacking).
+2. The peer returns a list of cardinal moves (`up` / `down` / `left` / `right`). The render highlights **bonus nodes** — cells that do more damage to the enemy and make the hack last longer — and asks the peer to route through as many as possible en route to the goal (a longer bonus-collecting path beats the shortest path, as long as it still reaches the goal and avoids `X` traps and `~` trail cells).
+3. The mod dispatches the moves one cell per ~130ms by writing the target coords into `PuzzleSnake._NextMovePosition`. The engine's natural input pipeline (`updateInput → updateNextPosition → updatePuzzleMovement → onEnterGrid`) then processes each move for free: walls block, directional gates enforce, trail flags update, skill/bonus cells trigger, `EraseCode` traps fire, and **goal arrival auto-completes the puzzle** with the full COMPLETE animation. (Writing `_NextMovePosition` replaced an earlier `Unit.move(via.Int2)` + `_RequestForceSuccess` approach, which bypassed those per-cell side-effects; `Unit.move` is retained only for the debug-panel poke buttons.)
 
-Why step 4 is necessary: calling `Unit.move` directly bypasses the engine's per-cell goal-detection. The engine's natural input pipeline (controller → `updatePuzzleMovement` → cursor) sets internal flags that fire goal detection on arrival; programmatic cursor moves don't, so the puzzle would otherwise just sit on the goal cell with no completion. `_RequestForceSuccess` is the engine's own request-flag for forcing that completion path.
+While the peer is driving a hack, the mod draws an on-screen **"Vera is hacking"** banner (planning → executing move N/M → COMPLETE/FAILED) so it's clear the AI — not the player — is moving the cursor. Toggle with `hacking_show_overlay`.
 
 For full schemas, message shapes, and integration notes, see [ACTIONS.md](ACTIONS.md#pragmata_hack_plan).
 

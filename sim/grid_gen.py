@@ -157,6 +157,12 @@ class Cell:
     type: CellType
     # Only meaningful for OneWay cells; ignored otherwise.
     direction: Optional[Dir] = None
+    # True for the in-game "blue" reward nodes (the golden path: more damage +
+    # longer-lasting hack). These read as plain Open in the engine and are
+    # flagged by app.PuzzleSnake.Grid._IsGoldenPath. The generator doesn't
+    # place them yet, so this stays False for synthetic grids — the renderer
+    # supports them so its output matches what the mod sends in-game.
+    is_golden_path: bool = False
 
     def rule(self) -> _CellRule:
         if self.type is CellType.ONE_WAY and self.direction is not None:

@@ -50,8 +50,19 @@
 --   from a binding file.
 
 local log = require("pragmata.util.log")
+local player_drivers = require("pragmata.bindings.player_drivers")
 
 local M = {}
+
+-- These drivers live on the player handle's driver board, NOT in the managed-
+-- singleton registry, so they're captured live via per-frame hooks (see
+-- player_drivers.lua). Earlier this binding called get_managed_singleton on
+-- them, which always returned nil — that was why Overdrive never fired.
+local TD_PUZZLE_DRIVER     = "app.PlayerPuzzleControlDriver"
+local TD_FINISHBLOW_DRIVER = "app.PlayerFinishBlowDriver"
+
+-- Last trigger attempt result, surfaced to the abilities debug panel.
+local _last_trigger_msg = "(overdrive not triggered yet)"
 
 -- ---------------------------------------------------------------------------
 -- One-time SDK lookups
@@ -111,36 +122,25 @@ local function ensure_init()
         _state.m_gauge_full          = m(_state.gauge_unit_td, "get_Full()")
         _state.m_gauge_remaining_rate = m(_state.gauge_unit_td, "get_RemainingRate()")
     end
+
+    -- Install the per-frame capture hooks for the two player drivers. They
+    -- start populating the moment the drivers tick (i.e. once the player is
+    -- in a level), well before any overdrive attempt.
+    player_drivers.want(TD_PUZZLE_DRIVER)
+    player_drivers.want(TD_FINISHBLOW_DRIVER)
 end
 
-local function find_singleton(name)
-    local ok, inst = pcall(function() return sdk.get_managed_singleton(name) end)
-    if ok and inst ~= nil then return inst end
-    return nil
-end
-
--- Best-effort lookup. The PlayerPuzzleControlDriver and the wide-blow driver
--- are not real singletons; they live on the player handle's driver board.
--- REFramework can't enumerate generic-instantiated findDriver overloads
--- reliably, so we try a few approximations.
--- CONFIDENCE: low — same caveat as the auto-hack binding. May return nil in
--- pause/loading/non-combat scenes.
+-- The two player drivers are captured live by player_drivers.lua (per-frame
+-- hook on each driver's onUpdate). Returns nil in pause/loading/non-combat
+-- scenes where the driver isn't ticking yet.
 local function find_puzzle_driver()
-    if _state.puzzle_driver_td == nil then return nil end
-    local ok, inst = pcall(function()
-        return sdk.get_managed_singleton("app.PlayerPuzzleControlDriver")
-    end)
-    if ok and inst ~= nil then return inst end
-    return nil
+    ensure_init()
+    return player_drivers.get(TD_PUZZLE_DRIVER)
 end
 
 local function find_finishblow_driver()
-    if _state.finishblow_driver_td == nil then return nil end
-    local ok, inst = pcall(function()
-        return sdk.get_managed_singleton("app.PlayerFinishBlowDriver")
-    end)
-    if ok and inst ~= nil then return inst end
-    return nil
+    ensure_init()
+    return player_drivers.get(TD_FINISHBLOW_DRIVER)
 end
 
 local function read_gauge()
@@ -211,7 +211,7 @@ end
 -- CONFIDENCE: low — the trigger method is private in the dump and may not
 -- survive reflection invocation in all REFramework builds. The binding
 -- logs a warning so callers know to verify against in-game behaviour.
-function M.trigger()
+local function _do_trigger()
     ensure_init()
 
     if not M.is_ready() then
@@ -249,5 +249,32 @@ function M.trigger()
 
     return true, "overdrive fired"
 end
+
+
+-- Public trigger wrapper: records the last outcome for the abilities debug
+-- panel, then returns it unchanged.
+function M.trigger()
+    local ok, msg = _do_trigger()
+    _last_trigger_msg = (ok and "OK: " or "FAIL: ") .. tostring(msg)
+    return ok, msg
+end
+
+
+-- Snapshot for the abilities debug panel. Cheap to call every frame.
+function M.debug_status()
+    ensure_init()
+    local fb = find_finishblow_driver()
+    local pz = find_puzzle_driver()
+    return {
+        drivers              = player_drivers.debug_status(),
+        finishblow_driver_ok = fb ~= nil,
+        puzzle_driver_ok     = pz ~= nil,
+        gauge_fraction       = M.gauge_fraction(),
+        is_ready             = M.is_ready(),
+        request_method_ok    = _state.m_request_wide_finishblow ~= nil,
+        last_trigger_msg     = _last_trigger_msg,
+    }
+end
+
 
 return M

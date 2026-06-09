@@ -80,6 +80,26 @@ local DIRECTIONAL_TYPES = {
 }
 
 
+-- Bonus nodes the AI should route through, mapped against in-game node dumps:
+--   * BLUE  (most valuable: more damage to the enemy + longer-lasting hack).
+--     These are NOT a distinct grid type — they read as plain Open — so the
+--     engine flags them on the cell's `_IsGoldenPath` field, which the cell
+--     reader surfaces as `is_golden_path`. Rendered with the GOLDEN_GLYPH.
+--   * YELLOW (secondary: the "skill node"). This IS a distinct grid type:
+--     ActiveSkill (and its ActiveSkill1/2/3 variants), glyph `*`/`1`/`2`/`3`.
+-- Other special grid types (FinishBlow, Attack, Bomb, Chain, Purge) still
+-- render with their own glyphs, but the player hasn't identified them as
+-- collect-targets, so we don't push the AI to chase them.
+local GOLDEN_GLYPH = "O"   -- blue golden-path node
+
+local ACTIVE_SKILL_TYPES = {
+    ActiveSkill  = true,
+    ActiveSkill1 = true,
+    ActiveSkill2 = true,
+    ActiveSkill3 = true,
+}
+
+
 local function cell_glyph(cell)
     -- Cells with no entry, or "None"/"Nothing" type cells, are positions
     -- the snake can't traverse — render as '#' (impassable).
@@ -89,6 +109,14 @@ local function cell_glyph(cell)
     -- and ActiveSkill attributes are what the AI cares about; the
     -- underlying terrain (Open / Start / etc.) is less informative.
     if cell.is_erase then return GLYPHS.EraseCode end
+
+    -- Blue golden-path nodes (most valuable) read as plain Open, so they'd be
+    -- invisible on the map without an override. Render them O — but never mask
+    -- the Goal/Start terminals.
+    if cell.is_golden_path and cell.type ~= "Goal" and cell.type ~= "Start" then
+        return GOLDEN_GLYPH
+    end
+
     if cell.active_skill_type then
         local g = GLYPHS[cell.active_skill_type]
         if g then return g end
@@ -108,6 +136,22 @@ local function cell_glyph(cell)
     end
 
     return GLYPHS[cell.type] or "?"
+end
+
+
+-- Classify a bonus cell. Returns (tier, color, label) where tier 2 = blue
+-- (most valuable) and tier 1 = yellow (secondary), or nil for a non-bonus
+-- cell. Goal/Start terminals are never bonuses even if on the golden path.
+local function bonus_info(cell)
+    if cell == nil then return nil end
+    if cell.type == "Goal" or cell.type == "Start" then return nil end
+    if cell.is_golden_path then
+        return 2, "BLUE", "golden-path node: more damage + longer-lasting hack"
+    end
+    if cell.active_skill_type or (cell.type and ACTIVE_SKILL_TYPES[cell.type]) then
+        return 1, "YELLOW", "skill node"
+    end
+    return nil
 end
 
 
@@ -229,6 +273,9 @@ local function adjacency_block(state)
             -- directional gating is set, surface that; otherwise the base
             -- type. This is what the AI should reason about.
             local display_type = type_name
+            if cell and cell.is_golden_path and type_name ~= "Goal" and type_name ~= "Start" then
+                display_type = "GoldenPath"
+            end
             if cell and cell.out_way_type and DIRECTIONAL_TYPES[cell.out_way_type] then
                 display_type = cell.out_way_type
             elseif cell and cell.in_way_type and DIRECTIONAL_TYPES[cell.in_way_type] then
@@ -248,7 +295,13 @@ local function adjacency_block(state)
             elseif type_name == "EraseCode" then
                 table.insert(lines, prefix .. info .. "  DANGER: EraseCode - entering ends the hack as failure")
             else
-                table.insert(lines, prefix .. info .. "  legal")
+                local btier, bcolor, blabel = bonus_info(cell)
+                if btier then
+                    table.insert(lines, prefix .. info .. string.format(
+                        "  legal -- %s BONUS: %s", bcolor, blabel))
+                else
+                    table.insert(lines, prefix .. info .. "  legal")
+                end
             end
         end
     end
@@ -258,14 +311,71 @@ end
 
 
 -- ---------------------------------------------------------------------------
+-- Bonus-node summary
+-- ---------------------------------------------------------------------------
+-- Lists every uncollected bonus node on the grid, highest tier first, with
+-- an explicit instruction to route through as many as possible. This is the
+-- primary signal the peer uses to plan a bonus-collecting path; the goal is
+-- to maximize collected bonuses, not to take the shortest route.
+
+local function bonus_block(state)
+    local found = {}
+    for y = 0, state.height - 1 do
+        local row = state.cells[y + 1]
+        if row then
+            for x = 0, state.width - 1 do
+                local cell = row[x + 1]
+                -- Skip cells already on the trail: a bonus the cursor has
+                -- already crossed is collected, so it's not a target.
+                if cell and not cell.in_trail then
+                    local tier, color, label = bonus_info(cell)
+                    if tier then
+                        table.insert(found, {
+                            x = x, y = y, tier = tier,
+                            color = color, label = label,
+                            glyph = cell_glyph(cell),
+                        })
+                    end
+                end
+            end
+        end
+    end
+    if #found == 0 then return nil end
+
+    -- Most valuable (blue) first so the must-grab nodes read at the top.
+    table.sort(found, function(a, b)
+        if a.tier ~= b.tier then return a.tier > b.tier end
+        if a.y ~= b.y then return a.y < b.y end
+        return a.x < b.x
+    end)
+
+    local lines = {
+        "Bonus nodes - pass through as MANY as possible on the way to G. They",
+        "make the hack do more damage and last longer, so a longer, winding",
+        "route that collects more bonuses is BETTER than the shortest path - as",
+        "long as the plan still ends on G and never steps on an X (EraseCode)",
+        "trap or revisits a ~ trail cell. BLUE (O) nodes are worth the most;",
+        "grab them first, then YELLOW (*) skill nodes:",
+    }
+    for _, b in ipairs(found) do
+        table.insert(lines, string.format(
+            "  (%d, %d) [%s] %s - %s", b.x, b.y, b.glyph, b.color, b.label))
+    end
+    return table.concat(lines, "\n")
+end
+
+
+-- ---------------------------------------------------------------------------
 -- Legend
 -- ---------------------------------------------------------------------------
 
 local LEGEND =
-    "Legend: S=start G=goal .=open #=wall *=skill(stackable: 1/2/3 variants)\n" ..
-    "        b=bomb3x3 B=bomb5x5 P=purge C=chain A=attack F=finishblow s=shield\n" ..
+    "Legend: S=start G=goal .=open #=wall  @=cursor ~=trail (cannot revisit)\n" ..
+    "        O=BLUE node (golden path: most damage + longest hack - TOP priority)\n" ..
+    "        *=YELLOW skill node (1/2/3 variants) - secondary bonus\n" ..
+    "        Route through as many O and * nodes as you can en route to G.\n" ..
     "        X=ERASE_CODE (DO NOT STEP - ends hack as failure)\n" ..
-    "        @=cursor ~=trail (already-visited cells; cannot revisit)"
+    "        b=bomb3x3 B=bomb5x5 P=purge C=chain A=attack F=finishblow s=shield"
 
 
 -- ---------------------------------------------------------------------------
@@ -303,6 +413,12 @@ function M.render(state, opts)
 
     table.insert(parts, "")
     table.insert(parts, adjacency_block(state))
+
+    local bonuses = bonus_block(state)
+    if bonuses then
+        table.insert(parts, "")
+        table.insert(parts, bonuses)
+    end
 
     if with_legend then
         table.insert(parts, "")

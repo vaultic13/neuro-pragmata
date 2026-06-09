@@ -35,6 +35,16 @@ local GAUGE_THRESHOLDS = { 0.25, 0.5, 0.75, 1.0 }
 local gauge_track             = emit.threshold(GAUGE_THRESHOLDS)
 local overdrive_ready_track   = emit.edge()
 local autohack_unlock_track   = emit.edge()
+local scanning_track          = emit.edge()
+
+-- Scan results are only read while a scan is genuinely in flight. Previously
+-- the observer polled currentTargetUnits unconditionally and emitted whenever
+-- a new ping-set appeared — which fired spuriously after every loading screen
+-- (the manager keeps stale entries). Now an is_scanning() rising edge opens a
+-- short window during which results are captured; outside that window we don't
+-- look at the (possibly stale) list at all.
+local _scan_emit_window = 0
+local SCAN_EMIT_WINDOW_POLLS = 20  -- ~2s at the 6-frame poll cadence below
 
 -- --------------------------------------------------------------------
 -- Scan dedup
@@ -124,12 +134,21 @@ re.on_frame(function()
     end
 
     if scan ~= nil then
-        local results = safe_call(scan.get_results)
-        if type(results) == "table" then
-            local pings = results.pings or results
-            local summary, key = summarize_pings(pings)
-            if summary and key and scan_record_key(key) then
-                emit.narrative("Diana scanned: " .. summary .. ".")
+        -- Open a capture window on each real scan start.
+        local scanning = safe_call(scan.is_scanning)
+        scanning_track(scanning, function(now)
+            if now then _scan_emit_window = SCAN_EMIT_WINDOW_POLLS end
+        end)
+
+        if _scan_emit_window > 0 then
+            _scan_emit_window = _scan_emit_window - 1
+            local results = safe_call(scan.get_results)
+            if type(results) == "table" then
+                local pings = results.pings or results
+                local summary, key = summarize_pings(pings)
+                if summary and key and scan_record_key(key) then
+                    emit.narrative("Diana scanned: " .. summary .. ".")
+                end
             end
         end
     end

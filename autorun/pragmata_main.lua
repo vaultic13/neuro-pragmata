@@ -14,6 +14,7 @@ package.path = package.path .. ";reframework/autorun/?.lua;./reframework/autorun
 local log = require("pragmata.util.log")
 local mailbox = require("pragmata.bridge_mailbox")
 local dispatcher = require("pragmata.dispatcher")
+local config = require("pragmata.mod_config")
 local gamepad = require("pragmata.bindings.gamepad")
 local puzzle_snake = require("pragmata.bindings.puzzle_snake")
 
@@ -42,6 +43,16 @@ require("pragmata.hacking_observer")
 -- values, instance-cache status, and provides a "send synthetic test grid"
 -- button for end-to-end pipeline verification.
 require("pragmata.hacking_debug")
+
+-- "Vera is hacking" on-screen overlay. Draws a banner over the game while
+-- the AI peer is planning/executing a hack so it's clear the AI (not the
+-- player) is driving the cursor. Toggle via mod_config.hacking_show_overlay.
+require("pragmata.hacking_overlay")
+
+-- Abilities debug panel (ImGui). Renders under "Pragmata Abilities Debug";
+-- shows live Scan / Overdrive binding state (singleton + driver capture,
+-- gauge, trigger outcomes) and manual trigger buttons for in-game verification.
+require("pragmata.abilities_debug")
 
 -- ====================================================================
 -- GUI probe is loaded but DISABLED by default. Re-enable from the
@@ -131,6 +142,32 @@ dispatcher.register("pragmata_overdrive", {
 -- action as the only allowed name. The handler validates the returned
 -- plan and queues it for cursor-movement dispatch via puzzle_snake.tick_plan.
 
+-- Schema is built around the `hacking_require_reasoning` config flag.
+-- When true, the peer must emit a step-by-step trace alongside the moves
+-- (better grid-solving accuracy, more generation latency). When false,
+-- the peer can reply with `moves` alone for faster reaction.
+local hack_plan_properties = {
+    moves = {
+        type = "array",
+        items = { ["enum"] = { "up", "down", "left", "right" } },
+        minItems = 1,
+        maxItems = 32,
+    },
+}
+local hack_plan_required = { "moves" }
+if config.hacking_require_reasoning then
+    hack_plan_properties.reasoning = {
+        type = "string",
+        description = (
+            "Trace your plan one step at a time, copying the cursor "
+            .. "and goal coordinates from the state field exactly. "
+            .. "Format: '1:down(1,2)open; 2:right(2,2)open; 3:down(2,3)G'. "
+            .. "Aim for ~150 chars; one line per move."
+        ),
+    }
+    hack_plan_required = { "reasoning", "moves" }
+end
+
 dispatcher.register("pragmata_hack_plan", {
     description = (
         "Plan a path through the active hacking grid from cursor @ to Goal G.\n"
@@ -142,28 +179,19 @@ dispatcher.register("pragmata_hack_plan", {
         .. "Read the state field carefully — the cursor and goal positions "
         .. "are given there, and the Adjacency block lists which first-moves "
         .. "are legal. Use those positions verbatim; do not infer or guess.\n"
-        .. "Avoid # walls, X EraseCode traps, and ~ trail cells. Plan ends on G."
+        .. "Avoid # walls, X EraseCode traps, and ~ trail cells. Plan ends on G.\n"
+        .. "BONUS NODES: the state lists 'Bonus nodes'. Passing through them does "
+        .. "more damage to the enemy and makes the hack last longer, so route "
+        .. "through as MANY as you can. BLUE 'O' nodes (the golden path) are worth "
+        .. "the most — grab those first; YELLOW '*' skill nodes are a secondary "
+        .. "bonus. A longer, winding path that collects more bonuses is better "
+        .. "than the shortest path, as long as it still ends on G and never steps "
+        .. "on an X trap or a ~ trail cell."
     ),
     schema = {
         type = "object",
-        required = { "reasoning", "moves" },
-        properties = {
-            reasoning = {
-                type = "string",
-                description = (
-                    "Trace your plan one step at a time, copying the cursor "
-                    .. "and goal coordinates from the state field exactly. "
-                    .. "Format: '1:down(1,2)open; 2:right(2,2)open; 3:down(2,3)G'. "
-                    .. "Aim for ~150 chars; one line per move."
-                ),
-            },
-            moves = {
-                type = "array",
-                items = { ["enum"] = { "up", "down", "left", "right" } },
-                minItems = 1,
-                maxItems = 32,
-            },
-        },
+        required = hack_plan_required,
+        properties = hack_plan_properties,
     },
     handler = function(args)
         -- Check the observer's stale-plan flag: if the puzzle ended (player

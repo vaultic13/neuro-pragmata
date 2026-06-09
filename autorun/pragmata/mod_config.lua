@@ -40,4 +40,32 @@ M.hacking_auto_force = true
 -- turned off later to save tokens.
 M.hacking_render_legend = true
 
+-- Whether the `pragmata_hack_plan` action requires a `reasoning` string
+-- alongside `moves`. When true, the peer must emit a step-by-step trace
+-- before the moves, which improves grid-solving accuracy but adds
+-- noticeable generation latency. When false, the schema only requires
+-- `moves` and the peer can reply with the path directly. Default off
+-- to favor reaction speed.
+M.hacking_require_reasoning = false
+
+-- ----------------------------------------------------------------
+-- "Vera is hacking" on-screen overlay
+-- ----------------------------------------------------------------
+-- When true, the mod draws a prominent on-screen banner while the AI peer
+-- (Vera) is driving a hack — "planning route…" while waiting for her plan,
+-- then "move N/M" as the cursor is dispatched, then a brief COMPLETE /
+-- FAILED flash. This makes it obvious that Vera (not the player) is hacking,
+-- instead of it just looking like the player is hacking very slowly.
+--
+-- Uses REFramework's `draw` API (rendered over the game every frame). If a
+-- build doesn't expose `draw`, the overlay silently no-ops.
+M.hacking_show_overlay = true
+
+-- Banner placement as fractions of screen size. The banner is centered
+-- horizontally on `x_fraction` and its top sits at `y_fraction` down the
+-- screen. Default places it over the right third (where the hacking grid
+-- appears), near the top. 0 = left/top, 1 = right/bottom.
+M.hacking_overlay_x_fraction = 0.83
+M.hacking_overlay_y_fraction = 0.10
+
 return M

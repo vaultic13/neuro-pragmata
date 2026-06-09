@@ -63,6 +63,25 @@ local _last_forced_state_hash = nil
 local _pending_force_frames = 0
 local MAX_PENDING_FORCE_FRAMES = 120
 
+-- On-screen overlay result flash. on_success / on_failed set a short-lived
+-- flash so the player sees a clear "HACK COMPLETE" / "HACK FAILED" banner
+-- after Vera finishes, even though the puzzle goes inactive immediately. The
+-- frame poll counts it down; M.overlay_status() reports it to the overlay.
+local _flash_kind = nil           -- "success" | "failed" | nil
+local _flash_frames = 0
+local FLASH_DURATION_FRAMES = 150 -- ~2.5s at 60fps
+
+-- Overlay staleness safety net. is_active() can stay true after the player
+-- drops aim (the engine's _GuiHandle lingers), so the banner can't rely on it
+-- alone to clear. We hide the banner if the meaningful status hasn't changed
+-- for a while: a hack that's genuinely live keeps changing (moves dispatch
+-- ~7Hz; a plan reply flips planning->executing), so a frozen status means the
+-- hack effectively stopped (aim dropped / plan never answered).
+local _ov_last_sig = nil
+local _ov_stale_frames = 0
+local OV_STALE_EXECUTING = 150    -- ~2.5s after the last move/no change
+local OV_STALE_PLANNING  = 360    -- ~6s waiting on a plan that never comes
+
 
 -- ---------------------------------------------------------------------------
 -- Edge trackers
@@ -121,9 +140,14 @@ local function send_force(state_text)
         game = GAME,
         data = {
             state = state_text or "Hacking grid is active.",
-            query = "Hacking grid is live. Plan moves from cursor (@) to "
-                 .. "Goal (G) via pragmata_hack_plan. Read the state above "
-                 .. "for grid layout, cursor position, and adjacency hints.",
+            query = "Hacking grid is live. Plan moves from cursor (@) to Goal "
+                 .. "(G) via pragmata_hack_plan. IMPORTANT: route through as MANY "
+                 .. "bonus nodes as possible on the way -- BLUE 'O' nodes are worth "
+                 .. "the most (more damage + longer-lasting hack), then YELLOW '*' "
+                 .. "skill nodes (see the 'Bonus nodes' list in the state). A longer, "
+                 .. "winding route that collects more bonuses is better than the "
+                 .. "shortest path, as long as you still reach G and never step on an "
+                 .. "X trap or revisit a ~ trail cell.",
             ephemeral_context = true,
             action_names = { "pragmata_hack_plan" },
         },
@@ -162,11 +186,13 @@ local function _try_emit_force_from_state()
     log.info("hacking_observer: rendered "
           .. tostring(state.width) .. "x" .. tostring(state.height) .. " grid")
 
-    -- Send the rendered grid as a transient context message AND inline it
-    -- in the force state. State-field-only is sufficient for the AI to
-    -- plan against (and avoids context flooding), but the transient context
-    -- lane gives lane-aware peers a snapshot to display in dashboards/logs.
-    emit.transient("Hacking grid started:\n" .. rendered)
+    -- The grid travels to Vera as the force `state` (the decision prompt she
+    -- plans against). We deliberately do NOT also emit it on the transient
+    -- context lane: a full grid is a unique blob that won't dedup, so transient
+    -- copies piled up alongside the live one in Vera's "recent game state" and
+    -- polluted her planning prompt with stale grids. The short
+    -- emit.narrative("Hacking grid started.") breadcrumb (in on_start) is
+    -- enough for lane-aware peers/logs.
     send_force(rendered)
     return true
 end
@@ -175,6 +201,12 @@ end
 local function on_start()
     log.info("hacking_observer: _StartTrg fired")
     emit.narrative("Hacking grid started.")
+
+    -- Reset the overlay staleness so a fresh hack always shows its banner,
+    -- even if a previous hack was hidden by the staleness safety net with an
+    -- identical status signature.
+    _ov_last_sig = nil
+    _ov_stale_frames = 0
 
     -- Defer ALL readiness checks (is_active, is_interactive, get_state)
     -- to the per-frame retry loop. On first aim of a fresh enemy, the
@@ -227,6 +259,8 @@ local function on_success()
     _force_in_flight = false
     _stale_plan_expected = false
     _reset_puzzle_local_state()
+    _flash_kind = "success"
+    _flash_frames = FLASH_DURATION_FRAMES
     emit.narrative("Hack succeeded.")
 end
 
@@ -236,6 +270,8 @@ local function on_failed()
     _force_in_flight = false
     _stale_plan_expected = false
     _reset_puzzle_local_state()
+    _flash_kind = "failed"
+    _flash_frames = FLASH_DURATION_FRAMES
     emit.narrative("Hack failed.")
 end
 
@@ -262,6 +298,11 @@ end
 
 re.on_frame(function()
     _frame = _frame + 1
+
+    -- Count down the overlay result flash every frame, independent of the
+    -- poll interval below.
+    if _flash_frames > 0 then _flash_frames = _flash_frames - 1 end
+
     if (_frame % POLL_INTERVAL) ~= 0 then return end
 
     -- Each trigger is a one-frame edge field. We can read them safely each
@@ -358,6 +399,67 @@ end)
 
 function M.debug_hit_counts()
     return _hit_counts
+end
+
+
+-- Status for the on-screen overlay (hacking_overlay.lua). Returns:
+--   { phase = "idle"|"planning"|"executing"|"success"|"failed",
+--     executed = <number>, total = <number> }   -- counts only when executing
+-- "planning"  : a force is out to Vera; we're waiting for her plan reply.
+-- "executing" : Vera's plan is queued / being dispatched cell-by-cell (or the
+--               last move is animating to the goal).
+-- "success"/"failed": short-lived flash after the hack resolves.
+function M.overlay_status()
+    -- Result flash takes priority and persists briefly even after the puzzle
+    -- goes inactive, so COMPLETE / FAILED stays visible for a beat.
+    if _flash_frames > 0 and _flash_kind ~= nil then
+        _ov_stale_frames = 0
+        _ov_last_sig = nil
+        return { phase = _flash_kind }
+    end
+
+    -- Work out the candidate phase. We gate on is_interactive() (not just
+    -- is_active()): it additionally checks the puzzle's _State, which drops out
+    -- of the Play state when the player cancels — catching cancels that
+    -- is_active() misses because the engine's _GuiHandle lingers.
+    local phase, executed, total = nil, 0, 0
+    if snake.is_interactive() then
+        local ps = snake.plan_status()
+        if ps.queue_size and ps.queue_size > 0 then
+            phase, executed, total = "executing", ps.executed or 0, ps.total or 0
+        elseif ps.total and ps.total > 0 then
+            -- Plan dispatched, puzzle still live (last move animating, or Vera
+            -- under-planned and the cursor is parked).
+            phase, executed, total = "executing", ps.total, ps.total
+        elseif _force_in_flight or _pending_force_frames > 0 then
+            -- Force out, no moves yet => waiting on the plan. Gating on the
+            -- force flag means a manual (non-AI) hack shows no banner.
+            phase = "planning"
+        end
+    end
+
+    if phase == nil then
+        _ov_stale_frames = 0
+        _ov_last_sig = nil
+        return { phase = "idle" }
+    end
+
+    -- Staleness safety net: if the meaningful status is frozen for too long,
+    -- the hack has effectively stopped (aim dropped while _GuiHandle/_State
+    -- linger, or a plan request that was never answered). Hide the banner.
+    local sig = phase .. ":" .. tostring(executed) .. "/" .. tostring(total)
+    if sig == _ov_last_sig then
+        _ov_stale_frames = _ov_stale_frames + 1
+    else
+        _ov_stale_frames = 0
+        _ov_last_sig = sig
+    end
+    local limit = (phase == "planning") and OV_STALE_PLANNING or OV_STALE_EXECUTING
+    if _ov_stale_frames > limit then
+        return { phase = "idle" }
+    end
+
+    return { phase = phase, executed = executed, total = total }
 end
 
 

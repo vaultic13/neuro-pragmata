@@ -513,18 +513,34 @@ local function read_cell(cell_obj)
     local in_way_hash  = read_uint_field("<InWayType>k__BackingField")
     local out_way_hash = read_uint_field("<OutWayType>k__BackingField")
 
+    -- The visible "blue" reward nodes (more damage + longer hack) aren't a
+    -- distinct _GridType — they read as plain Open. The engine marks them via
+    -- the "GoldenPath" fields on the cell (_IsGoldenPath bool + Next/Prev
+    -- links forming a route). We read _IsGoldenPath as the blue marker. The
+    -- "yellow" skill node, by contrast, IS a distinct type (ActiveSkill).
+    -- IsParryHacking / ActiveSkillCount / ActiveSkillIndex are read too so the
+    -- debug dump can disambiguate which field actually flags a given node.
+    local is_golden_path   = read_bool(cell_obj, "_IsGoldenPath", false)
+    local is_parry_hacking = read_bool(cell_obj, "<IsParryHacking>k__BackingField", false)
+    local active_skill_count = read_uint_field("<ActiveSkillCount>k__BackingField")
+    local active_skill_index = read_uint_field("<ActiveSkillIndex>k__BackingField")
+
     return {
         x = pos.x, y = pos.y,
-        type_hash         = type_hash,
-        type              = resolve_type_name(type_hash),
-        in_trail          = in_trail,
-        is_erase          = is_erase,
-        active_skill_hash = active_skill_hash,
-        active_skill_type = active_skill_type,
-        in_way_hash       = in_way_hash,
-        in_way_type       = in_way_hash and resolve_type_name(in_way_hash) or nil,
-        out_way_hash      = out_way_hash,
-        out_way_type      = out_way_hash and resolve_type_name(out_way_hash) or nil,
+        type_hash          = type_hash,
+        type               = resolve_type_name(type_hash),
+        in_trail           = in_trail,
+        is_erase           = is_erase,
+        active_skill_hash  = active_skill_hash,
+        active_skill_type  = active_skill_type,
+        active_skill_count = active_skill_count,
+        active_skill_index = active_skill_index,
+        in_way_hash        = in_way_hash,
+        in_way_type        = in_way_hash and resolve_type_name(in_way_hash) or nil,
+        out_way_hash       = out_way_hash,
+        out_way_type       = out_way_hash and resolve_type_name(out_way_hash) or nil,
+        is_golden_path     = is_golden_path,
+        is_parry_hacking   = is_parry_hacking,
     }
 end
 
@@ -1119,6 +1135,8 @@ local _plan_queue = {}
 local _plan_dispatch_cooldown = 0   -- frames remaining before next dispatch
 local _plan_cooldown_frames = 8     -- ~130ms at 60fps
 local _plan_last_msg = nil          -- diagnostic: last move() result
+local _plan_total = 0               -- moves in the most recently queued plan
+                                    -- (for progress display; see plan_status)
 
 function M.queue_plan(directions)
     if type(directions) ~= "table" then return 0 end
@@ -1129,17 +1147,26 @@ function M.queue_plan(directions)
             queued = queued + 1
         end
     end
+    -- The dispatcher clears before queueing, so the queue length right after
+    -- the append loop is the full plan size — record it for progress display.
+    _plan_total = #_plan_queue
     return queued
 end
 
 function M.clear_plan()
     _plan_queue = {}
     _plan_dispatch_cooldown = 0
+    _plan_total = 0
 end
 
 function M.plan_status()
+    local queue_size = #_plan_queue
     return {
-        queue_size  = #_plan_queue,
+        queue_size  = queue_size,
+        total       = _plan_total,
+        -- Moves already dispatched off the most recent plan. Clamped at 0 in
+        -- case the queue was extended out-of-band.
+        executed    = math.max(0, _plan_total - queue_size),
         cooldown    = _plan_dispatch_cooldown,
         active      = M.is_active(),
         unit_moving = M.is_unit_moving(),

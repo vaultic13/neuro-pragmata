@@ -20,6 +20,10 @@ reframework/data/
 *.swp
 *~
 
+# Local agent context (not for upstream)
+CLAUDE.md
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -52,6 +52,11 @@ local log = require("pragmata.util.log")
 
 local M = {}
 
+-- Last scan-trigger outcome, surfaced to the abilities debug panel so the
+-- failure mode ("singleton nil" vs "method returned false" vs "errored") is
+-- visible in-game without tailing the log.
+local _last_scan_msg = "(scan not triggered yet)"
+
 -- ---------------------------------------------------------------------------
 -- One-time SDK lookups
 -- ---------------------------------------------------------------------------
@@ -119,24 +124,67 @@ end
 -- ---------------------------------------------------------------------------
 
 -- Trigger a basic environmental scan. Returns (success_bool, message).
--- CONFIDENCE: high — single direct call into the documented manager entry
--- point with the broad-mode flag.
+--
+-- The trigger path itself is unverified in-game (this is the open "scan does
+-- nothing" bug), so M.scan() now: (1) reports precisely which step failed,
+-- and (2) falls back from requestScan(false) to requestScanObjective() if the
+-- primary call is rejected/errors — they're distinct engine entry points, so
+-- one may work where the other doesn't. The detailed outcome is stashed in
+-- _last_scan_msg for the abilities debug panel.
 function M.scan()
+    ensure_init()
     local mgr = get_scan_singleton()
-    if mgr == nil or _state.m_request_scan == nil then
-        return false, "not implemented: scan manager unavailable"
+    if mgr == nil then
+        _last_scan_msg = "FAIL: scan manager singleton unavailable"
+        return false, _last_scan_msg
+    end
+    if _state.m_request_scan == nil and _state.m_request_scan_objective == nil then
+        _last_scan_msg = "FAIL: no scan trigger method resolved from the dump"
+        return false, _last_scan_msg
     end
 
-    local ok, accepted = pcall(function()
-        return _state.m_request_scan:call(mgr, false)
+    -- Primary: broad scan via requestScan(false).
+    if _state.m_request_scan ~= nil then
+        local ok, ret = pcall(function()
+            return _state.m_request_scan:call(mgr, false)
+        end)
+        if ok and ret ~= false then
+            _last_scan_msg = "OK: requestScan(false) -> " .. tostring(ret)
+            return true, "scan started (" .. _last_scan_msg .. ")"
+        end
+        _last_scan_msg = "requestScan(false) "
+            .. (ok and ("returned " .. tostring(ret)) or "raised an SDK error")
+    end
+
+    -- Fallback: objective-only scan. Only reached when the primary was
+    -- rejected/errored, so this can't cause a double-scan on the happy path.
+    if _state.m_request_scan_objective ~= nil then
+        local ok = pcall(function()
+            _state.m_request_scan_objective:call(mgr)
+        end)
+        if ok then
+            _last_scan_msg = _last_scan_msg .. "; OK fallback requestScanObjective()"
+            return true, "scan started via requestScanObjective() fallback (" .. _last_scan_msg .. ")"
+        end
+        _last_scan_msg = _last_scan_msg .. "; requestScanObjective() raised an SDK error"
+    end
+
+    log.warn("scan.scan: " .. _last_scan_msg)
+    return false, "scan not accepted (" .. _last_scan_msg .. ")"
+end
+
+
+-- True iff the manager reports a scan currently in flight. Used by the scan-
+-- result observer to gate emission on an actual scan (rather than re-reading
+-- stale currentTargetUnits after every loading screen).
+function M.is_scanning()
+    ensure_init()
+    local mgr = get_scan_singleton()
+    if mgr == nil or _state.m_get_is_scanning == nil then return false end
+    local ok, v = pcall(function()
+        return _state.m_get_is_scanning:call(mgr)
     end)
-    if not ok then
-        return false, "scan request raised an SDK error"
-    end
-    if accepted == false then
-        return false, "engine rejected scan request"
-    end
-    return true, "scan started"
+    return ok and v == true
 end
 
 -- Trigger an Object-Scan-mode scan. Currently a thin alias of scan() with a
@@ -307,5 +355,28 @@ function M.get_results()
 
     return { scanning = scanning, pings = pings }
 end
+
+
+-- Snapshot for the abilities debug panel. Cheap to call every frame.
+function M.debug_status()
+    ensure_init()
+    local mgr = get_scan_singleton()
+    local ping_count = 0
+    if mgr ~= nil then
+        local results = M.get_results()
+        if type(results) == "table" and type(results.pings) == "table" then
+            ping_count = #results.pings
+        end
+    end
+    return {
+        singleton_present    = mgr ~= nil,
+        request_scan_ok      = _state.m_request_scan ~= nil,
+        request_objective_ok = _state.m_request_scan_objective ~= nil,
+        is_scanning          = M.is_scanning(),
+        ping_count           = ping_count,
+        last_scan_msg        = _last_scan_msg,
+    }
+end
+
 
 return M

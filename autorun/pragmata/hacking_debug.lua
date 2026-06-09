@@ -238,15 +238,19 @@ re.on_draw_ui(function()
 
         emit("")
         emit("full cell list (excluding type=None padding):")
+        emit("  (gold=_IsGoldenPath, parry=IsParryHacking, skill=ActiveSkill type, skillN=ActiveSkillCount)")
         for i, c in ipairs(cells) do
             if c.type ~= "None" then
                 emit(string.format(
-                    "  [%3d] pos=(%d,%d) type=%-12s in=%-16s out=%-16s skill=%-14s erase=%-5s trail=%s",
+                    "  [%3d] pos=(%d,%d) type=%-11s gold=%-5s parry=%-5s skill=%-12s skillN=%-3s in=%-12s out=%-12s erase=%-5s trail=%s",
                     i, c.x, c.y,
                     tostring(c.type),
+                    tostring(c.is_golden_path),
+                    tostring(c.is_parry_hacking),
+                    tostring(c.active_skill_type),
+                    tostring(c.active_skill_count),
                     tostring(c.in_way_type),
                     tostring(c.out_way_type),
-                    tostring(c.active_skill_type),
                     tostring(c.is_erase),
                     tostring(c.in_trail)
                 ))

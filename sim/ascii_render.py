@@ -61,12 +61,46 @@ CURSOR_GLYPH = "@"
 TRAIL_GLYPH = "~"
 
 
+# Bonus nodes the AI should route through, mapped against in-game node dumps.
+# Keep in sync with snake_render.lua so offline prompts match the mod's output:
+#   * BLUE  (tier 2, most valuable: more damage + longer-lasting hack) — flagged
+#     by Cell.is_golden_path (the engine's _IsGoldenPath; these read as plain
+#     Open). Rendered with GOLDEN_GLYPH. The generator doesn't place these yet,
+#     so synthetic grids currently exercise only the yellow nodes below.
+#   * YELLOW (tier 1, secondary: the "skill node") — the ActiveSkill grid type
+#     (and its 1/2/3 variants), glyph */1/2/3.
+# Other special types (FinishBlow, Attack, Bomb, Chain, Purge) still render with
+# their glyphs but aren't collect-targets.
+GOLDEN_GLYPH = "O"  # blue golden-path node
+
+_ACTIVE_SKILL_TYPES = {
+    CellType.ACTIVE_SKILL, CellType.ACTIVE_SKILL_1,
+    CellType.ACTIVE_SKILL_2, CellType.ACTIVE_SKILL_3,
+}
+
+
 def cell_glyph(cell: Cell) -> str:
+    # Blue golden-path nodes read as plain Open, so render them O — but never
+    # mask the Goal/Start terminals.
+    if getattr(cell, "is_golden_path", False) \
+            and cell.type not in (CellType.GOAL, CellType.START):
+        return GOLDEN_GLYPH
     if cell.type is CellType.ONE_WAY:
         if cell.direction is None:
             return ">"  # arbitrary fallback; shouldn't happen with valid grids
         return _ONE_WAY_GLYPH[cell.direction]
     return _GLYPHS.get(cell.type, "?")
+
+
+def bonus_info(cell: Cell) -> tuple[int, str, str] | None:
+    """(tier, color, label) for a bonus cell, else None. tier 2=blue, 1=yellow."""
+    if cell.type in (CellType.GOAL, CellType.START):
+        return None
+    if getattr(cell, "is_golden_path", False):
+        return 2, "BLUE", "golden-path node: more damage + longer-lasting hack"
+    if cell.type in _ACTIVE_SKILL_TYPES:
+        return 1, "YELLOW", "skill node"
+    return None
 
 
 def render(grid: Grid, *, inline: bool = True, with_legend: bool = True,
@@ -96,16 +130,30 @@ def render(grid: Grid, *, inline: bool = True, with_legend: bool = True,
         parts.append("")
         parts.append(_adjacency_block(grid))
 
+    bonuses = _bonus_block(grid)
+    if bonuses is not None:
+        parts.append("")
+        parts.append(bonuses)
+
     if with_path_hint:
         # Lazy import to avoid module cycle.
         from .solver import solve
         plan = solve(grid)
         if plan is not None:
             parts.append("")
-            parts.append(
-                f"A legal path exists in {len(plan)} moves "
-                "(your plan should be roughly that length)."
-            )
+            if bonuses is not None:
+                # With bonus nodes present, the shortest path is a floor, not a
+                # target — a longer bonus-collecting route is the goal.
+                parts.append(
+                    f"The shortest possible path to G is {len(plan)} moves — "
+                    "that's the minimum, not the target. A longer route is "
+                    "expected and good if it collects more bonus nodes."
+                )
+            else:
+                parts.append(
+                    f"A legal path exists in {len(plan)} moves "
+                    "(your plan should be roughly that length)."
+                )
 
     if with_legend:
         parts.append("")
@@ -145,6 +193,9 @@ def _adjacency_block(grid: Grid) -> str:
         target = grid.at(nx, ny)
         target_glyph = cell_glyph(target)
         target_type = target.type.value
+        if getattr(target, "is_golden_path", False) \
+                and target.type not in (CellType.GOAL, CellType.START):
+            target_type = "GoldenPath"
         info = f"({nx}, {ny}) [{target_glyph}] {target_type}"
 
         if (nx, ny) in blocked:
@@ -163,8 +214,49 @@ def _adjacency_block(grid: Grid) -> str:
             if d not in entries:
                 lines.append(f"{label}{info}  ILLEGAL: directional cell, won't accept entry from this side")
                 continue
-        lines.append(f"{label}{info}  legal")
+        binfo = bonus_info(target)
+        if binfo is not None:
+            _, bcolor, blabel = binfo
+            lines.append(f"{label}{info}  legal — {bcolor} BONUS: {blabel}")
+        else:
+            lines.append(f"{label}{info}  legal")
 
+    return "\n".join(lines)
+
+
+def _bonus_block(grid: Grid) -> str | None:
+    """List uncollected bonus nodes, highest tier first, with the route goal.
+
+    Mirrors `bonus_block` in snake_render.lua. Returns None when the grid has
+    no bonus nodes so plain grids stay uncluttered.
+    """
+    blocked = set(grid.trail)  # cells already crossed = bonus already collected
+    found: list[tuple[int, int, int, str, str, str]] = []
+    for y in range(grid.height):
+        for x in range(grid.width):
+            if (x, y) in blocked:
+                continue
+            cell = grid.at(x, y)
+            binfo = bonus_info(cell)
+            if binfo is not None:
+                tier, color, label = binfo
+                found.append((tier, y, x, cell_glyph(cell), color, label))
+    if not found:
+        return None
+
+    # Most valuable (blue) first, then top-to-bottom / left-to-right.
+    found.sort(key=lambda t: (-t[0], t[1], t[2]))
+
+    lines = [
+        "Bonus nodes - pass through as MANY as possible on the way to G. They",
+        "make the hack do more damage and last longer, so a longer, winding",
+        "route that collects more bonuses is BETTER than the shortest path - as",
+        "long as the plan still ends on G and never steps on an X (EraseCode)",
+        "trap or revisits a ~ trail cell. BLUE (O) nodes are worth the most;",
+        "grab them first, then YELLOW (*) skill nodes:",
+    ]
+    for _tier, y, x, glyph, color, label in found:
+        lines.append(f"  ({x}, {y}) [{glyph}] {color} - {label}")
     return "\n".join(lines)
 
 
@@ -239,9 +331,11 @@ def available_moves(grid: Grid) -> list[Dir]:
 
 def legend() -> str:
     return (
-        "Legend: S=start G=goal .=open #=wall *=skill(stackable: 1/2/3 variants)\n"
-        "        b=bomb3x3 B=bomb5x5 P=purge C=chain A=attack F=finishblow s=shield\n"
+        "Legend: S=start G=goal .=open #=wall  @=cursor ~=trail (cannot revisit)\n"
+        "        O=BLUE node (golden path: most damage + longest hack - TOP priority)\n"
+        "        *=YELLOW skill node (1/2/3 variants) - secondary bonus\n"
+        "        Route through as many O and * nodes as you can en route to G.\n"
         "        X=ERASE_CODE (DO NOT STEP — ends hack as failure)\n"
         "        > < ^ v=oneway (only this direction) = | J L 7 r=twoway/corner\n"
-        "        @=cursor ~=trail (already-visited cells; cannot revisit)"
+        "        b=bomb3x3 B=bomb5x5 P=purge C=chain A=attack F=finishblow s=shield"
     )

@@ -83,7 +83,10 @@ def _parse_grid(rendered: str) -> Optional[Grid]:
     lines = rendered.splitlines()
     dims_match = None
     for line in lines:
-        m = re.match(r"Hacking grid \((\d+)x(\d+)\):", line)
+        # Header is "Hacking grid (N wide, M tall — x ranges ...)". (An older
+        # "(NxM):" form is also accepted for backward compatibility.)
+        m = re.match(r"Hacking grid \((\d+) wide, (\d+) tall", line) \
+            or re.match(r"Hacking grid \((\d+)x(\d+)\):", line)
         if m:
             dims_match = m
             break
@@ -203,19 +206,25 @@ async def _handle_connection(ws, strategy: str, rng: random.Random):
             if strategy == "timeout":
                 logger.info("timeout strategy — not responding")
                 continue
-            if last_grid is None:
-                logger.warning("force received but no grid context yet — sending empty plan")
+            # The mod inlines the grid in the force's `state` field rather than
+            # as a separate context message, so prefer parsing that; fall back
+            # to the last context-parsed grid for older transports.
+            state_text = data.get("state", "")
+            grid = _parse_grid(state_text) if state_text else None
+            grid = grid or last_grid
+            if grid is None:
+                logger.warning("force received but no grid (state or context) — sending empty plan")
                 await _send_action(ws, "pragmata_hack_plan", {"moves": []})
                 continue
 
             if strategy == "optimal":
-                moves = _plan_optimal(last_grid)
+                moves = _plan_optimal(grid)
             elif strategy == "random":
-                moves = _plan_random(last_grid, rng)
+                moves = _plan_random(grid, rng)
             elif strategy == "dumb":
-                moves = _plan_dumb(last_grid)
+                moves = _plan_dumb(grid)
             else:
-                moves = _plan_optimal(last_grid)
+                moves = _plan_optimal(grid)
 
             logger.info(f"-> action plan ({len(moves)} moves): {[m.value for m in moves]}")
             await _send_action(ws, "pragmata_hack_plan",
