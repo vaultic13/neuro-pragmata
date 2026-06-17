@@ -1,8 +1,8 @@
 # Pragmata Neuro-SDK Mod
 
-A REFramework Lua mod for [Pragmata](https://www.capcom-games.com/pragmata/) that exposes Diana's abilities and the game's world state to a Neuro-SDK-compatible AI peer. The AI can perform Diana's actions (scan, auto-hack, overdrive) and receive context updates (dialogue, gauge state, scene transitions, combat state) over a standard Neuro-SDK WebSocket connection.
+A REFramework Lua mod for [Pragmata](https://www.capcom-games.com/pragmata/) that exposes Diana's abilities and the game's world state to **Neuro**, an AI peer, over a standard Neuro-SDK WebSocket connection. Neuro can perform Diana's actions (scan, auto-hack, overdrive) and receive context updates (dialogue, gauge state, scene transitions, combat state).
 
-> **Status: experimental.** This is **not** a full, finished Neuro integration — it aims to be a useful starting point for anyone working on one. **No gameplay functionality has been tested in-game.** The author has been avoiding spoilers in order to play the game first on stream, so most bindings have only been validated against the static IL2CPP dump, not at runtime. There are probably bugs. Cinematic dialogue capture is the one piece that's been confirmed working.
+> **Status: experimental, actively developed.** This integration is built and tested as I play through Pragmata, so coverage grows over time. The hacking integration and cinematic dialogue capture are confirmed working in-game. The ability bindings (scan, auto-hack, overdrive) are derived from the static IL2CPP dump and not all runtime-verified yet, so expect bugs there.
 
 ## What's exposed
 
@@ -16,7 +16,7 @@ A REFramework Lua mod for [Pragmata](https://www.capcom-games.com/pragmata/) tha
 | `pragmata_hack_plan` | Plans a path through the active hacking grid. Auto-forced on grid-start. |
 | `pragmata_overdrive` | Fires Diana's Overdrive Protocol (requires gauge to be full). |
 
-**Context emitted to the AI** (as Neuro-SDK `context` messages):
+**Context emitted to Neuro** (as Neuro-SDK `context` messages):
 
 - Subtitle dialogue, formatted with speaker name + dialogue type
 - Hacking gauge crossings (25 / 50 / 75 / 100%)
@@ -34,9 +34,9 @@ See [ACTIONS.md](ACTIONS.md) for the full action surface, schemas, and context m
 
 ```
 +------------------------+         JSONL files        +-------------------+        WebSocket         +----------------+
-|   pragmata_main.lua    | <--- mailbox transport --> |  pragmata_mailbox |  <-- Neuro-SDK JSON -->  |   AI peer      |
-|  (in-game, Lua via     |  reframework/data/         |     (Python       |  (default                |  (your         |
-|   REFramework)         |  pragmata_mailbox/         |      sidecar)     |   ws://127.0.0.1:8000)   |   integration) |
+|   pragmata_main.lua    | <--- mailbox transport --> |  pragmata_mailbox |  <-- Neuro-SDK JSON -->  |   Neuro        |
+|  (in-game, Lua via     |  reframework/data/         |     (Python       |  (default                |  (AI peer)     |
+|   REFramework)         |  pragmata_mailbox/         |      sidecar)     |   ws://127.0.0.1:8000)   |                |
 +------------------------+                            +-------------------+                          +----------------+
 ```
 
@@ -49,7 +49,7 @@ REFramework's Lua sandbox can't open sockets, so a small Python sidecar process 
 - **Pragmata** (PC).
 - **REFramework** for Pragmata. Drop `dinput8.dll` from a [REFramework nightly](https://github.com/praydog/REFramework-nightly/releases) into the Pragmata install folder. Confirm it works by pressing **Insert** in-game and seeing the REFramework menu.
 - **Python 3.10+** with `pip` (for the sidecar).
-- A **Neuro-SDK-compatible AI peer** running and listening on a WebSocket endpoint. The mod connects out to whatever URL you configure.
+- **Neuro** (or any Neuro-SDK-compatible peer) running and listening on a WebSocket endpoint. The mod connects out to whatever URL you configure.
 
 ### One-time setup
 
@@ -79,7 +79,7 @@ REFramework's Lua sandbox can't open sockets, so a small Python sidecar process 
 
 Three things need to be running simultaneously, in any order:
 
-1. **Your Neuro-SDK AI peer** on a WebSocket port of your choice.
+1. **Neuro** on a WebSocket port of your choice.
 
 2. **The Pragmata mailbox sidecar:**
 
@@ -89,23 +89,23 @@ Three things need to be running simultaneously, in any order:
        --bridge-url "ws://127.0.0.1:8000"
    ```
 
-   (Replace the URL with your AI peer's actual endpoint. You can also set `PRAGMATA_BRIDGE_WS` instead of passing `--bridge-url`.)
+   (Replace the URL with Neuro's actual endpoint. You can also set `PRAGMATA_BRIDGE_WS` instead of passing `--bridge-url`.)
 
 3. **Pragmata** with REFramework loaded — the mod loads automatically when the game starts.
 
-When all three are running, the AI peer should see a `startup` message followed by `actions/register` listing the exposed Pragmata actions.
+When all three are running, Neuro should see a `startup` message followed by `actions/register` listing the exposed Pragmata actions.
 
 ## Configuration
 
 User-tunable settings live in [`autorun/pragmata/mod_config.lua`](autorun/pragmata/mod_config.lua):
 
-- `autonomy_nudges` (default `false`) — when true, the mod emits an in-combat hint listing which abilities are currently available, encouraging the AI to use them proactively. When false, the AI only acts on direct request.
+- `autonomy_nudges` (default `false`) — when true, the mod emits an in-combat hint listing which abilities are currently available, encouraging Neuro to use them proactively. When false, Neuro only acts on direct request.
 - `autonomy_nudge_interval_frames` — minimum frames between consecutive nudges (default `1800`, i.e. ~30s at 60fps).
-- `hacking_auto_force` (default `true`) — auto-send an `actions/force` the moment a hacking grid appears, prompting the peer to plan immediately.
+- `hacking_auto_force` (default `true`) — auto-send an `actions/force` the moment a hacking grid appears, prompting Neuro to plan immediately.
 - `hacking_render_legend` (default `true`) — include the cell-glyph legend in each grid render.
 - `hacking_require_reasoning` (default `false`) — require a step-by-step `reasoning` string alongside the moves (more accurate, slower).
 - `display_name` (default `"Neuro"`) — name shown in the on-screen hacking banner. Purely cosmetic; nothing in the wire protocol or dispatch logic reads it.
-- `hacking_show_overlay` (default `true`) — draw the on-screen "`<display_name>` is hacking" banner while the peer is planning/executing a hack. No-ops on builds without REFramework's `draw` API.
+- `hacking_show_overlay` (default `true`) — draw the on-screen "`<display_name>` is hacking" banner while Neuro is planning/executing a hack. No-ops on builds without REFramework's `draw` API.
 - `hacking_overlay_x_fraction` (default `0.5`) / `hacking_overlay_y_fraction` (default `0.08`) — horizontal/vertical placement of that banner as fractions of screen size; nudge them if it overlaps the game HUD.
 
 Two ImGui diagnostic panels are available in the REFramework menu (Insert): **Pragmata Hacking Debug** and **Pragmata Abilities Debug** (live Scan / Overdrive binding state + manual trigger buttons).
@@ -125,11 +125,11 @@ This is a forward-compatible extension. Lane-aware consumers can implement repla
 
 The hacking minigame (the `app.PuzzleSnake` cursor-routing puzzle that pops up when Diana initiates a hack) is the most fully-integrated subsystem. The flow:
 
-1. The mod observes `_StartTrg` on the active `PuzzleSnake` instance and, the moment a grid appears, sends an `actions/force` to the AI peer with the rendered grid as the `state` field and `pragmata_hack_plan` as the only allowed action.
-2. The peer returns a list of cardinal moves (`up` / `down` / `left` / `right`). The render highlights **bonus nodes** — cells that do more damage to the enemy and make the hack last longer — and asks the peer to route through as many as possible en route to the goal (a longer bonus-collecting path beats the shortest path, as long as it still reaches the goal and avoids `X` traps and `~` trail cells).
+1. The mod observes `_StartTrg` on the active `PuzzleSnake` instance and, the moment a grid appears, sends an `actions/force` to Neuro with the rendered grid as the `state` field and `pragmata_hack_plan` as the only allowed action.
+2. Neuro returns a list of cardinal moves (`up` / `down` / `left` / `right`). The render highlights **bonus nodes** — cells that do more damage to the enemy and make the hack last longer — and asks Neuro to route through as many as possible en route to the goal (a longer bonus-collecting path beats the shortest path, as long as it still reaches the goal and avoids `X` traps and `~` trail cells).
 3. The mod dispatches the moves one cell per ~130ms by writing the target coords into `PuzzleSnake._NextMovePosition`. The engine's natural input pipeline (`updateInput → updateNextPosition → updatePuzzleMovement → onEnterGrid`) then processes each move for free: walls block, directional gates enforce, trail flags update, skill/bonus cells trigger, `EraseCode` traps fire, and **goal arrival auto-completes the puzzle** with the full COMPLETE animation. (Writing `_NextMovePosition` replaced an earlier `Unit.move(via.Int2)` + `_RequestForceSuccess` approach, which bypassed those per-cell side-effects; `Unit.move` is retained only for the debug-panel poke buttons.)
 
-While the peer is driving a hack, the mod draws a prominent, HUD-styled on-screen **"`<display_name>` is hacking"** banner (planning → executing move N/M → resuming/replanning → COMPLETE/FAILED) so it's clear the AI — not the player — is moving the cursor. The displayed name comes from `display_name`; toggle the banner with `hacking_show_overlay` and reposition with the `*_fraction` settings.
+While Neuro is driving a hack, the mod draws a prominent, HUD-styled on-screen **"`<display_name>` is hacking"** banner (planning → executing move N/M → resuming/replanning → COMPLETE/FAILED) so it's clear Neuro — not the player — is moving the cursor. The displayed name comes from `display_name`; toggle the banner with `hacking_show_overlay` and reposition with the `*_fraction` settings.
 
 For full schemas, message shapes, and integration notes, see [ACTIONS.md](ACTIONS.md#pragmata_hack_plan).
 
@@ -141,7 +141,7 @@ Files under [`autorun/pragmata/bindings/`](autorun/pragmata/bindings/) reference
 
 **Mod logs `mailbox dir not ready`** — the directory `<Pragmata>/reframework/data/pragmata_mailbox/` doesn't exist. Create it manually.
 
-**Sidecar logs `bridge connection failed`** — your AI peer isn't running, or it's bound to a different port than `--bridge-url`. Check the URL.
+**Sidecar logs `bridge connection failed`** — Neuro isn't running, or it's bound to a different port than `--bridge-url`. Check the URL.
 
 **Mod doesn't load** — check `<Pragmata>/reframework/log.txt` for Lua errors. Most common cause: the `pragmata/` subfolder didn't get copied; both `pragmata_main.lua` AND the `pragmata/` directory must be inside `reframework/autorun/`.
 
@@ -149,14 +149,14 @@ Files under [`autorun/pragmata/bindings/`](autorun/pragmata/bindings/) reference
 
 **Dialogue lines aren't being captured** — verify `<Pragmata>/reframework/log.txt` shows `[pragmata] dialogue: …` lines as subtitles appear. If not, the game's GUI hierarchy may have changed in a patch; check that `UI/Asset/ui2000/gui/ui2010` still resolves.
 
-## Contributing
+## Open items
 
-This mod was developed under spoiler-isolation constraints, which means binding code received less review than transport/dispatcher code. Improvements especially welcome in:
+Binding code is the least runtime-verified part of the mod. Current open items:
 
-- Runtime-verified bindings (everything currently in `bindings/` is static-dump-derived).
+- Runtime-verifying the ability bindings (everything in `bindings/` outside the hacking path is static-dump-derived).
 - A driver-board lookup helper for hacking and overdrive (would upgrade three bindings from medium/low to high confidence).
 - Disambiguating save vs. load in `checkpoint.is_saving()`.
-- Mission/objective state binding (intentionally omitted from this version because objective text is heavily spoiler-bearing and needs a redaction strategy).
+- Mission/objective state binding (not yet implemented).
 
 ## License
 

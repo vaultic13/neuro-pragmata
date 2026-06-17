@@ -4,11 +4,11 @@ Reference for AI integrators wiring up to this mod. All wire content is standard
 
 ## Actions registered by the mod
 
-These are the actions the AI peer can invoke. They're sent to the AI as part of the `actions/register` message at mod startup.
+These are the actions Neuro can invoke. They're sent to Neuro as part of the `actions/register` message at mod startup.
 
 ### `pragmata_ping`
 
-Sanity check. Confirms the mod, sidecar, and AI peer are wired up end-to-end.
+Sanity check. Confirms the mod, sidecar, and Neuro are wired up end-to-end.
 
 - **Schema:** `{}` (no arguments)
 - **Result:** always succeeds with message `"pong"`.
@@ -42,14 +42,14 @@ Auto-hacks a target. Consumes part of the hacking gauge to bypass the manual min
 
 ### `pragmata_hack_plan`
 
-Plan a path through an active hacking grid (the `app.PuzzleSnake` minigame). Fired automatically by the mod via `actions/force` the moment a grid appears in-game (controlled by `mod_config.hacking_auto_force`, on by default). The peer reads the grid render from the force's `state` field — including cursor `@`, Goal `G`, walls `#`, EraseCode traps `X`, error nodes `d` (the red warning-triangle hazards — currently-blocked cells), an "Adjacency from cursor" block listing legal first-moves, a "Bonus nodes" block, and a glyph legend — and returns an ordered list of cardinal moves.
+Plan a path through an active hacking grid (the `app.PuzzleSnake` minigame). Fired automatically by the mod via `actions/force` the moment a grid appears in-game (controlled by `mod_config.hacking_auto_force`, on by default). Neuro reads the grid render from the force's `state` field — including cursor `@`, Goal `G`, walls `#`, EraseCode traps `X`, error nodes `d` (the red warning-triangle hazards — currently-blocked cells), an "Adjacency from cursor" block listing legal first-moves, a "Bonus nodes" block, and a glyph legend — and returns an ordered list of cardinal moves.
 
 **Bonus nodes / routing objective.** Passing the cursor through bonus nodes improves the hack — more damage to the enemy and a longer-lasting hack — and the goal is to **maximize collected bonuses**: a longer, winding path through more bonus nodes is preferred over the shortest path, as long as the plan still ends on `G` and never steps on an `X` trap, a `d` error node, or a `~` trail cell. Two node colours, mapped against in-game dumps:
 
 - **BLUE `O` (most valuable).** These ARE a distinct grid type: `Open`. Plain walkable floor is type `None`; on every grid checked against footage, the visible blue tiles are exactly the `type=Open` cells (puzzle modifiers like offense mode reskin them without changing the type). Grab these first.
 - **YELLOW `*` (secondary).** The skill node — the `ActiveSkill` grid type (with `1`/`2`/`3` variants).
 
-`_IsGoldenPath` is deliberately **not** rendered: it marks the engine's *auto-hack route* (the feature that turns nodes gold while auto-hack runs) and floods most walkable cells — treating it as the blue-node marker both buries the real bonuses in `O`s and hands the peer a pre-solved route. It remains visible in the debug dump only.
+`_IsGoldenPath` is deliberately **not** rendered: it marks the engine's *auto-hack route* (the feature that turns nodes gold while auto-hack runs) and floods most walkable cells — treating it as the blue-node marker both buries the real bonuses in `O`s and hands Neuro a pre-solved route. It remains visible in the debug dump only.
 
 The render lists both in a "Bonus nodes" block, blue first. Other special grid types (`F` FinishBlow, `A` Attack, `b`/`B` Bomb, `C` Chain, `P` Purge) still render but aren't currently treated as collect-targets. Mapping derived from the "Dump cells to log" button in the hacking debug panel, which now shows `_IsGoldenPath` / `IsParryHacking` / `_ObstacleReasons` / `_DeadFilamentType` / `_IsHide` per cell.
 
@@ -113,7 +113,7 @@ Fires Diana's Overdrive Protocol. AoE pulse that stuns and exposes weak points o
 
 ## Context messages emitted by the mod
 
-These are sent to the AI as Neuro-SDK `context` messages with `silent: true`. The `lane` field is optional (extension; pure Neuro-SDK consumers ignore it).
+These are sent to Neuro as Neuro-SDK `context` messages with `silent: true`. The `lane` field is optional (extension; pure Neuro-SDK consumers ignore it).
 
 ### Dialogue (lane: not set, accumulates)
 
@@ -142,7 +142,7 @@ Gauge crossings only fire on upward movement; downward gauge changes after firin
 | Combat starts | `Combat started.` |
 | Combat ends | `Combat ended.` |
 
-The mod intentionally does **not** pass scene names, area names, or checkpoint names to the AI peer — only opaque hash identifiers are used internally for transition detection.
+The mod intentionally does **not** pass scene names, area names, or checkpoint names to Neuro — only opaque hash identifiers are used internally for transition detection.
 
 ### Autonomy nudges (lane: `transient`, opt-in)
 
