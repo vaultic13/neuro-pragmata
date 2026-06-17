@@ -28,10 +28,14 @@ local M = {}
 -- type glyph and refine later if we encounter directional cells.
 
 local GLYPHS = {
-    -- None = engine's default "no special type" — the cell is walkable and
-    -- undecorated (most of a tutorial grid). Render same as Open.
+    -- None = engine's default "no special type" — plain walkable floor (the
+    -- majority of every observed grid).
     None             = ".",
-    Open             = ".",
+    -- Open is NOT generic floor: on every grid checked against in-game
+    -- footage, the type=Open cells are exactly the visible BLUE bonus nodes
+    -- (4-way arrow tiles; reskinned by puzzle modifiers like offense mode).
+    -- Routing through them improves the hack, so they get the bonus glyph.
+    Open             = "O",
     -- Nothing is a separate engine value; whether it's walkable in practice
     -- isn't yet confirmed. Treat as wall conservatively until we see one
     -- in a context that proves otherwise.
@@ -80,18 +84,19 @@ local DIRECTIONAL_TYPES = {
 }
 
 
--- Bonus nodes the AI should route through, mapped against in-game node dumps:
+-- Bonus nodes the AI should route through, mapped against in-game footage:
 --   * BLUE  (most valuable: more damage to the enemy + longer-lasting hack).
---     These are NOT a distinct grid type — they read as plain Open — so the
---     engine flags them on the cell's `_IsGoldenPath` field, which the cell
---     reader surfaces as `is_golden_path`. Rendered with the GOLDEN_GLYPH.
---   * YELLOW (secondary: the "skill node"). This IS a distinct grid type:
---     ActiveSkill (and its ActiveSkill1/2/3 variants), glyph `*`/`1`/`2`/`3`.
--- Other special grid types (FinishBlow, Attack, Bomb, Chain, Purge) still
--- render with their own glyphs, but the player hasn't identified them as
--- collect-targets, so we don't push the AI to chase them.
-local GOLDEN_GLYPH = "O"   -- blue golden-path node
-
+--     These ARE a distinct grid type: Open. On every grid checked, the
+--     type=Open cells line up exactly with the visible blue nodes; plain
+--     floor is type None.
+--   * YELLOW (secondary: the "skill node"): ActiveSkill (and its
+--     ActiveSkill1/2/3 variants), glyph `*`/`1`/`2`/`3`.
+-- `_IsGoldenPath` is deliberately NOT rendered: it marks the engine's
+-- auto-hack route (the feature that turns nodes gold as auto-hack runs) and
+-- floods most walkable cells, which (a) hides the real blue nodes and
+-- (b) hands the AI a pre-solved route. It stays visible in the debug dump
+-- only. Other special grid types (FinishBlow, Attack, Bomb, Chain, Purge)
+-- still render with their own glyphs but aren't collect-targets.
 local ACTIVE_SKILL_TYPES = {
     ActiveSkill  = true,
     ActiveSkill1 = true,
@@ -105,17 +110,17 @@ local function cell_glyph(cell)
     -- the snake can't traverse — render as '#' (impassable).
     if cell == nil then return "#" end
 
-    -- Decorations layered on top of the terrain take priority. EraseCode
-    -- and ActiveSkill attributes are what the AI cares about; the
-    -- underlying terrain (Open / Start / etc.) is less informative.
+    -- Decorations layered on top of the terrain take priority. EraseCode,
+    -- DeadFilament and ActiveSkill attributes are what the AI cares about;
+    -- the underlying terrain (Open / Start / etc.) is less informative.
     if cell.is_erase then return GLYPHS.EraseCode end
 
-    -- Blue golden-path nodes (most valuable) read as plain Open, so they'd be
-    -- invisible on the map without an override. Render them O — but never mask
-    -- the Goal/Start terminals.
-    if cell.is_golden_path and cell.type ~= "Goal" and cell.type ~= "Start" then
-        return GOLDEN_GLYPH
-    end
+    -- Red "error node" hazards. These are a decoration, not a _GridType —
+    -- affected cells read as plain None — so without this override they'd
+    -- render as a walkable '.'. The live marker is the _ObstacleReasons
+    -- bitmask (is_blocked); dead_filament covers the boss-content
+    -- _DeadFilamentType variant.
+    if cell.is_blocked or cell.dead_filament then return GLYPHS.DeadFilament end
 
     if cell.active_skill_type then
         local g = GLYPHS[cell.active_skill_type]
@@ -141,12 +146,17 @@ end
 
 -- Classify a bonus cell. Returns (tier, color, label) where tier 2 = blue
 -- (most valuable) and tier 1 = yellow (secondary), or nil for a non-bonus
--- cell. Goal/Start terminals are never bonuses even if on the golden path.
+-- cell. Goal/Start terminals are never bonuses.
 local function bonus_info(cell)
     if cell == nil then return nil end
     if cell.type == "Goal" or cell.type == "Start" then return nil end
-    if cell.is_golden_path then
-        return 2, "BLUE", "golden-path node: more damage + longer-lasting hack"
+    -- Hazards are never collect-targets — the danger labels must win.
+    if cell.is_erase or cell.is_blocked or cell.dead_filament
+        or cell.type == "EraseCode" or cell.type == "DeadFilament" then
+        return nil
+    end
+    if cell.type == "Open" then
+        return 2, "BLUE", "bonus node: more damage + longer-lasting hack"
     end
     if cell.active_skill_type or (cell.type and ACTIVE_SKILL_TYPES[cell.type]) then
         return 1, "YELLOW", "skill node"
@@ -273,13 +283,16 @@ local function adjacency_block(state)
             -- directional gating is set, surface that; otherwise the base
             -- type. This is what the AI should reason about.
             local display_type = type_name
-            if cell and cell.is_golden_path and type_name ~= "Goal" and type_name ~= "Start" then
-                display_type = "GoldenPath"
-            end
             if cell and cell.out_way_type and DIRECTIONAL_TYPES[cell.out_way_type] then
                 display_type = cell.out_way_type
             elseif cell and cell.in_way_type and DIRECTIONAL_TYPES[cell.in_way_type] then
                 display_type = cell.in_way_type
+            end
+            -- Hazard decoration trumps the directional overrides above: a
+            -- cell carrying an error node must read as one.
+            if cell and (cell.is_blocked or cell.dead_filament)
+                and type_name ~= "DeadFilament" then
+                display_type = "ErrorNode"
             end
             if cell and cell.active_skill_type then
                 display_type = display_type .. "/" .. cell.active_skill_type
@@ -294,6 +307,9 @@ local function adjacency_block(state)
                 table.insert(lines, prefix .. info .. "  DANGER: EraseCode - entering ends the hack as failure")
             elseif type_name == "EraseCode" then
                 table.insert(lines, prefix .. info .. "  DANGER: EraseCode - entering ends the hack as failure")
+            elseif (cell and (cell.is_blocked or cell.dead_filament))
+                or type_name == "DeadFilament" then
+                table.insert(lines, prefix .. info .. "  ILLEGAL: error node - currently blocked, cannot enter")
             else
                 local btier, bcolor, blabel = bonus_info(cell)
                 if btier then
@@ -353,9 +369,9 @@ local function bonus_block(state)
         "Bonus nodes - pass through as MANY as possible on the way to G. They",
         "make the hack do more damage and last longer, so a longer, winding",
         "route that collects more bonuses is BETTER than the shortest path - as",
-        "long as the plan still ends on G and never steps on an X (EraseCode)",
-        "trap or revisits a ~ trail cell. BLUE (O) nodes are worth the most;",
-        "grab them first, then YELLOW (*) skill nodes:",
+        "long as the plan still ends on G, never steps on an X (EraseCode)",
+        "trap or a d (error node), and never revisits a ~ trail cell. BLUE (O)",
+        "nodes are worth the most; grab them first, then YELLOW (*) skill nodes:",
     }
     for _, b in ipairs(found) do
         table.insert(lines, string.format(
@@ -370,11 +386,12 @@ end
 -- ---------------------------------------------------------------------------
 
 local LEGEND =
-    "Legend: S=start G=goal .=open #=wall  @=cursor ~=trail (cannot revisit)\n" ..
-    "        O=BLUE node (golden path: most damage + longest hack - TOP priority)\n" ..
+    "Legend: S=start G=goal .=walkable floor #=wall  @=cursor ~=trail (cannot revisit)\n" ..
+    "        O=BLUE bonus node (more damage + longer hack - TOP priority)\n" ..
     "        *=YELLOW skill node (1/2/3 variants) - secondary bonus\n" ..
     "        Route through as many O and * nodes as you can en route to G.\n" ..
     "        X=ERASE_CODE (DO NOT STEP - ends hack as failure)\n" ..
+    "        d=ERROR NODE (red warning node - BLOCKED, cannot enter)\n" ..
     "        b=bomb3x3 B=bomb5x5 P=purge C=chain A=attack F=finishblow s=shield"
 
 
@@ -395,9 +412,24 @@ function M.render(state, opts)
         state.width, state.height, state.width - 1, state.height - 1
     ))
     table.insert(parts, render_terrain(state))
+
+    -- Rows/cols removed by sticky bombs are compacted out of the layout
+    -- above; say so explicitly so the smaller grid doesn't read as an error.
+    local n_skip_r = state.skipped_rows and #state.skipped_rows or 0
+    local n_skip_c = state.skipped_cols and #state.skipped_cols or 0
+    if n_skip_r > 0 or n_skip_c > 0 then
+        table.insert(parts, string.format(
+            "NOTE: %d row(s) and %d column(s) are currently REMOVED from the grid",
+            n_skip_r, n_skip_c))
+        table.insert(parts, "(sticky bombs). The layout above is the live, playable grid.")
+    end
+
     table.insert(parts, "")
     if state.cursor then
         table.insert(parts, string.format("Cursor: (%d, %d)", state.cursor.x, state.cursor.y))
+    end
+    if state.start then
+        table.insert(parts, string.format("Start:  (%d, %d)", state.start.x, state.start.y))
     end
     if state.goal then
         table.insert(parts, string.format("Goal:   (%d, %d)", state.goal.x, state.goal.y))
@@ -409,6 +441,10 @@ function M.render(state, opts)
             table.insert(pieces, string.format("(%d,%d)", p.x, p.y))
         end
         table.insert(parts, "Visited: " .. table.concat(pieces, ", "))
+        table.insert(parts,
+            "Hack already in progress: @ is the CURRENT cursor (not the start);")
+        table.insert(parts,
+            "~ cells are already visited and CANNOT be re-entered. Plan from @.")
     end
 
     table.insert(parts, "")

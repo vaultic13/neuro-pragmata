@@ -49,12 +49,21 @@ M.hacking_render_legend = true
 M.hacking_require_reasoning = false
 
 -- ----------------------------------------------------------------
--- "Vera is hacking" on-screen overlay
+-- AI peer display name
+-- ----------------------------------------------------------------
+-- Name shown in the on-screen UI (the "<NAME> IS HACKING" banner, etc.).
+-- This repo is public, so the committed default is the generic peer name;
+-- set it locally to your peer's name before streaming. Purely cosmetic —
+-- nothing in the wire protocol or dispatch logic reads this value.
+M.display_name = "Neuro"
+
+-- ----------------------------------------------------------------
+-- "<peer> is hacking" on-screen overlay
 -- ----------------------------------------------------------------
 -- When true, the mod draws a prominent on-screen banner while the AI peer
--- (Vera) is driving a hack — "planning route…" while waiting for her plan,
--- then "move N/M" as the cursor is dispatched, then a brief COMPLETE /
--- FAILED flash. This makes it obvious that Vera (not the player) is hacking,
+-- is driving a hack — "planning route…" while waiting for the plan, then
+-- "move N/M" as the cursor is dispatched, then a brief COMPLETE / FAILED
+-- flash. This makes it obvious that the AI peer (not the player) is hacking,
 -- instead of it just looking like the player is hacking very slowly.
 --
 -- Uses REFramework's `draw` API (rendered over the game every frame). If a
@@ -63,9 +72,9 @@ M.hacking_show_overlay = true
 
 -- Banner placement as fractions of screen size. The banner is centered
 -- horizontally on `x_fraction` and its top sits at `y_fraction` down the
--- screen. Default places it over the right third (where the hacking grid
--- appears), near the top. 0 = left/top, 1 = right/bottom.
-M.hacking_overlay_x_fraction = 0.83
-M.hacking_overlay_y_fraction = 0.10
+-- screen. Default is centered near the top for prominence; nudge it if it
+-- collides with the game's own HUD. 0 = left/top, 1 = right/bottom.
+M.hacking_overlay_x_fraction = 0.5
+M.hacking_overlay_y_fraction = 0.08
 
 return M

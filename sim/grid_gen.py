@@ -84,7 +84,9 @@ ALL_DIRS = (Dir.UP, Dir.DOWN, Dir.LEFT, Dir.RIGHT)
 # ---------------------------------------------------------------------------
 # `transitions` encodes directional cells: a set of (entry_move_dir,
 # forced_exit_move_dir) pairs. None means "any direction in, any direction out".
-# `blocks_step` => can't enter at all (walls).
+# `blocks_step` => can't enter at all. Covers static walls AND the red
+#   "error nodes" (DeadFilament type / Cell.blocked decoration): in-game those
+#   carry an _ObstacleReasons bit and the engine refuses entry while it's set.
 # `fails_on_step` => stepping on it ends the hack (EraseCode).
 # `is_goal` / `is_start` are flagged for quick lookup.
 
@@ -107,6 +109,11 @@ _CORNER_TRANSITIONS = {
 }
 
 CELL_RULES: dict[CellType, _CellRule] = {
+    # None is plain walkable floor (verified live: most of every grid,
+    # including cells the engine's auto-hack route runs through). Open is
+    # the BLUE bonus node — also walkable; the bonus is handled by the
+    # renderer, not the movement rules.
+    CellType.NONE:           _CellRule(),
     CellType.OPEN:           _CellRule(),
     CellType.START:          _CellRule(is_start=True),
     CellType.GOAL:           _CellRule(is_goal=True),
@@ -120,15 +127,14 @@ CELL_RULES: dict[CellType, _CellRule] = {
     CellType.PURGE:          _CellRule(),
     CellType.ATTACK:         _CellRule(),
     CellType.FINISH_BLOW:    _CellRule(),
-    CellType.DEAD_FILAMENT:  _CellRule(),
 
     CellType.OBSTACLE:   _CellRule(blocks_step=True),
     CellType.IMPASSABLE: _CellRule(blocks_step=True),
     CellType.NOTHING:    _CellRule(blocks_step=True),
-    CellType.NONE:       _CellRule(blocks_step=True),
     CellType.SHIELD:     _CellRule(blocks_step=True),
 
     CellType.ERASE_CODE: _CellRule(fails_on_step=True),
+    CellType.DEAD_FILAMENT: _CellRule(blocks_step=True),
 
     # OneWay rules depend on the per-cell direction; built dynamically by
     # `oneway_rule(dir)`. The static entry here just blocks until refined.
@@ -157,14 +163,29 @@ class Cell:
     type: CellType
     # Only meaningful for OneWay cells; ignored otherwise.
     direction: Optional[Dir] = None
-    # True for the in-game "blue" reward nodes (the golden path: more damage +
-    # longer-lasting hack). These read as plain Open in the engine and are
-    # flagged by app.PuzzleSnake.Grid._IsGoldenPath. The generator doesn't
-    # place them yet, so this stays False for synthetic grids — the renderer
-    # supports them so its output matches what the mod sends in-game.
+    # The engine's _IsGoldenPath flag — the AUTO-HACK route marker, which
+    # floods most walkable cells. Kept for parity with live cell reads but
+    # deliberately ignored by the renderer and the rules: blue bonus nodes
+    # are the Open TYPE, not this flag.
     is_golden_path: bool = False
+    # True for the in-game red "error node" hazards (verified 2026-06-10).
+    # Like the golden path these are a decoration, not a grid type: affected
+    # cells read as plain None with a bit set in the engine's per-cell
+    # _ObstacleReasons bitmask (ObstacleGrid=1 is the red node), meaning the
+    # cell is currently impassable. Synthetic grids place them as
+    # CellType.DEAD_FILAMENT instead; this flag exists so grids reconstructed
+    # from live cell reads behave identically.
+    blocked: bool = False
+    # The engine's separate _DeadFilamentType decoration (None on standard
+    # grids; authored for dead-filament boss content). Treated as one more
+    # error-node flavor.
+    dead_filament: bool = False
 
     def rule(self) -> _CellRule:
+        if (self.blocked or self.dead_filament) \
+                and self.type is not CellType.DEAD_FILAMENT:
+            # Decorated hazard wins over the underlying terrain.
+            return CELL_RULES[CellType.DEAD_FILAMENT]
         if self.type is CellType.ONE_WAY and self.direction is not None:
             return oneway_rule(self.direction)
         return CELL_RULES[self.type]
@@ -201,6 +222,8 @@ class GenConfig:
     size: tuple[int, int] = (5, 5)            # (width, height); each in [3, 8]
     obstacle_density: float = 0.15            # fraction of non-start/goal cells
     erase_code_density: float = 0.0           # 0 in early sectors; up to ~0.10 late
+    dead_filament_density: float = 0.0        # red "error node" blockers; 0 early
+    blue_node_density: float = 0.10           # Open-type BLUE bonus nodes
     active_skill_density: float = 0.10        # any of ActiveSkill / 1/2/3
     bomb_density: float = 0.0                 # Bomb3x3 / Bomb5x5
     other_effect_density: float = 0.0         # Chain, Purge, Attack, etc.
@@ -247,7 +270,9 @@ def generate(config: GenConfig) -> Grid:
 
 def _roll(rng: random.Random, config: GenConfig) -> Grid:
     w, h = config.size
-    cells = [[Cell(type=CellType.OPEN) for _ in range(w)] for _ in range(h)]
+    # Plain floor is None (matches live grids); Open cells are the BLUE bonus
+    # nodes and get placed below like any other special type.
+    cells = [[Cell(type=CellType.NONE) for _ in range(w)] for _ in range(h)]
 
     # Place Start and Goal at random distinct positions, with a Manhattan
     # distance floor so the grid isn't trivially solved in one move.
@@ -280,6 +305,8 @@ def _roll(rng: random.Random, config: GenConfig) -> Grid:
     n_total = len(fillable) + 2  # the +2 for start/goal we already placed
     n_obstacles = int(round(config.obstacle_density * n_total))
     n_erase = int(round(config.erase_code_density * n_total))
+    n_dead_filament = int(round(config.dead_filament_density * n_total))
+    n_blue = int(round(config.blue_node_density * n_total))
     n_skill = int(round(config.active_skill_density * n_total))
     n_bomb = int(round(config.bomb_density * n_total))
     n_other = int(round(config.other_effect_density * n_total))
@@ -289,6 +316,10 @@ def _roll(rng: random.Random, config: GenConfig) -> Grid:
         cells[pos[1]][pos[0]] = Cell(type=CellType.OBSTACLE)
     for pos in _take(n_erase):
         cells[pos[1]][pos[0]] = Cell(type=CellType.ERASE_CODE)
+    for pos in _take(n_dead_filament):
+        cells[pos[1]][pos[0]] = Cell(type=CellType.DEAD_FILAMENT)
+    for pos in _take(n_blue):
+        cells[pos[1]][pos[0]] = Cell(type=CellType.OPEN)
     for pos in _take(n_skill):
         cells[pos[1]][pos[0]] = Cell(type=rng.choice(_ACTIVE_SKILL_VARIANTS))
     for pos in _take(n_bomb):

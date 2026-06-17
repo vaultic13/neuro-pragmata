@@ -5,7 +5,10 @@
 same rules and reports the outcome: reached goal / hit EraseCode / illegal move.
 
 Both share an underlying movement-rules engine that respects:
-- Cell-level walls (Obstacle, Impassable, Nothing, None, Shield)
+- Cell-level walls (Obstacle, Impassable, Nothing, Shield); None is plain
+  walkable floor and Open is the walkable BLUE bonus node
+- Red "error nodes" (DeadFilament type / Cell.blocked decoration) — currently
+  impassable cells, treated exactly like walls
 - The trap node (EraseCode — entering it is legal but ends the hack as failure)
 - Directional cells (OneWay, TwoWay*) which constrain entry/exit pairs
 - The trail: cells already in `grid.trail` cannot be re-entered
@@ -38,8 +41,9 @@ def _allowed_exits(cell: Cell, entry_dir: Optional[Dir]) -> tuple[Dir, ...]:
 def _can_enter(cell: Cell, entry_dir: Dir) -> bool:
     """Can we step onto `cell` while moving in `entry_dir`?
 
-    Returns False for walls. Returns True for EraseCode (the step is *legal*
-    but the caller is responsible for treating it as a failure outcome).
+    Returns False for walls and blocked error nodes. Returns True for
+    EraseCode (the step is *legal* but the caller is responsible for treating
+    it as a failure outcome).
     Directional cells require `entry_dir` to be one of their allowed entries.
     """
     rule = cell.rule()
@@ -61,7 +65,8 @@ def solve(grid: Grid) -> Optional[list[Dir]]:
     BFS in (x, y, entry_dir) state-space — entry_dir matters because directional
     cells permit different exits depending on how you entered. Edge cost = 1,
     so BFS is optimal. Refuses to step on EraseCode (treated as a wall for
-    pathfinding purposes; you'd never voluntarily route through one).
+    pathfinding purposes; you'd never voluntarily route through one). Blocked
+    error nodes are already walls via their rule.
     """
     sx, sy = grid.cursor
     if grid.cursor == grid.goal:
@@ -135,7 +140,8 @@ def validate_plan(grid: Grid, moves: list[Dir]) -> ValidationResult:
     """Replay `moves` from the grid's cursor and report what happens.
 
     Outcomes (in priority order):
-    - illegal:    a move violated bounds, walls, trail, or directional rules
+    - illegal:    a move violated bounds, walls/error nodes, trail, or
+                  directional rules
     - hit_erase:  plan was legal up to a step onto EraseCode
     - solved:     plan ended on the Goal cell
     - no_goal:    plan was legal but terminated without reaching the Goal
@@ -188,11 +194,15 @@ def validate_plan(grid: Grid, moves: list[Dir]) -> ValidationResult:
 
         target = grid.at(nx, ny)
         if not _can_enter(target, move):
+            blocker = target.type.value
+            if getattr(target, "blocked", False) \
+                    or getattr(target, "dead_filament", False):
+                blocker = f"error node (blocked, terrain={target.type.value})"
             return ValidationResult(
                 legal=False, reaches_goal=False, hit_erase_code=False,
                 failure_at_move_index=i,
                 reason=(
-                    f"move {i} ({move.value}) blocked by {target.type.value} "
+                    f"move {i} ({move.value}) blocked by {blocker} "
                     f"at ({nx},{ny})"
                 ),
                 visited_path=visited_path, final_position=pos,
@@ -207,7 +217,7 @@ def validate_plan(grid: Grid, moves: list[Dir]) -> ValidationResult:
             return ValidationResult(
                 legal=True, reaches_goal=False, hit_erase_code=True,
                 failure_at_move_index=i,
-                reason=f"stepped on EraseCode at ({nx},{ny}) (move {i})",
+                reason=f"stepped on {target.type.value} at ({nx},{ny}) (move {i})",
                 visited_path=visited_path, final_position=pos,
             )
 

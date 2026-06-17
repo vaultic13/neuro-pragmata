@@ -22,15 +22,17 @@ from .solver import _allowed_exits, _can_enter
 
 
 # Single-glyph rendering for each cell type. Walls collapsed to one glyph
-# since they're functionally identical for routing.
+# since they're functionally identical for routing. None is plain walkable
+# floor; Open is the BLUE bonus node (verified against in-game footage —
+# the visible blue tiles are exactly the type=Open cells).
 _GLYPHS: dict[CellType, str] = {
     CellType.START: "S",
     CellType.GOAL:  "G",
-    CellType.OPEN:  ".",
+    CellType.OPEN:  "O",
     CellType.OBSTACLE:    "#",
     CellType.IMPASSABLE:  "#",
     CellType.NOTHING:     "#",
-    CellType.NONE:        "#",
+    CellType.NONE:        ".",
     CellType.SHIELD:      "s",
     CellType.CHAIN:       "C",
     CellType.TWO_WAY_LR:  "=",
@@ -61,18 +63,19 @@ CURSOR_GLYPH = "@"
 TRAIL_GLYPH = "~"
 
 
-# Bonus nodes the AI should route through, mapped against in-game node dumps.
+# Bonus nodes the AI should route through, mapped against in-game footage.
 # Keep in sync with snake_render.lua so offline prompts match the mod's output:
-#   * BLUE  (tier 2, most valuable: more damage + longer-lasting hack) — flagged
-#     by Cell.is_golden_path (the engine's _IsGoldenPath; these read as plain
-#     Open). Rendered with GOLDEN_GLYPH. The generator doesn't place these yet,
-#     so synthetic grids currently exercise only the yellow nodes below.
+#   * BLUE  (tier 2, most valuable: more damage + longer-lasting hack) — the
+#     Open grid type. Plain floor is None; on every grid checked the visible
+#     blue tiles are exactly the type=Open cells.
 #   * YELLOW (tier 1, secondary: the "skill node") — the ActiveSkill grid type
 #     (and its 1/2/3 variants), glyph */1/2/3.
+# Cell.is_golden_path (the engine's _IsGoldenPath) is the AUTO-HACK route
+# marker — it floods most walkable cells and is intentionally NOT rendered or
+# treated as a bonus; it would both hide the real blue nodes and hand the AI
+# a pre-solved route.
 # Other special types (FinishBlow, Attack, Bomb, Chain, Purge) still render with
 # their glyphs but aren't collect-targets.
-GOLDEN_GLYPH = "O"  # blue golden-path node
-
 _ACTIVE_SKILL_TYPES = {
     CellType.ACTIVE_SKILL, CellType.ACTIVE_SKILL_1,
     CellType.ACTIVE_SKILL_2, CellType.ACTIVE_SKILL_3,
@@ -80,11 +83,11 @@ _ACTIVE_SKILL_TYPES = {
 
 
 def cell_glyph(cell: Cell) -> str:
-    # Blue golden-path nodes read as plain Open, so render them O — but never
-    # mask the Goal/Start terminals.
-    if getattr(cell, "is_golden_path", False) \
-            and cell.type not in (CellType.GOAL, CellType.START):
-        return GOLDEN_GLYPH
+    # Red "error node" hazards win over everything else: in live grids
+    # they're a decoration on an otherwise plain (often None) cell, not a
+    # grid type — see Cell.blocked / Cell.dead_filament.
+    if getattr(cell, "blocked", False) or getattr(cell, "dead_filament", False):
+        return _GLYPHS[CellType.DEAD_FILAMENT]
     if cell.type is CellType.ONE_WAY:
         if cell.direction is None:
             return ">"  # arbitrary fallback; shouldn't happen with valid grids
@@ -96,8 +99,13 @@ def bonus_info(cell: Cell) -> tuple[int, str, str] | None:
     """(tier, color, label) for a bonus cell, else None. tier 2=blue, 1=yellow."""
     if cell.type in (CellType.GOAL, CellType.START):
         return None
-    if getattr(cell, "is_golden_path", False):
-        return 2, "BLUE", "golden-path node: more damage + longer-lasting hack"
+    # Hazards are never collect-targets — the danger labels must win.
+    if cell.type in (CellType.ERASE_CODE, CellType.DEAD_FILAMENT) \
+            or getattr(cell, "blocked", False) \
+            or getattr(cell, "dead_filament", False):
+        return None
+    if cell.type is CellType.OPEN:
+        return 2, "BLUE", "bonus node: more damage + longer-lasting hack"
     if cell.type in _ACTIVE_SKILL_TYPES:
         return 1, "YELLOW", "skill node"
     return None
@@ -120,11 +128,14 @@ def render(grid: Grid, *, inline: bool = True, with_legend: bool = True,
 
     parts.append("")
     parts.append(f"Cursor: ({grid.cursor[0]}, {grid.cursor[1]})")
+    parts.append(f"Start:  ({grid.start[0]}, {grid.start[1]})")
     parts.append(f"Goal:   ({grid.goal[0]}, {grid.goal[1]})")
 
     if grid.trail and len(grid.trail) > 1:
         trail_str = ", ".join(f"({x},{y})" for x, y in grid.trail)
         parts.append(f"Visited: {trail_str}")
+        parts.append("Hack already in progress: @ is the CURRENT cursor (not the start);")
+        parts.append("~ cells are already visited and CANNOT be re-entered. Plan from @.")
 
     if with_hint:
         parts.append("")
@@ -193,9 +204,14 @@ def _adjacency_block(grid: Grid) -> str:
         target = grid.at(nx, ny)
         target_glyph = cell_glyph(target)
         target_type = target.type.value
-        if getattr(target, "is_golden_path", False) \
-                and target.type not in (CellType.GOAL, CellType.START):
-            target_type = "GoldenPath"
+        is_error_node = (target.type is CellType.DEAD_FILAMENT
+                         or getattr(target, "blocked", False)
+                         or getattr(target, "dead_filament", False))
+        if is_error_node:
+            # A cell carrying an error node must read as one, whatever the
+            # underlying terrain type says.
+            target_type = "ErrorNode" if target.type is not CellType.DEAD_FILAMENT \
+                else CellType.DEAD_FILAMENT.value
         info = f"({nx}, {ny}) [{target_glyph}] {target_type}"
 
         if (nx, ny) in blocked:
@@ -203,6 +219,9 @@ def _adjacency_block(grid: Grid) -> str:
             continue
 
         rule = target.rule()
+        if is_error_node:
+            lines.append(f"{label}{info}  ILLEGAL: error node — currently blocked, cannot enter")
+            continue
         if rule.blocks_step:
             lines.append(f"{label}{info}  ILLEGAL: wall — cannot enter")
             continue
@@ -251,9 +270,9 @@ def _bonus_block(grid: Grid) -> str | None:
         "Bonus nodes - pass through as MANY as possible on the way to G. They",
         "make the hack do more damage and last longer, so a longer, winding",
         "route that collects more bonuses is BETTER than the shortest path - as",
-        "long as the plan still ends on G and never steps on an X (EraseCode)",
-        "trap or revisits a ~ trail cell. BLUE (O) nodes are worth the most;",
-        "grab them first, then YELLOW (*) skill nodes:",
+        "long as the plan still ends on G, never steps on an X (EraseCode)",
+        "trap or a d (error node), and never revisits a ~ trail cell. BLUE (O)",
+        "nodes are worth the most; grab them first, then YELLOW (*) skill nodes:",
     ]
     for _tier, y, x, glyph, color, label in found:
         lines.append(f"  ({x}, {y}) [{glyph}] {color} - {label}")
@@ -325,17 +344,19 @@ def available_moves(grid: Grid) -> list[Dir]:
             continue
         # EraseCode is technically enterable but suicidal; we still list it as
         # available so the model has the full picture and can choose to avoid.
+        # Error nodes (blocked) are excluded by _can_enter like other walls.
         valid.append(d)
     return valid
 
 
 def legend() -> str:
     return (
-        "Legend: S=start G=goal .=open #=wall  @=cursor ~=trail (cannot revisit)\n"
-        "        O=BLUE node (golden path: most damage + longest hack - TOP priority)\n"
+        "Legend: S=start G=goal .=walkable floor #=wall  @=cursor ~=trail (cannot revisit)\n"
+        "        O=BLUE bonus node (more damage + longer hack - TOP priority)\n"
         "        *=YELLOW skill node (1/2/3 variants) - secondary bonus\n"
         "        Route through as many O and * nodes as you can en route to G.\n"
         "        X=ERASE_CODE (DO NOT STEP — ends hack as failure)\n"
+        "        d=ERROR NODE (red warning node — BLOCKED, cannot enter)\n"
         "        > < ^ v=oneway (only this direction) = | J L 7 r=twoway/corner\n"
         "        b=bomb3x3 B=bomb5x5 P=purge C=chain A=attack F=finishblow s=shield"
     )

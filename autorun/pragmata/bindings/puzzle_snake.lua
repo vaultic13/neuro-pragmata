@@ -45,9 +45,24 @@
 --     - _GridController._ActualGrid              -- jagged Grid[][] of cells
 --   app.PuzzleSnake.Grid (per-cell):
 --     - _GridPosition (via.Int2)                 -- (x, y) coord
---     - _GridType (UInt32)                       -- hash; resolved via PuzzleSnakeGridType.getName
+--     - _GridType (UInt32)                       -- hash; resolved via PuzzleSnakeGridType.getName.
+--       Semantics verified against in-game footage: None = plain walkable
+--       floor (most cells); Open = the visible BLUE bonus node.
 --     - <IsPassed>k__BackingField                -- has the cursor crossed (= trail)
---     - <IsEraseCode>k__BackingField             -- is this the red trap node
+--     - <IsEraseCode>k__BackingField             -- is this the trap node
+--     - <IsSkipRow>/<IsSkipCol>k__BackingField   -- row/col currently REMOVED by a
+--       sticky bomb. Dimensions never change for this; GridAccessor keeps the
+--       skip index lists (get_SkipRow/get_SkipCol) and restores via
+--       expansionRow/expansionCol as bombs wear off. get_state() compacts
+--       skipped rows/cols out of the snapshot.
+--     - _ObstacleReasons (UInt32)                -- red "error node" marker (VERIFIED
+--       in-game 2026-06-10). NOT a _GridType: affected cells read as plain None
+--       with a bit set here. Bitmask of app.PuzzleSnake.ObstacleReason:
+--       ObstacleGrid=1 (the red warning-triangle nodes), DeadFilament=2,
+--       Ch16092=4, Ch14100=8, AllPassed=16. Nonzero => cell currently blocked.
+--     - _DeadFilamentType (UInt32)               -- app.DeadFilamentType hash
+--       (None | Random | Fixed). Observed 0/None on standard grids; likely only
+--       authored for dead-filament boss content. Read + surfaced anyway.
 
 local log = require("pragmata.util.log")
 
@@ -64,6 +79,7 @@ local _sdk = {
     grid_cell_td = nil,      -- app.PuzzleSnake.Grid (per-cell type)
     unit_td = nil,           -- app.PuzzleSnake.Unit
     grid_type_td = nil,      -- app.PuzzleSnakeGridType (for getName)
+    df_type_td = nil,        -- app.DeadFilamentType (for getName)
     hacking_mgr_td = nil,    -- app.HackingManager
     m_get_size_x = nil,
     m_get_size_y = nil,
@@ -73,6 +89,8 @@ local _sdk = {
     m_unit_can_reach = nil,
     m_unit_get_is_move = nil,
     m_get_name = nil,
+    m_get_df_name = nil,
+    m_get_is_jamming = nil,
 }
 
 -- All PuzzleSnake instances we've observed via hooks. The engine keeps one
@@ -90,10 +108,12 @@ local _init_report = {
     cell_td         = false,
     unit_td         = false,
     grid_type_td    = false,
+    df_type_td      = false,
     m_get_size_x    = false,
     m_get_size_y    = false,
     m_get_start     = false,
     m_get_name      = false,
+    m_get_df_name   = false,
     m_unit_move     = false,
     m_unit_can_reach = false,
     m_unit_get_is_move = false,
@@ -110,28 +130,52 @@ local function log_discovery(line)
 end
 
 
--- Add `inst` to the known-instances set. Hooks call this; lookup is later.
-local function _track_instance(inst, source)
-    if inst == nil then return end
+-- Each tracked entry is a RECORD, not a bare instance:
+--   { id = <stable int>, inst = <PuzzleSnake>, plan = <plan table | nil>,
+--     forced_struct = <structural signature we last forced against | nil>,
+--     forced_cursor = <cursor {x,y} we last forced against | nil> }
+-- The id is a stable, neutral handle the observer uses to track "which
+-- puzzle" without ever seeing an engine object. Per-puzzle plan + force
+-- state lives ON the record, so a swept (destroyed) enemy's queued moves
+-- are garbage-collected with it — no separate cleanup, no leak.
+local _next_instance_id = 1
 
-    -- Sweep dead entries while we're here; managed-object handles become
-    -- invalid when the engine destroys them, and get_type_definition() is
-    -- the cheapest test for liveness.
+-- Sweep dead handles. Managed-object handles become invalid when the engine
+-- destroys them; get_type_definition() is the cheapest liveness probe.
+local function _sweep_dead_instances()
     for i = #_known_instances, 1, -1 do
         local existing = _known_instances[i]
-        if existing == inst then
-            return  -- already tracked
-        end
-        local ok = pcall(function() return existing:get_type_definition() end)
+        local ok = pcall(function() return existing.inst:get_type_definition() end)
         if not ok then
             table.remove(_known_instances, i)
             log_discovery("dropped dead instance (remaining=" .. #_known_instances .. ")")
         end
     end
+end
 
-    table.insert(_known_instances, inst)
+-- Add `inst` to the known-instances set. Hooks call this; lookup is later.
+local function _track_instance(inst, source)
+    if inst == nil then return end
+
+    for i = #_known_instances, 1, -1 do
+        local existing = _known_instances[i]
+        if existing.inst == inst then
+            return  -- already tracked
+        end
+    end
+    _sweep_dead_instances()
+
+    local rec = {
+        id = _next_instance_id,
+        inst = inst,
+        plan = nil,
+        forced_struct = nil,
+        forced_cursor = nil,
+    }
+    _next_instance_id = _next_instance_id + 1
+    table.insert(_known_instances, rec)
     log_discovery("instance tracked via " .. source
-               .. " (total=" .. #_known_instances .. ")")
+               .. " (id=" .. rec.id .. ", total=" .. #_known_instances .. ")")
 end
 
 
@@ -199,6 +243,7 @@ local function ensure_init()
     _sdk.grid_cell_td     = td("app.PuzzleSnake.Grid")
     _sdk.unit_td          = td("app.PuzzleSnake.Unit")
     _sdk.grid_type_td     = td("app.PuzzleSnakeGridType")
+    _sdk.df_type_td       = td("app.DeadFilamentType")
     _sdk.hacking_mgr_td   = td("app.HackingManager")
 
     _init_report.snake_td     = _sdk.snake_td ~= nil
@@ -206,6 +251,7 @@ local function ensure_init()
     _init_report.cell_td      = _sdk.grid_cell_td ~= nil
     _init_report.unit_td      = _sdk.unit_td ~= nil
     _init_report.grid_type_td = _sdk.grid_type_td ~= nil
+    _init_report.df_type_td   = _sdk.df_type_td ~= nil
 
     if _sdk.snake_td == nil then
         log.warn("puzzle_snake: app.PuzzleSnake type def not found; binding disabled")
@@ -220,11 +266,14 @@ local function ensure_init()
     _sdk.m_unit_can_reach    = method(_sdk.unit_td, "canReachStraight(via.Int2)")
     _sdk.m_unit_get_is_move  = method(_sdk.unit_td, "get_isMove")
     _sdk.m_get_name          = method(_sdk.grid_type_td, "getName(System.UInt32)")
+    _sdk.m_get_df_name       = method(_sdk.df_type_td, "getName(System.UInt32)")
+    _sdk.m_get_is_jamming    = method(_sdk.hacking_mgr_td, "get_IsJamming()")
 
     _init_report.m_get_size_x       = _sdk.m_get_size_x       ~= nil
     _init_report.m_get_size_y       = _sdk.m_get_size_y       ~= nil
     _init_report.m_get_start        = _sdk.m_get_start_pos    ~= nil
     _init_report.m_get_name         = _sdk.m_get_name         ~= nil
+    _init_report.m_get_df_name      = _sdk.m_get_df_name      ~= nil
     _init_report.m_unit_move        = _sdk.m_unit_move        ~= nil
     _init_report.m_unit_can_reach   = _sdk.m_unit_can_reach   ~= nil
     _init_report.m_unit_get_is_move = _sdk.m_unit_get_is_move ~= nil
@@ -300,19 +349,16 @@ end
 -- aimed at; we match that against PuzzleBase._TargetPuzzleUnit on each
 -- candidate.
 
-local function get_instance()
+-- Return the RECORD of the PuzzleSnake currently matched to the player's
+-- aim (LastHackingTarget), or nil. This is the matched puzzle regardless of
+-- whether its triggers say it's ending — callers that need "on screen and
+-- not ending" use is_active()/is_interactive() on top.
+local function _get_current_record()
     if not ensure_init() then return nil end
 
     -- Garbage-collect dead handles before the lookup, so a stale entry
     -- doesn't shadow a live one that happens to share a target reference.
-    for i = #_known_instances, 1, -1 do
-        local existing = _known_instances[i]
-        local ok = pcall(function() return existing:get_type_definition() end)
-        if not ok then
-            table.remove(_known_instances, i)
-            log_discovery("dropped dead instance (remaining=" .. #_known_instances .. ")")
-        end
-    end
+    _sweep_dead_instances()
 
     -- Look up the most recently targeted enemy. We don't gate on
     -- `IsTargetedEnemy` — observed in testing, that bool means something
@@ -328,15 +374,32 @@ local function get_instance()
     -- Find the PuzzleSnake whose _TargetPuzzleUnit (inherited from
     -- PuzzleBase) is the targeted enemy. == on managed-object handles is
     -- reference equality, which is what we want.
-    for _, inst in ipairs(_known_instances) do
+    for _, rec in ipairs(_known_instances) do
         local ok, this_target = pcall(function()
-            return inst:get_field("_TargetPuzzleUnit")
+            return rec.inst:get_field("_TargetPuzzleUnit")
         end)
         if ok and this_target == target_unit then
-            return inst
+            return rec
         end
     end
 
+    return nil
+end
+
+
+local function get_instance()
+    local rec = _get_current_record()
+    if rec == nil then return nil end
+    return rec.inst
+end
+
+
+-- Find a record by its stable id (linear scan; instance count per level is
+-- small). Returns nil if that puzzle has been swept (enemy destroyed).
+local function _record_by_id(id)
+    for _, rec in ipairs(_known_instances) do
+        if rec.id == id then return rec end
+    end
     return nil
 end
 
@@ -426,6 +489,21 @@ function M.read_trigger(name)
 end
 
 
+-- True while a jammer is suppressing hacking in the area (HackingManager.
+-- get_IsJamming). Forcing a plan while jammed is pointless — the engine
+-- refuses the hack — so the observer pauses planning and the overlay shows
+-- a "jammed" state. Conservative: unreadable => false (don't silently
+-- disable planning on a reflection hiccup).
+function M.is_jamming()
+    ensure_init()
+    if _sdk.m_get_is_jamming == nil then return false end
+    local mgr = _get_hacking_manager()
+    if mgr == nil then return false end
+    local ok, v = pcall(function() return _sdk.m_get_is_jamming:call(mgr) end)
+    return ok and v == true
+end
+
+
 -- ---------------------------------------------------------------------------
 -- Grid snapshot
 -- ---------------------------------------------------------------------------
@@ -462,6 +540,34 @@ local function resolve_type_name(hash)
 end
 
 
+-- The DeadFilamentType hash space is a different enum from PuzzleSnakeGridType
+-- (only "None" shares a value, since both hash the member name), so it gets its
+-- own resolver + cache. Literal fallbacks are the hashes from the il2cpp dump,
+-- used when app.DeadFilamentType.getName isn't reflectable on a future build.
+local _DF_HASH_NAMES = {
+    [139421919]  = "None",
+    [4140296975] = "Random",
+    [2395182966] = "Fixed",
+}
+
+local _df_name_cache = {}
+
+local function resolve_df_name(hash)
+    if hash == nil then return "None" end
+    if _df_name_cache[hash] then return _df_name_cache[hash] end
+    if _sdk.m_get_df_name ~= nil then
+        local ok, name = pcall(function() return _sdk.m_get_df_name:call(nil, hash) end)
+        if ok and type(name) == "string" and #name > 0 then
+            _df_name_cache[hash] = name
+            return name
+        end
+    end
+    local s = _DF_HASH_NAMES[hash] or ("Type" .. tostring(hash))
+    _df_name_cache[hash] = s
+    return s
+end
+
+
 local function read_cell(cell_obj)
     -- Cell objects are app.PuzzleSnake.Grid instances. Read fields directly.
     local pos_raw = nil
@@ -475,6 +581,16 @@ local function read_cell(cell_obj)
 
     local in_trail = read_bool(cell_obj, "<IsPassed>k__BackingField", false)
     local is_erase = read_bool(cell_obj, "<IsEraseCode>k__BackingField", false)
+
+    -- Sticky-bomb row/column removal. The engine NEVER changes the grid
+    -- dimensions for this: it marks whole rows/cols as "skipped" (per-cell
+    -- IsSkipRow/IsSkipCol; GridAccessor.get_SkipRow()/get_SkipCol() hold the
+    -- index lists, expansionRow()/expansionCol() restore them as the bombs
+    -- wear off). A skipped row is collapsed out of the playable grid, so the
+    -- snapshot must compact it away or every coordinate below the seam — and
+    -- the whole layout the AI plans against — is wrong.
+    local is_skip_row = read_bool(cell_obj, "<IsSkipRow>k__BackingField", false)
+    local is_skip_col = read_bool(cell_obj, "<IsSkipCol>k__BackingField", false)
 
     -- ActiveSkill decoration. The engine layers damage-boost / chain / etc.
     -- attributes on top of an underlying terrain type — e.g. a cell may
@@ -513,17 +629,44 @@ local function read_cell(cell_obj)
     local in_way_hash  = read_uint_field("<InWayType>k__BackingField")
     local out_way_hash = read_uint_field("<OutWayType>k__BackingField")
 
-    -- The visible "blue" reward nodes (more damage + longer hack) aren't a
-    -- distinct _GridType — they read as plain Open. The engine marks them via
-    -- the "GoldenPath" fields on the cell (_IsGoldenPath bool + Next/Prev
-    -- links forming a route). We read _IsGoldenPath as the blue marker. The
-    -- "yellow" skill node, by contrast, IS a distinct type (ActiveSkill).
-    -- IsParryHacking / ActiveSkillCount / ActiveSkillIndex are read too so the
-    -- debug dump can disambiguate which field actually flags a given node.
+    -- Dead-filament decoration (app.DeadFilamentType hash: None|Random|Fixed).
+    -- Observed 0/None on standard grids — the field appears to be authored only
+    -- for dead-filament boss content — but it's cheap to read and the renderer
+    -- treats it as one more "error node" flavor if it ever shows up.
+    local dead_filament_hash = read_uint_field("_DeadFilamentType")
+    local dead_filament_type = nil
+    if dead_filament_hash ~= nil and dead_filament_hash ~= 0 then
+        local resolved = resolve_df_name(dead_filament_hash)
+        if resolved ~= "None" then
+            dead_filament_type = resolved
+        end
+    end
+
+    -- The visible "blue" reward nodes (more damage + longer hack) ARE a
+    -- distinct _GridType: Open (plain floor is None) — verified against
+    -- in-game footage on multiple grids. _IsGoldenPath is the engine's
+    -- AUTO-HACK route marker (it floods most walkable cells, far more than
+    -- the visible blue nodes) and is surfaced for the debug dump only — the
+    -- renderer must not use it. The "yellow" skill node is the ActiveSkill
+    -- type. IsParryHacking / ActiveSkillCount / ActiveSkillIndex are read so
+    -- the dump can disambiguate which field actually flags a given node.
     local is_golden_path   = read_bool(cell_obj, "_IsGoldenPath", false)
     local is_parry_hacking = read_bool(cell_obj, "<IsParryHacking>k__BackingField", false)
     local active_skill_count = read_uint_field("<ActiveSkillCount>k__BackingField")
     local active_skill_index = read_uint_field("<ActiveSkillIndex>k__BackingField")
+
+    -- _ObstacleReasons IS the red "error node" marker — VERIFIED in-game
+    -- 2026-06-10: a grid's four red warning-triangle cells were exactly the
+    -- cells with _ObstacleReasons=1 (ObstacleReason.ObstacleGrid), everything
+    -- else 0. It's a bitmask (see file-level field notes), so any nonzero
+    -- value means "currently blocked"; the engine can set/clear bits
+    -- mid-fight, which the structural signature turns into a replan.
+    -- _IsHide marks not-yet-revealed nodes (seen on FinishBlow). _StunReasons
+    -- is the analogous stun bitmask; no nonzero observation yet — dump-only.
+    local is_hide          = read_bool(cell_obj, "_IsHide", false)
+    local obstacle_reasons = read_uint_field("_ObstacleReasons")
+    local stun_reasons     = read_uint_field("_StunReasons")
+    local is_blocked       = (obstacle_reasons or 0) ~= 0
 
     return {
         x = pos.x, y = pos.y,
@@ -541,6 +684,15 @@ local function read_cell(cell_obj)
         out_way_type       = out_way_hash and resolve_type_name(out_way_hash) or nil,
         is_golden_path     = is_golden_path,
         is_parry_hacking   = is_parry_hacking,
+        dead_filament      = dead_filament_type ~= nil,
+        dead_filament_hash = dead_filament_hash,
+        dead_filament_type = dead_filament_type,
+        is_hide            = is_hide,
+        obstacle_reasons   = obstacle_reasons,
+        stun_reasons       = stun_reasons,
+        is_blocked         = is_blocked,
+        is_skip_row        = is_skip_row,
+        is_skip_col        = is_skip_col,
     }
 end
 
@@ -650,27 +802,24 @@ function M.get_state()
         return nil
     end
 
-    -- Build cells[y+1][x+1] table. Lua-1-indexed for ipairs friendliness.
-    local cells = {}
-    for y = 1, height do
-        cells[y] = {}
-        for x = 1, width do
-            cells[y][x] = nil
-        end
-    end
-
+    -- First pass: collect every in-bounds cell at its ENGINE coordinates and
+    -- gather the skip sets (rows/cols sticky bombs have removed). The engine
+    -- keeps removed rows/cols in the array — dimensions don't change — so the
+    -- snapshot must compact them out itself (see read_cell's skip notes).
+    local raw = {}
+    local skip_rows = {}
+    local skip_cols = {}
     local count = 0
-    local trail = {}
     for_each_cell(inst, function(cell_obj)
         local cell = read_cell(cell_obj)
         if cell == nil then return end
-        count = count + 1
         local x, y = cell.x, cell.y
         if x >= 0 and x < width and y >= 0 and y < height then
-            cells[y + 1][x + 1] = cell
-            if cell.in_trail then
-                table.insert(trail, { x = x, y = y })
-            end
+            count = count + 1
+            raw[y] = raw[y] or {}
+            raw[y][x] = cell
+            if cell.is_skip_row then skip_rows[y] = true end
+            if cell.is_skip_col then skip_cols[x] = true end
         end
     end)
 
@@ -678,27 +827,86 @@ function M.get_state()
         return nil
     end
 
-    -- Cursor position from _CurrentUnit.
+    -- Active (non-skipped) engine row/col indices, ascending, plus the
+    -- engine->render maps used to remap every coordinate below.
+    local active_rows, active_cols = {}, {}
+    local row_to_render, col_to_render = {}, {}
+    local skipped_rows, skipped_cols = {}, {}
+    for y = 0, height - 1 do
+        if skip_rows[y] then
+            skipped_rows[#skipped_rows + 1] = y
+        else
+            active_rows[#active_rows + 1] = y
+            row_to_render[y] = #active_rows - 1     -- 0-based render y
+        end
+    end
+    for x = 0, width - 1 do
+        if skip_cols[x] then
+            skipped_cols[#skipped_cols + 1] = x
+        else
+            active_cols[#active_cols + 1] = x
+            col_to_render[x] = #active_cols - 1     -- 0-based render x
+        end
+    end
+    if #active_rows == 0 or #active_cols == 0 then
+        log_discovery("get_state: every row or col is skip-flagged; treating as unreadable")
+        return nil
+    end
+
+    local function remap(p)
+        if p == nil then return nil end
+        local rx = col_to_render[p.x]
+        local ry = row_to_render[p.y]
+        if rx == nil or ry == nil then return nil end   -- on a removed row/col
+        return { x = rx, y = ry }
+    end
+
+    -- Compacted cells[y+1][x+1] table (Lua-1-indexed for ipairs friendliness).
+    -- Cell x/y are rewritten to RENDER coordinates — everything downstream
+    -- (renderer, struct sig, goal scan) works in the compacted space; the
+    -- original engine coords stay on engine_x/engine_y for diagnostics.
+    local cells = {}
+    local trail = {}
+    for ry = 1, #active_rows do
+        cells[ry] = {}
+        local ey = active_rows[ry]
+        for rx = 1, #active_cols do
+            local ex = active_cols[rx]
+            local cell = raw[ey] and raw[ey][ex]
+            if cell ~= nil then
+                cell.engine_x = ex
+                cell.engine_y = ey
+                cell.x = rx - 1
+                cell.y = ry - 1
+                cells[ry][rx] = cell
+                if cell.in_trail then
+                    table.insert(trail, { x = rx - 1, y = ry - 1 })
+                end
+            end
+        end
+    end
+
+    -- Cursor position from _CurrentUnit (engine coords -> render coords).
     local cursor = nil
     local ok_cu, unit = pcall(function() return inst:get_field("_CurrentUnit") end)
     if ok_cu and unit ~= nil and _sdk.m_unit_get_position ~= nil then
         local ok_p, pos_raw = pcall(function() return _sdk.m_unit_get_position:call(unit) end)
-        if ok_p then cursor = read_int2(pos_raw) end
+        if ok_p then cursor = remap(read_int2(pos_raw)) end
     end
 
-    -- Start position from accessor.
+    -- Start position from accessor (remapped; nil if its row/col is removed).
     local start_pos = nil
     if _sdk.m_get_start_pos ~= nil then
         local ok, sp = pcall(function() return _sdk.m_get_start_pos:call(acc) end)
-        if ok then start_pos = read_int2(sp) end
+        if ok then start_pos = remap(read_int2(sp)) end
     end
 
     -- Goal cell: scan for the cell whose type name is "Goal". The hash is
     -- known from the dump (1599924820) but resolving by name is portable
     -- across patches that might re-roll hashes.
     local goal = nil
-    for y = 1, height do
-        for x = 1, width do
+    for y = 1, #active_rows do
+        for x = 1, #active_cols do
             local c = cells[y][x]
             if c ~= nil and c.type == "Goal" then
                 goal = { x = c.x, y = c.y }
@@ -709,13 +917,20 @@ function M.get_state()
     end
 
     return {
-        width  = width,
-        height = height,
+        width  = #active_cols,
+        height = #active_rows,
         cursor = cursor,
         start  = start_pos,
         goal   = goal,
         cells  = cells,
         trail  = trail,
+        -- Skip diagnostics: engine-space dims + which engine rows/cols are
+        -- currently removed. The renderer surfaces these so the AI knows the
+        -- layout is the live, compacted one.
+        engine_width  = width,
+        engine_height = height,
+        skipped_rows  = skipped_rows,
+        skipped_cols  = skipped_cols,
         finished = read_bool(inst, "_SuccessTrigger", false)
                 or read_bool(inst, "_FailedTrigger", false),
         success  = read_bool(inst, "_SuccessTrigger", false),
@@ -1074,9 +1289,28 @@ function M.write_next_move_position(target_x, target_y)
 end
 
 
+-- Engine-space skip sets (rows/cols currently removed by sticky bombs). A
+-- light pass over the cell array reading only positions + skip flags; runs
+-- at dispatch rate (~7Hz), not per frame.
+local function _read_skip_sets(inst)
+    local rows, cols = {}, {}
+    for_each_cell(inst, function(cell_obj)
+        local ok_p, p = pcall(function() return cell_obj:get_field("_GridPosition") end)
+        if not ok_p then return end
+        local pos = read_int2(p)
+        if pos == nil then return end
+        if read_bool(cell_obj, "<IsSkipRow>k__BackingField", false) then rows[pos.y] = true end
+        if read_bool(cell_obj, "<IsSkipCol>k__BackingField", false) then cols[pos.x] = true end
+    end)
+    return rows, cols
+end
+
+
 -- Direction-style wrapper around write_next_move_position. Resolves the
--- absolute target from the current cursor + delta, bounds-checks, then
--- delegates. Use this from debug buttons / experimental tick paths.
+-- absolute ENGINE target from the current cursor + delta, steps over any
+-- rows/cols sticky bombs have removed (the playable grid is compacted, so
+-- one logical move can cross several engine indices), bounds-checks, then
+-- delegates. Used by tick_plan for AI-dispatched moves and by debug buttons.
 function M.move_via_next_position(direction)
     local delta = DIR_DELTAS[direction]
     if delta == nil then return false, "invalid direction: " .. tostring(direction) end
@@ -1086,16 +1320,37 @@ function M.move_via_next_position(direction)
 
     local pos = _read_cursor_pos(unit)
     if pos == nil then return false, "couldn't read cursor position" end
-    local target_x = pos.x + delta.x
-    local target_y = pos.y + delta.y
+
+    local skip_rows, skip_cols = {}, {}
+    local inst = get_instance()
+    if inst ~= nil then
+        skip_rows, skip_cols = _read_skip_sets(inst)
+    end
 
     local w, h = _read_grid_dims()
+    local target_x = pos.x + delta.x
+    local target_y = pos.y + delta.y
+    local hopped = 0
+    while (skip_rows[target_y] or skip_cols[target_x])
+        and (w == nil or (target_x >= 0 and target_x < w))
+        and (h == nil or (target_y >= 0 and target_y < h)) do
+        target_x = target_x + delta.x
+        target_y = target_y + delta.y
+        hopped = hopped + 1
+    end
+
     if w ~= nil and h ~= nil then
         if target_x < 0 or target_x >= w or target_y < 0 or target_y >= h then
             return false, string.format(
                 "move %s rejected: target (%d,%d) out of bounds (grid %dx%d)",
                 direction, target_x, target_y, w, h)
         end
+    end
+
+    if hopped > 0 then
+        log.info(string.format(
+            "move_via_next_position: %s hops %d removed row(s)/col(s) -> engine target (%d,%d)",
+            direction, hopped, target_x, target_y))
     end
 
     return M.write_next_move_position(target_x, target_y)
@@ -1124,102 +1379,345 @@ end
 
 
 -- ---------------------------------------------------------------------------
--- Plan dispatch
+-- Structural signature
 -- ---------------------------------------------------------------------------
--- Queues a sequence of directions and dispatches them one at a time via
--- M.move_via_next_position() — the input-pipeline path that mimics player
--- input. A small inter-move cooldown plus a wait for the cursor's isMove
--- flag prevents us from outpacing the engine's per-cell transition.
+-- A fingerprint of the parts of the grid that DON'T change as the cursor
+-- traverses it: dimensions, goal position, and the location of every wall,
+-- EraseCode trap, and dead-filament error node. Deliberately EXCLUDES the
+-- cursor and the trail (IsPassed) — those advance as a plan executes, so
+-- including them would make every normal move look like a "change".
+-- Error nodes ARE included: _ObstacleReasons is a runtime bitmask the engine
+-- can set/clear mid-fight, and a hazard-map change is exactly when a stale
+-- plan needs invalidating. (If error nodes turn out to pulse rapidly, this
+-- will show up as replan churn — the observer's retry dedup absorbs it, but
+-- it's the first place to look.)
+--
+-- A plan is only valid while this signature is stable. Because get_state
+-- compacts skipped rows/cols out of the grid, a sticky bomb that removes a
+-- row shrinks the compacted dimensions and shifts every wall/trap/goal mark —
+-- and the bomb WEARING OFF (engine expansionRow/expansionCol restoring rows
+-- at the same rate they were fired) grows them back — so both directions of
+-- the change invalidate stale plans and trigger a re-force. Bonus-node
+-- consumption (which may or may not flip a cell's decoration on traversal —
+-- pending in-game confirmation) is NOT part of the signature, so it can
+-- never trigger a false replan.
+local function _is_wall_type(type_name)
+    return type_name == "Obstacle"
+        or type_name == "Impassable"
+        or type_name == "Nothing"
+        or type_name == "Shield"
+end
 
-local _plan_queue = {}
-local _plan_dispatch_cooldown = 0   -- frames remaining before next dispatch
-local _plan_cooldown_frames = 8     -- ~130ms at 60fps
-local _plan_last_msg = nil          -- diagnostic: last move() result
-local _plan_total = 0               -- moves in the most recently queued plan
-                                    -- (for progress display; see plan_status)
-
-function M.queue_plan(directions)
-    if type(directions) ~= "table" then return 0 end
-    local queued = 0
-    for _, d in ipairs(directions) do
-        if DIR_DELTAS[d] ~= nil then
-            table.insert(_plan_queue, d)
-            queued = queued + 1
+local function _struct_sig_from_state(state)
+    if state == nil then return nil end
+    local parts = { state.width .. "x" .. state.height }
+    if state.goal then
+        parts[#parts + 1] = "g" .. state.goal.x .. "," .. state.goal.y
+    else
+        parts[#parts + 1] = "g?"
+    end
+    local marks = {}
+    for y = 0, state.height - 1 do
+        local row = state.cells[y + 1]
+        for x = 0, state.width - 1 do
+            local c = row and row[x + 1]
+            if c == nil then
+                marks[#marks + 1] = "w" .. x .. "," .. y     -- missing cell = wall
+            elseif c.is_erase or c.type == "EraseCode" then
+                marks[#marks + 1] = "x" .. x .. "," .. y     -- trap
+            elseif c.is_blocked or c.dead_filament or c.type == "DeadFilament" then
+                marks[#marks + 1] = "d" .. x .. "," .. y     -- error node (blocked)
+            elseif _is_wall_type(c.type) then
+                marks[#marks + 1] = "w" .. x .. "," .. y     -- wall
+            end
         end
     end
-    -- The dispatcher clears before queueing, so the queue length right after
-    -- the append loop is the full plan size — record it for progress display.
-    _plan_total = #_plan_queue
-    return queued
+    table.sort(marks)
+    parts[#parts + 1] = table.concat(marks, ";")
+    return table.concat(parts, "|")
 end
 
-function M.clear_plan()
-    _plan_queue = {}
-    _plan_dispatch_cooldown = 0
-    _plan_total = 0
+local function _cursor_xy(state)
+    if state == nil or state.cursor == nil then return nil end
+    return { x = state.cursor.x, y = state.cursor.y }
 end
 
-function M.plan_status()
-    local queue_size = #_plan_queue
+
+-- ---------------------------------------------------------------------------
+-- Per-puzzle plan dispatch
+-- ---------------------------------------------------------------------------
+-- Each puzzle (PuzzleSnake instance, identified by its stable record id)
+-- owns its own move queue. A reply for puzzle A is parked on A's record and
+-- only ever dispatched while the player is aimed at A — so a plan can never
+-- be applied to the wrong enemy, and a plan that arrives while the player
+-- has run away waits on its puzzle and resumes ("instant response") when the
+-- player returns.
+--
+-- Dispatch path is M.move_via_next_position() — the input-pipeline write
+-- that mimics player input (walls block, gates enforce, goal auto-completes).
+-- A per-move cooldown plus an isMove wait keeps us from outpacing the
+-- engine's per-cell transition.
+
+local _plan_cooldown_frames = 8     -- ~130ms at 60fps
+
+-- One-shot events the dispatcher raises for the observer/overlay to react to
+-- ("resumed" a parked plan; "grid_changed" forced a replan). Drained via
+-- M.consume_plan_events().
+local _plan_events = {}
+local function _push_plan_event(e) _plan_events[#_plan_events + 1] = e end
+
+function M.consume_plan_events()
+    if #_plan_events == 0 then return {} end
+    local out = _plan_events
+    _plan_events = {}
+    return out
+end
+
+-- Stable, neutral id of the puzzle currently on screen (matched to the
+-- player's aim AND with a live GUI handle), or nil. The observer tracks
+-- "which puzzle" purely by this int — it never sees an engine object.
+function M.current_puzzle_id()
+    if not M.is_active() then return nil end
+    local rec = _get_current_record()
+    return rec and rec.id or nil
+end
+
+-- Id of the puzzle matched to the player's aim, REGARDLESS of whether its
+-- triggers say it's ending. End-of-hack handlers (success/failed) use this
+-- because is_active() has already flipped false by then, yet we still need
+-- to know which puzzle's plan to clear.
+function M.matched_puzzle_id()
+    local rec = _get_current_record()
+    return rec and rec.id or nil
+end
+
+-- Set of currently-live puzzle ids. The observer uses this to release a
+-- force slot whose puzzle was destroyed before the reply came back.
+function M.live_puzzle_ids()
+    _sweep_dead_instances()
+    local ids = {}
+    for _, rec in ipairs(_known_instances) do ids[rec.id] = true end
+    return ids
+end
+
+-- Record the structure + cursor we're about to force a plan against, so we
+-- can (a) detect a later structural change that invalidates the reply and
+-- (b) know whether the puzzle has changed enough to warrant a fresh force.
+-- Must be called while `id` is the current puzzle (i.e. at force time).
+function M.snapshot_force_target(id)
+    local rec = _get_current_record()
+    if rec == nil or rec.id ~= id then return end
+    local state = M.get_state()
+    if state == nil then return end
+    rec.forced_struct = _struct_sig_from_state(state)
+    rec.forced_cursor = _cursor_xy(state)
+end
+
+-- Drop the force snapshot for a puzzle so the next reconciliation re-forces
+-- it even if its grid is byte-identical. Called on an explicit (re)start
+-- (_StartTrg / re-aim), which is the player's "try again" signal.
+function M.clear_force_snapshot(id)
+    local rec = _record_by_id(id)
+    if rec then rec.forced_struct = nil; rec.forced_cursor = nil end
+end
+
+-- True if puzzle `id`'s STRUCTURE has changed since we forced it (sticky
+-- bomb, reset). Ignores cursor/trail. Used to invalidate a plan on a
+-- _GridChangeEndTrg edge.
+function M.struct_changed(id)
+    local rec = _get_current_record()
+    if rec == nil or rec.id ~= id then return false end
+    if rec.forced_struct == nil then return false end
+    local state = M.get_state()
+    if state == nil then return false end
+    return _struct_sig_from_state(state) ~= rec.forced_struct
+end
+
+-- True if the current puzzle `id` should be (re)forced now: it's interactive,
+-- has no queued plan, and either we've never forced its current state or its
+-- structure/cursor has changed since (grid mutated, or the cursor advanced so
+-- a follow-up plan can continue from the new position). When the state is
+-- unchanged since the last force, returns false — so a plan that drained
+-- without progress doesn't spin-loop re-forcing the identical grid.
+function M.needs_force(id)
+    local rec = _get_current_record()
+    if rec == nil or rec.id ~= id then return false end
+    if not M.is_interactive() then return false end
+    if rec.plan ~= nil and #rec.plan.queue > 0 then return false end
+    local state = M.get_state()
+    if state == nil then return false end
+    if rec.forced_struct == nil then return true end
+    if _struct_sig_from_state(state) ~= rec.forced_struct then return true end
+    local cur = _cursor_xy(state)
+    local fc = rec.forced_cursor
+    if cur == nil or fc == nil then return true end
+    return cur.x ~= fc.x or cur.y ~= fc.y
+end
+
+-- Attach a plan (list of directions) to puzzle `id`. Captures the structure
+-- the plan is validated against (the force snapshot, i.e. what the peer
+-- planned against). `parked` is true when the reply arrived while the player
+-- was NOT aimed at this puzzle — it'll resume when they return. Returns
+-- (queued_count, parked).
+function M.set_plan(id, moves)
+    local rec = _record_by_id(id)
+    if rec == nil then return 0, false end
+    if type(moves) ~= "table" then return 0, false end
+
+    local queue = {}
+    for _, d in ipairs(moves) do
+        if DIR_DELTAS[d] ~= nil then queue[#queue + 1] = d end
+    end
+
+    -- Validate against the structure we forced against. If we have no
+    -- snapshot (e.g. a manual debug queue), fall back to the current
+    -- structure so the plan still aborts if the grid changes under it.
+    local validate_struct = rec.forced_struct
+    if validate_struct == nil then
+        local st = M.get_state()
+        if st then validate_struct = _struct_sig_from_state(st) end
+    end
+
+    local cur = _get_current_record()
+    local is_current = (cur ~= nil and cur.id == id)
+    rec.plan = {
+        queue           = queue,
+        total           = #queue,
+        cooldown        = 0,
+        last_msg        = nil,
+        parked          = not is_current,
+        validate_struct = validate_struct,
+    }
+    return #queue, rec.plan.parked
+end
+
+function M.discard_plan(id)
+    local rec = _record_by_id(id)
+    if rec then rec.plan = nil end
+end
+
+function M.has_plan(id)
+    local rec = _record_by_id(id)
+    return rec ~= nil and rec.plan ~= nil and #rec.plan.queue > 0
+end
+
+-- Progress snapshot for the currently-aimed puzzle (overlay + debug panel).
+function M.current_plan_status()
+    local rec = _get_current_record()
+    local plan = rec and rec.plan
+    local queue_size = plan and #plan.queue or 0
+    local total = plan and plan.total or 0
     return {
         queue_size  = queue_size,
-        total       = _plan_total,
-        -- Moves already dispatched off the most recent plan. Clamped at 0 in
-        -- case the queue was extended out-of-band.
-        executed    = math.max(0, _plan_total - queue_size),
-        cooldown    = _plan_dispatch_cooldown,
+        total       = total,
+        executed    = math.max(0, total - queue_size),
+        parked      = plan and plan.parked or false,
+        cooldown    = plan and plan.cooldown or 0,
         active      = M.is_active(),
         unit_moving = M.is_unit_moving(),
-        last_msg    = _plan_last_msg,
+        last_msg    = plan and plan.last_msg or nil,
     }
 end
 
--- Per-frame tick. Wire into pragmata_main.lua's re.on_frame loop.
+-- Per-frame tick. Wire into pragmata_main.lua's re.on_frame loop. Dispatches
+-- the CURRENTLY-aimed puzzle's queue only; other puzzles' queues stay parked.
 function M.tick_plan()
-    -- If puzzle ends mid-plan (success/failure trigger fired), drop the
-    -- remaining moves; they're stale relative to whatever happens next.
-    if #_plan_queue > 0 and not M.is_active() then
-        log.info("tick_plan: puzzle no longer active; dropping "
-              .. tostring(#_plan_queue) .. " queued moves")
-        _plan_queue = {}
-        _plan_dispatch_cooldown = 0
+    local rec = _get_current_record()
+    if rec == nil or rec.plan == nil then return end
+    local plan = rec.plan
+
+    -- Not interactive (player dropped aim, post-hack cooldown)? Keep the
+    -- queue PARKED — do not drop it. It resumes when the player re-aims.
+    if not M.is_interactive() then return end
+
+    -- Finished dispatching: clear the plan so reconciliation can decide
+    -- whether to re-force (e.g. the cursor advanced but didn't reach the goal).
+    if #plan.queue == 0 then
+        if plan.cooldown > 0 then plan.cooldown = plan.cooldown - 1; return end
+        rec.plan = nil
         return
     end
 
-    if _plan_dispatch_cooldown > 0 then
-        _plan_dispatch_cooldown = _plan_dispatch_cooldown - 1
-        return
-    end
-
-    if #_plan_queue == 0 then return end
+    if plan.cooldown > 0 then plan.cooldown = plan.cooldown - 1; return end
 
     -- Cursor is mid-cell-transition — let it settle before the next move.
     if M.is_unit_moving() then return end
 
-    local dir = table.remove(_plan_queue, 1)
+    -- Continuous structural validation, evaluated only when we're about to
+    -- dispatch (past the cooldown/isMove gates) so the full grid scan runs at
+    -- dispatch rate (~7Hz), not every frame. If the grid's structure changed
+    -- since the plan was built (sticky bomb deleted a row, puzzle reset), the
+    -- remaining moves are computed against a layout that no longer exists.
+    -- Abort and clear the force snapshot so reconciliation re-forces against
+    -- the new grid. Checked BEFORE the "resumed" flag so a parked plan
+    -- returning to a mutated grid flashes "retrying", not "resuming".
+    if plan.validate_struct ~= nil then
+        local state = M.get_state()
+        if state ~= nil and _struct_sig_from_state(state) ~= plan.validate_struct then
+            log.info("tick_plan: grid structure changed under plan (id=" .. rec.id
+                  .. "); aborting " .. tostring(#plan.queue) .. " queued moves")
+            rec.plan = nil
+            rec.forced_struct = nil
+            _push_plan_event("grid_changed")
+            return
+        end
+    end
+
+    -- A parked plan dispatching its first move on return → one-time "resumed"
+    -- event so the overlay can show that the parked plan is resuming.
+    if plan.parked then
+        plan.parked = false
+        _push_plan_event("resumed")
+        log.info("tick_plan: resuming parked plan (id=" .. rec.id .. ", "
+              .. tostring(#plan.queue) .. " moves)")
+    end
+
+    local dir = table.remove(plan.queue, 1)
     local ok, msg = M.move_via_next_position(dir)
-    _plan_last_msg = string.format("move %s: %s",
-                                   dir, tostring(msg or (ok and "ok" or "error")))
-    log.info("tick_plan: " .. _plan_last_msg)
-    _plan_dispatch_cooldown = _plan_cooldown_frames
+    plan.last_msg = string.format("move %s: %s",
+                                  dir, tostring(msg or (ok and "ok" or "error")))
+    log.info("tick_plan: " .. plan.last_msg)
+    plan.cooldown = _plan_cooldown_frames
 
     -- Abort the rest of the queue on a rejected move (OOB, no unit, etc.).
     -- Continuing would dispatch follow-up moves from a position the plan
-    -- didn't expect — better to stop and let the AI replan if it wants.
+    -- didn't expect — stop and let reconciliation re-force from where the
+    -- cursor actually ended up.
     if not ok then
         log.warn("tick_plan: move rejected; dropping remaining "
-              .. tostring(#_plan_queue) .. " queued moves")
-        _plan_queue = {}
+              .. tostring(#plan.queue) .. " queued moves")
+        rec.plan = nil
         return
     end
 
-    -- Goal arrival auto-completes the puzzle now — the engine's
-    -- updatePuzzleMovement → onEnterGrid pipeline runs the full natural
-    -- completion (COMPLETE overlay, hack damage commit, dialogue
-    -- progression, auto-reset) when the cursor enters the Goal cell.
-    -- The old code wrote _RequestForceSuccess on goal arrival as a
-    -- workaround for Unit.move(via.Int2) bypassing the goal check;
-    -- that's unnecessary on the input-pipeline path.
+    -- Goal arrival auto-completes the puzzle via the engine's
+    -- updatePuzzleMovement → onEnterGrid pipeline (COMPLETE overlay, hack
+    -- damage commit, dialogue progression, auto-reset). The success trigger
+    -- then fires and the observer clears this puzzle's plan.
+end
+
+
+-- ---------------------------------------------------------------------------
+-- Compatibility shims (hacking_debug.lua manual plan buttons)
+-- ---------------------------------------------------------------------------
+-- The debug panel queues/clears a manual plan against whatever's on screen.
+-- Route those through the per-puzzle system so manual testing behaves like
+-- production dispatch (validation, parking, etc.).
+
+function M.queue_plan(directions)
+    local id = M.current_puzzle_id()
+    if id == nil then return 0 end
+    local queued = M.set_plan(id, directions)
+    return queued
+end
+
+function M.clear_plan()
+    local rec = _get_current_record()
+    if rec then rec.plan = nil end
+end
+
+function M.plan_status()
+    return M.current_plan_status()
 end
 
 

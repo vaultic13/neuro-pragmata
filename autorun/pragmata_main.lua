@@ -44,9 +44,10 @@ require("pragmata.hacking_observer")
 -- button for end-to-end pipeline verification.
 require("pragmata.hacking_debug")
 
--- "Vera is hacking" on-screen overlay. Draws a banner over the game while
--- the AI peer is planning/executing a hack so it's clear the AI (not the
--- player) is driving the cursor. Toggle via mod_config.hacking_show_overlay.
+-- Auto-hack on-screen overlay. Draws a banner over the game while the AI peer
+-- is planning/executing a hack so it's clear the AI (not the player) is
+-- driving the cursor. Peer name shown comes from mod_config.display_name.
+-- Toggle via mod_config.hacking_show_overlay.
 require("pragmata.hacking_overlay")
 
 -- Abilities debug panel (ImGui). Renders under "Pragmata Abilities Debug";
@@ -179,14 +180,15 @@ dispatcher.register("pragmata_hack_plan", {
         .. "Read the state field carefully — the cursor and goal positions "
         .. "are given there, and the Adjacency block lists which first-moves "
         .. "are legal. Use those positions verbatim; do not infer or guess.\n"
-        .. "Avoid # walls, X EraseCode traps, and ~ trail cells. Plan ends on G.\n"
+        .. "Avoid # walls, X EraseCode traps, d error nodes, and ~ trail cells. "
+        .. "Plan ends on G.\n"
         .. "BONUS NODES: the state lists 'Bonus nodes'. Passing through them does "
         .. "more damage to the enemy and makes the hack last longer, so route "
-        .. "through as MANY as you can. BLUE 'O' nodes (the golden path) are worth "
-        .. "the most — grab those first; YELLOW '*' skill nodes are a secondary "
-        .. "bonus. A longer, winding path that collects more bonuses is better "
-        .. "than the shortest path, as long as it still ends on G and never steps "
-        .. "on an X trap or a ~ trail cell."
+        .. "through as MANY as you can. BLUE 'O' bonus nodes are worth the most — "
+        .. "grab those first; YELLOW '*' skill nodes are a secondary bonus. A "
+        .. "longer, winding path that collects more bonuses is better than the "
+        .. "shortest path, as long as it still ends on G and never steps on an X "
+        .. "trap, a d error node, or a ~ trail cell."
     ),
     schema = {
         type = "object",
@@ -194,38 +196,33 @@ dispatcher.register("pragmata_hack_plan", {
         properties = hack_plan_properties,
     },
     handler = function(args)
-        -- Check the observer's stale-plan flag: if the puzzle ended (player
-        -- dropped aim, target died) while the AI was generating, this reply
-        -- is stale and should be discarded rather than attempted.
-        local hacking_observer = package.loaded["pragmata.hacking_observer"]
-        local was_stale = false
-        if hacking_observer and hacking_observer.on_plan_received then
-            was_stale = hacking_observer.on_plan_received()
-        end
-
         local moves = args.moves or {}
         local count = #moves
 
-        if was_stale then
-            log.info("pragmata_hack_plan: received plan with " .. tostring(count)
-                  .. " moves, but the puzzle ended before the AI responded; discarding")
-            return true, ("plan discarded as stale (puzzle ended before reply): "
+        -- Hand the reply to the observer. It owns the force→reply→target
+        -- correlation: the moves are parked on the puzzle the in-flight force
+        -- was for and dispatched only while the player is aimed at it (now or
+        -- on return). Staleness from a structural change (e.g. a sticky bomb
+        -- that mutated the grid while the AI was generating) is caught at
+        -- dispatch time by the binding's structural-signature check.
+        local hacking_observer = package.loaded["pragmata.hacking_observer"]
+        if not (hacking_observer and hacking_observer.on_plan_received) then
+            return true, "observer unavailable; plan dropped"
+        end
+
+        local applied, info = hacking_observer.on_plan_received(moves)
+        if not applied then
+            log.info("pragmata_hack_plan: " .. tostring(count)
+                  .. " moves not applied (" .. tostring(info) .. ")")
+            return true, ("plan discarded (" .. tostring(info) .. "): "
                        .. tostring(count) .. " moves")
         end
 
-        if count == 0 then
-            return true, "empty plan; nothing to dispatch"
-        end
-
-        -- Drop any previous in-flight plan before queuing the new one.
-        puzzle_snake.clear_plan()
-
-        local queued = puzzle_snake.queue_plan(moves)
-        local skipped = count - queued
-        log.info(string.format("pragmata_hack_plan: queued %d/%d moves (%d skipped as invalid)",
-                               queued, count, skipped))
-        return true, string.format("plan dispatched: %d moves queued (%d skipped)",
-                                   queued, skipped)
+        local parked = info  -- on success, info is the `parked` bool
+        log.info(string.format("pragmata_hack_plan: applied %d moves (parked=%s)",
+                               count, tostring(parked)))
+        return true, string.format("plan applied: %d moves%s",
+                                   count, parked and " (parked until you re-aim)" or "")
     end,
 })
 

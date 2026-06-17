@@ -1,15 +1,23 @@
--- Hacking-grid (PuzzleSnake) lifecycle observer.
+-- Hacking-grid (PuzzleSnake) lifecycle observer + AI-peer plan orchestration.
 --
--- Polls the puzzle_snake binding's edge-trigger fields each frame and emits:
---   _StartTrg true        -> render grid, send context + actions/force
---   _GridChangeEndTrg true -> re-render, re-emit context
---   _ResetTrg / _GridResetRequest -> emit narrative reset event
---   _SuccessTrigger true  -> emit narrative success
---   _FailedTrigger true   -> emit narrative failure
+-- Watches the matched PuzzleSnake's edge triggers each frame and:
+--   _StartTrg / re-aim     -> mark the puzzle for a (re)force
+--   _GridChangeEndTrg true -> structural change -> invalidate plan, replan
+--   _ResetTrg true         -> clear the puzzle's plan, narrative reset
+--   _SuccessTrigger true   -> narrative success, clear the puzzle's plan
+--   _FailedTrigger true    -> narrative failure, clear the puzzle's plan
 --
--- The actions/force step is what kicks the AI peer's planning loop without
--- requiring an explicit prompt — when a hack grid appears in-game, the
--- AI receives the rendered grid and is asked to return a plan immediately.
+-- Forcing: each frame a reconciliation step decides whether the puzzle the
+-- player is currently aimed at needs a plan, and if so sends an actions/force
+-- (at most ONE outstanding at a time). The reply is parked on the puzzle it
+-- was planned for (bindings.puzzle_snake.set_plan) and dispatched only while
+-- that puzzle is on screen — so plans never apply to the wrong enemy, and a
+-- plan that arrives after the player ran away resumes when they return.
+--
+-- A plan is valid only while the puzzle's STRUCTURE (dims, goal, walls,
+-- traps) is unchanged. A sticky bomb that deletes a row changes the structure
+-- and invalidates the plan at whatever stage it's in (in-flight, parked, or
+-- mid-execution); we discard it and re-force against the new grid.
 
 local M = {}
 
@@ -24,122 +32,141 @@ local GAME = "Pragmata"
 
 -- Tunable: poll interval. The `_StartTrg` edge can be cleared by the engine
 -- within a handful of frames on some encounters, so polling every frame is
--- the safe default. Per-poll cost is just five `inst:get_field` reads,
--- well under 1ms.
+-- the safe default.
 local POLL_INTERVAL = 1
 local _frame = 0
 
--- Cumulative edge hit-counters for the debug panel. Incremented each time
--- a trigger transition fires its handler.
+-- Cumulative edge hit-counters for the debug panel.
 local _hit_counts = {
-    start_trg          = 0,
-    grid_change_end    = 0,
-    reset              = 0,
-    success            = 0,
-    failed             = 0,
-    cancelled          = 0,
+    start_trg       = 0,
+    grid_change_end = 0,
+    reset           = 0,
+    success         = 0,
+    failed          = 0,
+    cancelled       = 0,  -- retained for the debug panel; unused under per-puzzle model
 }
 
--- In-flight force tracking. Set when we emit a force; cleared when the
--- corresponding action_result comes back OR when the puzzle ends (success /
--- failure / GUI drop). When a force is "in flight" but the puzzle has
--- already ended, any plan that arrives is stale and the dispatcher will
--- reject it with a no-op.
-local _force_in_flight = false
-local _stale_plan_expected = false  -- set when puzzle ends mid-force
+-- The single in-flight force. _inflight_id is the puzzle id we last forced
+-- and are awaiting a plan reply for (nil = slot free). Keeping at most ONE
+-- force outstanding (a) makes reply attribution unambiguous — the reply
+-- belongs to _inflight_id — (b) respects the peer's one-force-at-a-time
+-- model, and (c) means we never create the overlapping-force situation whose
+-- handling is undefined. _inflight_since feeds a generous watchdog that
+-- releases the slot only if a reply is physically lost (sidecar / socket
+-- drop); it's a last resort, never hit in normal play.
+local _inflight_id = nil
+local _inflight_since = 0
+local INFLIGHT_WATCHDOG_FRAMES = 1200   -- ~20s at 60fps
 
--- Idempotency: signature of the state text we last forced. If on_start
--- fires again for the same puzzle with the same grid layout (e.g. the
--- engine retriggers the edge after a brief flicker), we skip the duplicate
--- send instead of asking the peer to re-plan against an unchanged grid.
--- Reset whenever the puzzle ends so re-aiming the same enemy re-fires.
-local _last_forced_state_hash = nil
+-- A pending explicit (re)start. _StartTrg fires (or aim enters a puzzle)
+-- 1-2 frames before the puzzle id is readable, so we set this flag and apply
+-- it in reconciliation once the current id resolves: it drops that puzzle's
+-- force snapshot so the puzzle re-forces even if its grid is byte-identical
+-- (the player's "try again" signal). Without this, a re-aim of an unchanged
+-- grid would be suppressed — the original stuck-hack bug.
+local _start_pending = false
 
--- Deferred-force state. _StartTrg can fire before _GridAccessor is populated;
--- in that case get_state() returns nil and we can't render the grid yet. We
--- mark "pending" and the per-frame poll retries until the grid becomes
--- readable OR the puzzle ends. ~2 seconds at 60fps is plenty for grid setup
--- to complete; if it doesn't, something is wrong and we log a warning.
-local _pending_force_frames = 0
-local MAX_PENDING_FORCE_FRAMES = 120
+-- Last puzzle id seen on screen, for target-switch / re-aim detection.
+local _last_observed_id = nil
 
--- On-screen overlay result flash. on_success / on_failed set a short-lived
--- flash so the player sees a clear "HACK COMPLETE" / "HACK FAILED" banner
--- after Vera finishes, even though the puzzle goes inactive immediately. The
--- frame poll counts it down; M.overlay_status() reports it to the overlay.
-local _flash_kind = nil           -- "success" | "failed" | nil
+-- On-screen result/transition flash (overlay). Counts down per frame.
+-- Tagged with the puzzle id it's ABOUT: transition flashes ("resumed",
+-- "retrying") are only shown while the player is aimed at that puzzle, so a
+-- target switch doesn't surface another enemy's "PUZZLE CHANGED" banner over
+-- the busy state. Result flashes ("success"/"failed") stay global — they
+-- describe the hack that just ended, wherever the player aims next.
+local _flash_kind = nil   -- "success" | "failed" | "resumed" | "retrying" | nil
 local _flash_frames = 0
-local FLASH_DURATION_FRAMES = 150 -- ~2.5s at 60fps
+local _flash_id = nil     -- puzzle the flash is about (nil = global)
+local FLASH_DURATION_FRAMES = 150  -- ~2.5s at 60fps
 
--- Overlay staleness safety net. is_active() can stay true after the player
--- drops aim (the engine's _GuiHandle lingers), so the banner can't rely on it
--- alone to clear. We hide the banner if the meaningful status hasn't changed
--- for a while: a hack that's genuinely live keeps changing (moves dispatch
--- ~7Hz; a plan reply flips planning->executing), so a frozen status means the
--- hack effectively stopped (aim dropped / plan never answered).
-local _ov_last_sig = nil
-local _ov_stale_frames = 0
-local OV_STALE_EXECUTING = 150    -- ~2.5s after the last move/no change
-local OV_STALE_PLANNING  = 360    -- ~6s waiting on a plan that never comes
+local function _set_flash(kind, id)
+    _flash_kind = kind
+    _flash_frames = FLASH_DURATION_FRAMES
+    _flash_id = id
+end
+
+-- Flash + narrate a structural replan, de-duplicated: the bomb can be caught
+-- by both the _GridChangeEndTrg edge and tick_plan's per-tick check, so we
+-- only emit the narrative once per "retrying" window.
+local function _signal_retry(id)
+    if _flash_kind == "retrying" and _flash_frames > 0 then
+        _set_flash("retrying", id)  -- refresh duration, suppress duplicate narrative
+        return
+    end
+    _set_flash("retrying", id)
+    emit.narrative("Hacking grid changed; replanning.")
+end
 
 
 -- ---------------------------------------------------------------------------
 -- Edge trackers
 -- ---------------------------------------------------------------------------
 -- Each tracker remembers the last observed value of one boolean trigger and
--- only fires its handler on transitions. Skips the first observation so we
--- don't emit a spurious "started" on game launch.
-
-local start_track    = emit.edge()
+-- only fires its handler on false->true transitions. Skips the first
+-- observation so we don't emit a spurious "started" on game launch.
+--
+-- IMPORTANT: read_trigger() reads from whichever puzzle the player is aimed
+-- at, so a target switch changes which instance the trackers observe. The
+-- trackers are RECREATED on every switch (see the frame poll) — otherwise
+-- "A's trigger was false, B's happens to be true" reads as an edge and fires
+-- a spurious handler (this was the bogus "PUZZLE CHANGED" banner when aiming
+-- at a second enemy mid-plan).
+local start_track      = emit.edge()
 local gridchange_track = emit.edge()
-local reset_track    = emit.edge()
-local success_track  = emit.edge()
-local failed_track   = emit.edge()
-local active_track   = emit.edge()  -- tracks GUI-handle / is_active(); fires cancellation when drops mid-force
+local reset_track      = emit.edge()
+local success_track    = emit.edge()
+local failed_track     = emit.edge()
 
--- HackingManager.LastHackingTarget handle from the previous poll. Used to
--- detect when the player switches aim between enemies without `_StartTrg`
--- firing again on the new instance (engine may only fire it on ctor /
--- first-ever start). When this changes from non-nil → non-nil, we treat
--- it as a fresh hack start for the new enemy.
-local _last_observed_target = nil
-
-
--- ---------------------------------------------------------------------------
--- Auto-force on grid start
--- ---------------------------------------------------------------------------
--- Per Neuro-SDK protocol, sending an actions/force prompts the AI peer to
--- pick exactly one of the listed actions. The state field carries the grid
--- render — the AI reads it to plan a route.
-
-local function _state_hash(text)
-    if text == nil then return "" end
-    -- Cheap signature: length + first 200 chars. Enough to differentiate
-    -- distinct grids without paying for a full hash.
-    return tostring(#text) .. ":" .. text:sub(1, 200)
+local function _reset_edge_trackers()
+    start_track      = emit.edge()
+    gridchange_track = emit.edge()
+    reset_track      = emit.edge()
+    success_track    = emit.edge()
+    failed_track     = emit.edge()
 end
 
 
-local function send_force(state_text)
+-- ---------------------------------------------------------------------------
+-- Force dispatch
+-- ---------------------------------------------------------------------------
+-- Per Neuro-SDK protocol, sending an actions/force prompts the AI peer to
+-- pick exactly one of the listed actions. The state field carries the grid
+-- render — the peer reads it to plan a route.
+local function send_force(id)
     if not config.hacking_auto_force then return end
 
-    -- Skip duplicate forces for an unchanged grid. The observer should
-    -- emit at most one force per puzzle start, but defensive against the
-    -- engine retriggering _StartTrg or our edge tracker double-firing.
-    local h = _state_hash(state_text)
-    if h == _last_forced_state_hash then
-        log.info("hacking_observer: suppressing duplicate force (state unchanged)")
-        return
+    local state = snake.get_state()
+    local rendered
+    if state == nil then
+        rendered = "Hacking grid is active."
+    else
+        local ok, r = pcall(render.render, state, {
+            with_legend = config.hacking_render_legend,
+        })
+        if ok then
+            rendered = r
+            log.info("hacking_observer: rendered "
+                  .. tostring(state.width) .. "x" .. tostring(state.height)
+                  .. " grid for puzzle " .. tostring(id))
+        else
+            log.error("hacking_observer: render.render() threw: " .. tostring(r))
+            rendered = "Hacking grid is active. (rendering failed: "
+                    .. tostring(r):sub(1, 200) .. ")"
+        end
     end
-    _last_forced_state_hash = h
 
-    _force_in_flight = true
-    _stale_plan_expected = false
+    -- Snapshot the structure + cursor we're planning against BEFORE marking
+    -- the slot busy, so the reply and continuous validation compare to it.
+    snake.snapshot_force_target(id)
+    _inflight_id = id
+    _inflight_since = 0
+
     mailbox.send({
         command = "actions/force",
         game = GAME,
         data = {
-            state = state_text or "Hacking grid is active.",
+            state = rendered,
             query = "Hacking grid is live. Plan moves from cursor (@) to Goal "
                  .. "(G) via pragmata_hack_plan. IMPORTANT: route through as MANY "
                  .. "bonus nodes as possible on the way -- BLUE 'O' nodes are worth "
@@ -152,161 +179,164 @@ local function send_force(state_text)
             action_names = { "pragmata_hack_plan" },
         },
     })
+    log.info("hacking_observer: forced plan request for puzzle " .. tostring(id))
 end
 
 
--- Called by the action handler when a pragmata_hack_plan result is in.
--- Lets us clear the in-flight flag and check whether the plan was stale.
-function M.on_plan_received()
-    _force_in_flight = false
-    local was_stale = _stale_plan_expected
-    _stale_plan_expected = false
-    return was_stale
-end
+-- Called by the pragmata_hack_plan handler when a plan reply arrives. The
+-- reply belongs to the single in-flight force (_inflight_id). Parks the moves
+-- on that puzzle's record; they dispatch when the player is/becomes aimed at
+-- it (validity is re-checked at dispatch time). Returns (applied, info) where
+-- info is the `parked` bool on success or a reason string on discard.
+function M.on_plan_received(moves)
+    local id = _inflight_id
+    _inflight_id = nil
+    _inflight_since = 0
 
-
--- Try to render the active puzzle's grid and emit context + force. Returns
--- true if the force was sent (or the grid rendered with a placeholder
--- fallback for a render error). Returns false if state is not yet readable
--- — caller is expected to retry on a later frame.
-local function _try_emit_force_from_state()
-    local state = snake.get_state()
-    if state == nil then return false end
-
-    local ok, rendered = pcall(render.render, state, {
-        with_legend = config.hacking_render_legend,
-    })
-    if not ok then
-        log.error("hacking_observer: render.render() threw: " .. tostring(rendered))
-        send_force("Hacking grid is active. (rendering failed: "
-                .. tostring(rendered):sub(1, 200) .. ")")
-        return true
+    if id == nil then
+        log.info("hacking_observer: plan reply with no in-flight force; ignoring")
+        return false, "no in-flight force"
     end
 
-    log.info("hacking_observer: rendered "
-          .. tostring(state.width) .. "x" .. tostring(state.height) .. " grid")
+    local live = snake.live_puzzle_ids()
+    if not live[id] then
+        log.info("hacking_observer: plan reply for puzzle " .. tostring(id)
+              .. " which no longer exists; discarding")
+        return false, "puzzle gone"
+    end
 
-    -- The grid travels to Vera as the force `state` (the decision prompt she
-    -- plans against). We deliberately do NOT also emit it on the transient
-    -- context lane: a full grid is a unique blob that won't dedup, so transient
-    -- copies piled up alongside the live one in Vera's "recent game state" and
-    -- polluted her planning prompt with stale grids. The short
-    -- emit.narrative("Hacking grid started.") breadcrumb (in on_start) is
-    -- enough for lane-aware peers/logs.
-    send_force(rendered)
-    return true
+    local queued, parked = snake.set_plan(id, moves or {})
+    log.info("hacking_observer: applied plan to puzzle " .. tostring(id)
+          .. " (" .. tostring(queued) .. " moves, parked=" .. tostring(parked) .. ")")
+    return true, parked
 end
 
 
+-- ---------------------------------------------------------------------------
+-- Trigger handlers
+-- ---------------------------------------------------------------------------
 local function on_start()
     log.info("hacking_observer: _StartTrg fired")
     emit.narrative("Hacking grid started.")
-
-    -- Reset the overlay staleness so a fresh hack always shows its banner,
-    -- even if a previous hack was hidden by the staleness safety net with an
-    -- identical status signature.
-    _ov_last_sig = nil
-    _ov_stale_frames = 0
-
-    -- Defer ALL readiness checks (is_active, is_interactive, get_state)
-    -- to the per-frame retry loop. On first aim of a fresh enemy, the
-    -- engine can fire _StartTrg one or two frames before _GuiHandle is
-    -- set, before _State flips to Play, and before _ActualGrid is
-    -- populated — so deciding now would silently bail. The retry loop
-    -- handles cancellation (puzzle never becomes active) and cooldown
-    -- (active but not interactive) cleanly.
-    _pending_force_frames = MAX_PENDING_FORCE_FRAMES
+    -- The puzzle id can be unreadable for 1-2 frames after the edge; defer
+    -- the snapshot clear (the "try again" signal) to reconciliation.
+    _start_pending = true
 end
 
 
 local function on_grid_change()
-    local state = snake.get_state()
-    if state == nil then return end
-    local ok, rendered = pcall(render.render, state, {
-        with_legend = config.hacking_render_legend,
-    })
-    if not ok then
-        log.error("hacking_observer: render on grid-change threw: " .. tostring(rendered))
-        return
+    local id = snake.current_puzzle_id()
+    if id == nil then return end
+    -- Only replan if the STRUCTURE actually changed (sticky bomb / reset),
+    -- not on a benign change edge. tick_plan's per-tick check covers the
+    -- mid-execution case; this covers the idle / in-flight case.
+    if not snake.struct_changed(id) then return end
+
+    log.info("hacking_observer: grid structure changed (id=" .. tostring(id)
+          .. "); invalidating plan and replanning")
+    snake.discard_plan(id)
+    snake.clear_force_snapshot(id)
+    if _inflight_id == id then
+        -- A force was out for the now-stale structure; release it so the
+        -- reply (planned against the old grid) is dropped as stale and we
+        -- re-force against the new one.
+        _inflight_id = nil
+        _inflight_since = 0
     end
-    log.info("hacking_observer: grid mutated mid-hack")
-    emit.transient("Hacking grid changed:\n" .. rendered)
-    -- We do NOT currently auto-re-force on grid change. A future revision
-    -- could, once the plan-execution scheduler can abort and replan cleanly.
+    _signal_retry(id)
 end
 
 
 local function on_reset()
     log.info("hacking_observer: hack reset")
+    local id = snake.matched_puzzle_id()
+    if id ~= nil then
+        snake.discard_plan(id)
+        snake.clear_force_snapshot(id)
+        if _inflight_id == id then _inflight_id = nil; _inflight_since = 0 end
+    end
     emit.narrative("Hacking grid was reset.")
-end
-
-
--- Common puzzle-teardown bookkeeping: drop any queued moves so they don't
--- execute against a different enemy's puzzle, clear the pending-force
--- retry, and reset the duplicate-suppression hash so a re-hack of the
--- same enemy re-fires the force cleanly. Force-in-flight tracking is
--- handled per-caller because cancellation is semantically distinct.
-local function _reset_puzzle_local_state()
-    snake.clear_plan()
-    _pending_force_frames = 0
-    _last_forced_state_hash = nil
 end
 
 
 local function on_success()
     log.info("hacking_observer: hack succeeded")
-    _force_in_flight = false
-    _stale_plan_expected = false
-    _reset_puzzle_local_state()
-    _flash_kind = "success"
-    _flash_frames = FLASH_DURATION_FRAMES
+    local id = snake.matched_puzzle_id()
+    if id ~= nil then
+        snake.discard_plan(id)
+        snake.clear_force_snapshot(id)
+        if _inflight_id == id then _inflight_id = nil; _inflight_since = 0 end
+    end
+    _set_flash("success")
     emit.narrative("Hack succeeded.")
 end
 
 
 local function on_failed()
     log.info("hacking_observer: hack failed")
-    _force_in_flight = false
-    _stale_plan_expected = false
-    _reset_puzzle_local_state()
-    _flash_kind = "failed"
-    _flash_frames = FLASH_DURATION_FRAMES
+    local id = snake.matched_puzzle_id()
+    if id ~= nil then
+        snake.discard_plan(id)
+        snake.clear_force_snapshot(id)
+        if _inflight_id == id then _inflight_id = nil; _inflight_since = 0 end
+    end
+    _set_flash("failed")
     emit.narrative("Hack failed.")
 end
 
 
--- Player stopped aiming / target moved out of range / engine cancelled the
--- puzzle without a success-or-failure trigger. Mark any in-flight plan as
--- stale so the dispatcher discards it instead of attempting (future) move
--- execution against a no-longer-present puzzle.
-local function on_cancelled()
-    log.info("hacking_observer: hack cancelled (GUI handle dropped without success/failed)")
-    if _force_in_flight then
-        _stale_plan_expected = true
-        emit.narrative("Hack target lost before the plan could be executed; the next plan reply is stale.")
-    else
-        emit.narrative("Hack target lost.")
+-- ---------------------------------------------------------------------------
+-- Reconciliation: decide whether to force the current puzzle
+-- ---------------------------------------------------------------------------
+-- Re-derives "what does the puzzle I'm aimed at need?" from current truth
+-- every frame, rather than latching on an edge that can be missed. Forces
+-- exactly when the current puzzle is interactive, has no plan, nothing is in
+-- flight, and its state differs from the last thing we forced it against.
+local function _reconcile(cur_id)
+    -- Apply a pending (re)start: drop the entered puzzle's force snapshot so
+    -- it re-forces even on an unchanged grid (explicit retry).
+    if _start_pending and cur_id ~= nil then
+        snake.clear_force_snapshot(cur_id)
+        _start_pending = false
     end
-    _reset_puzzle_local_state()
+
+    if cur_id == nil then return end
+    if not snake.is_interactive() then return end
+    if snake.is_jamming() then return end        -- jammer suppresses hacking entirely
+    if snake.has_plan(cur_id) then return end    -- a plan is queued / executing
+    if _inflight_id == cur_id then return end     -- already waiting on this puzzle's plan
+    if _inflight_id ~= nil then return end        -- busy on another puzzle (overlay shows it)
+    if snake.needs_force(cur_id) then
+        send_force(cur_id)
+    end
 end
 
 
 -- ---------------------------------------------------------------------------
 -- Frame poll
 -- ---------------------------------------------------------------------------
-
 re.on_frame(function()
     _frame = _frame + 1
 
-    -- Count down the overlay result flash every frame, independent of the
-    -- poll interval below.
     if _flash_frames > 0 then _flash_frames = _flash_frames - 1 end
 
     if (_frame % POLL_INTERVAL) ~= 0 then return end
 
-    -- Each trigger is a one-frame edge field. We can read them safely each
-    -- poll; the edge-tracker only fires the handler on false→true transitions.
+    -- Target-switch / re-aim handling runs FIRST: the edge trackers below
+    -- sample whichever puzzle is currently aimed at, so on a switch they
+    -- must be re-seeded before any trigger is read — otherwise the other
+    -- enemy's trigger values masquerade as edges (the bogus "PUZZLE CHANGED"
+    -- on aim-switch). Entering a puzzle is also an implicit (re)start signal,
+    -- in case _StartTrg doesn't re-fire on a mid-aim swap. The PREVIOUS
+    -- puzzle's queue is intentionally LEFT parked so it resumes if the
+    -- player returns.
+    local cur_id = snake.current_puzzle_id()
+    if cur_id ~= _last_observed_id then
+        _reset_edge_trackers()
+        if cur_id ~= nil then _start_pending = true end
+        _last_observed_id = cur_id
+    end
+
     start_track(snake.read_trigger("_StartTrg"), function(now)
         if now then _hit_counts.start_trg = _hit_counts.start_trg + 1; on_start() end
     end)
@@ -327,73 +357,36 @@ re.on_frame(function()
         if now then _hit_counts.failed = _hit_counts.failed + 1; on_failed() end
     end)
 
-    -- Cancellation: is_active() goes from true to false WITHOUT a
-    -- success/failed trigger this same frame. With the HackingManager-
-    -- discriminated get_instance(), is_active() now reflects "the player
-    -- is aimed at an enemy whose puzzle hasn't ended" — dropping aim
-    -- flips it false, which is what we want.
-    active_track(snake.is_active(), function(now)
-        if now == false
-           and not snake.read_trigger("_SuccessTrigger")
-           and not snake.read_trigger("_FailedTrigger") then
-            _hit_counts.cancelled = _hit_counts.cancelled + 1
-            on_cancelled()
-        end
-    end)
-
-    -- Target switch: HackingManager.LastHackingTarget changed from one
-    -- enemy to another without an intervening "no target" frame. The new
-    -- puzzle's _StartTrg may not re-fire (the engine only sets it on ctor
-    -- / first start), so trigger a fresh on_start ourselves. The
-    -- send_force idempotency guard suppresses the duplicate if start_track
-    -- also fires this same frame.
-    local current_target = snake.get_active_target_handle()
-    if current_target ~= _last_observed_target then
-        if current_target ~= nil and _last_observed_target ~= nil then
-            log.info("hacking_observer: target switched mid-aim; firing on_start for new puzzle")
-            -- Old enemy's queue and pending state are stale now.
-            snake.clear_plan()
-            _pending_force_frames = 0
-            _force_in_flight = false
-            _stale_plan_expected = false
-            on_start()
-        end
-        _last_observed_target = current_target
-    end
-
-    -- Deferred force: on first-aim of an enemy, _StartTrg fires before
-    -- the puzzle is fully spun up. Each frame: check active → interactive
-    -- → grid-readable, and either fire or wait. Three exit paths:
-    --   1. Puzzle interactive AND grid renders → fire force, done.
-    --   2. Active but not interactive (cooldown) → abort cleanly, no
-    --      fallback (would just churn a no-op generation).
-    --   3. Timeout without ever becoming active → log + fallback so the
-    --      peer isn't left waiting silently.
-    if _pending_force_frames > 0 then
-        if snake.is_active() then
-            if not snake.is_interactive() then
-                log.info("hacking_observer: pending force dropped (puzzle active but not interactive — cooldown?)")
-                _pending_force_frames = 0
-            elseif _try_emit_force_from_state() then
-                log.info("hacking_observer: pending force sent after retry")
-                _pending_force_frames = 0
-            else
-                _pending_force_frames = _pending_force_frames - 1
-                if _pending_force_frames == 0 then
-                    log.warn("hacking_observer: pending force timed out (grid never became readable)")
-                    send_force("Hacking grid is active. (state details unavailable after retry)")
-                end
-            end
-        else
-            -- Not yet active (waiting for _GuiHandle / HackingManager
-            -- target update). Keep waiting; on_cancelled will clear if
-            -- the player drops aim before the puzzle materializes.
-            _pending_force_frames = _pending_force_frames - 1
-            if _pending_force_frames == 0 then
-                log.warn("hacking_observer: pending force timed out (puzzle never became active)")
-            end
+    -- React to dispatcher events: a parked plan resumed, or a plan was
+    -- aborted because the grid structure changed under it. tick_plan only
+    -- dispatches the currently-aimed puzzle, so these are about cur_id.
+    for _, e in ipairs(snake.consume_plan_events()) do
+        if e == "resumed" then
+            _set_flash("resumed", cur_id)
+        elseif e == "grid_changed" then
+            _signal_retry(cur_id)
         end
     end
+
+    -- In-flight watchdog: release the slot if the forced puzzle was destroyed
+    -- or if a reply never came back within a generous window (lost message).
+    if _inflight_id ~= nil then
+        _inflight_since = _inflight_since + 1
+        local live = snake.live_puzzle_ids()
+        if not live[_inflight_id] then
+            log.info("hacking_observer: in-flight puzzle " .. tostring(_inflight_id)
+                  .. " gone; releasing force slot")
+            _inflight_id = nil
+            _inflight_since = 0
+        elseif _inflight_since > INFLIGHT_WATCHDOG_FRAMES then
+            log.warn("hacking_observer: in-flight force watchdog fired (no reply in "
+                  .. tostring(INFLIGHT_WATCHDOG_FRAMES) .. " frames); releasing slot")
+            _inflight_id = nil
+            _inflight_since = 0
+        end
+    end
+
+    _reconcile(cur_id)
 end)
 
 
@@ -403,63 +396,55 @@ end
 
 
 -- Status for the on-screen overlay (hacking_overlay.lua). Returns:
---   { phase = "idle"|"planning"|"executing"|"success"|"failed",
+--   { phase = "idle"|"planning"|"busy"|"executing"|"resumed"|"retrying"
+--             |"jammed"|"success"|"failed",
 --     executed = <number>, total = <number> }   -- counts only when executing
--- "planning"  : a force is out to Vera; we're waiting for her plan reply.
--- "executing" : Vera's plan is queued / being dispatched cell-by-cell (or the
---               last move is animating to the goal).
+-- "planning"  : a force is out for the current puzzle; waiting on the reply.
+-- "busy"      : a force is out for a DIFFERENT puzzle; the current one waits.
+-- "executing" : the current puzzle's plan is dispatching cell-by-cell.
+-- "resumed"   : a parked plan just began running on return (brief flash).
+-- "retrying"  : the grid changed (e.g. sticky bomb); replanning (brief flash).
+-- "jammed"    : a jammer is suppressing hacking; planning is paused.
 -- "success"/"failed": short-lived flash after the hack resolves.
 function M.overlay_status()
-    -- Result flash takes priority and persists briefly even after the puzzle
-    -- goes inactive, so COMPLETE / FAILED stays visible for a beat.
-    if _flash_frames > 0 and _flash_kind ~= nil then
-        _ov_stale_frames = 0
-        _ov_last_sig = nil
-        return { phase = _flash_kind }
-    end
+    local cur = snake.current_puzzle_id()
 
-    -- Work out the candidate phase. We gate on is_interactive() (not just
-    -- is_active()): it additionally checks the puzzle's _State, which drops out
-    -- of the Play state when the player cancels — catching cancels that
-    -- is_active() misses because the engine's _GuiHandle lingers.
-    local phase, executed, total = nil, 0, 0
-    if snake.is_interactive() then
-        local ps = snake.plan_status()
-        if ps.queue_size and ps.queue_size > 0 then
-            phase, executed, total = "executing", ps.executed or 0, ps.total or 0
-        elseif ps.total and ps.total > 0 then
-            -- Plan dispatched, puzzle still live (last move animating, or Vera
-            -- under-planned and the cursor is parked).
-            phase, executed, total = "executing", ps.total, ps.total
-        elseif _force_in_flight or _pending_force_frames > 0 then
-            -- Force out, no moves yet => waiting on the plan. Gating on the
-            -- force flag means a manual (non-AI) hack shows no banner.
-            phase = "planning"
+    -- Result/transition flash takes priority and persists briefly. Transition
+    -- flashes (resumed/retrying) are scoped to the puzzle they're about —
+    -- after a target switch the new puzzle's true state (usually "busy")
+    -- shows instead of another enemy's banner. Result flashes stay global.
+    if _flash_frames > 0 and _flash_kind ~= nil then
+        if _flash_id == nil or _flash_id == cur then
+            return { phase = _flash_kind }
         end
     end
 
-    if phase == nil then
-        _ov_stale_frames = 0
-        _ov_last_sig = nil
+    if cur == nil or not snake.is_interactive() then
         return { phase = "idle" }
     end
 
-    -- Staleness safety net: if the meaningful status is frozen for too long,
-    -- the hack has effectively stopped (aim dropped while _GuiHandle/_State
-    -- linger, or a plan request that was never answered). Hide the banner.
-    local sig = phase .. ":" .. tostring(executed) .. "/" .. tostring(total)
-    if sig == _ov_last_sig then
-        _ov_stale_frames = _ov_stale_frames + 1
-    else
-        _ov_stale_frames = 0
-        _ov_last_sig = sig
-    end
-    local limit = (phase == "planning") and OV_STALE_PLANNING or OV_STALE_EXECUTING
-    if _ov_stale_frames > limit then
-        return { phase = "idle" }
+    -- Jammer active: hacking is suppressed entirely; no plan will be forced
+    -- until it clears.
+    if snake.is_jamming() then
+        return { phase = "jammed" }
     end
 
-    return { phase = phase, executed = executed, total = total }
+    -- A force is out for another enemy; the current puzzle can't be planned
+    -- until it resolves (one force at a time).
+    if _inflight_id ~= nil and _inflight_id ~= cur then
+        return { phase = "busy" }
+    end
+
+    local ps = snake.current_plan_status()
+    if ps.queue_size and ps.queue_size > 0 then
+        return { phase = "executing", executed = ps.executed or 0, total = ps.total or 0 }
+    end
+
+    if _inflight_id == cur then
+        return { phase = "planning" }
+    end
+
+    return { phase = "idle" }
 end
 
 

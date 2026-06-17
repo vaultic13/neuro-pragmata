@@ -54,7 +54,8 @@ _HACK_PLAN_DESCRIPTION = (
     "Read the state field carefully — the cursor and goal positions are "
     "given there, and the Adjacency block lists which first-moves are "
     "legal. Use those positions verbatim; do not infer or guess.\n"
-    "Avoid # walls, X EraseCode traps, and ~ trail cells. Plan ends on G."
+    "Avoid # walls, X EraseCode traps, d error nodes, and ~ trail cells. "
+    "Plan ends on G."
 )
 
 ACTION_HACK_PLAN_DEF = {

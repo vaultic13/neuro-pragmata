@@ -104,8 +104,9 @@ User-tunable settings live in [`autorun/pragmata/mod_config.lua`](autorun/pragma
 - `hacking_auto_force` (default `true`) — auto-send an `actions/force` the moment a hacking grid appears, prompting the peer to plan immediately.
 - `hacking_render_legend` (default `true`) — include the cell-glyph legend in each grid render.
 - `hacking_require_reasoning` (default `false`) — require a step-by-step `reasoning` string alongside the moves (more accurate, slower).
-- `hacking_show_overlay` (default `true`) — draw the on-screen "Vera is hacking" banner while the peer is planning/executing a hack. No-ops on builds without REFramework's `draw` API.
-- `hacking_overlay_y_fraction` (default `0.10`) — vertical placement of that banner as a fraction of screen height; nudge it if it overlaps the game HUD.
+- `display_name` (default `"Neuro"`) — name shown in the on-screen hacking banner. Purely cosmetic; nothing in the wire protocol or dispatch logic reads it.
+- `hacking_show_overlay` (default `true`) — draw the on-screen "`<display_name>` is hacking" banner while the peer is planning/executing a hack. No-ops on builds without REFramework's `draw` API.
+- `hacking_overlay_x_fraction` (default `0.5`) / `hacking_overlay_y_fraction` (default `0.08`) — horizontal/vertical placement of that banner as fractions of screen size; nudge them if it overlaps the game HUD.
 
 Two ImGui diagnostic panels are available in the REFramework menu (Insert): **Pragmata Hacking Debug** and **Pragmata Abilities Debug** (live Scan / Overdrive binding state + manual trigger buttons).
 
@@ -128,7 +129,7 @@ The hacking minigame (the `app.PuzzleSnake` cursor-routing puzzle that pops up w
 2. The peer returns a list of cardinal moves (`up` / `down` / `left` / `right`). The render highlights **bonus nodes** — cells that do more damage to the enemy and make the hack last longer — and asks the peer to route through as many as possible en route to the goal (a longer bonus-collecting path beats the shortest path, as long as it still reaches the goal and avoids `X` traps and `~` trail cells).
 3. The mod dispatches the moves one cell per ~130ms by writing the target coords into `PuzzleSnake._NextMovePosition`. The engine's natural input pipeline (`updateInput → updateNextPosition → updatePuzzleMovement → onEnterGrid`) then processes each move for free: walls block, directional gates enforce, trail flags update, skill/bonus cells trigger, `EraseCode` traps fire, and **goal arrival auto-completes the puzzle** with the full COMPLETE animation. (Writing `_NextMovePosition` replaced an earlier `Unit.move(via.Int2)` + `_RequestForceSuccess` approach, which bypassed those per-cell side-effects; `Unit.move` is retained only for the debug-panel poke buttons.)
 
-While the peer is driving a hack, the mod draws an on-screen **"Vera is hacking"** banner (planning → executing move N/M → COMPLETE/FAILED) so it's clear the AI — not the player — is moving the cursor. Toggle with `hacking_show_overlay`.
+While the peer is driving a hack, the mod draws a prominent, HUD-styled on-screen **"`<display_name>` is hacking"** banner (planning → executing move N/M → resuming/replanning → COMPLETE/FAILED) so it's clear the AI — not the player — is moving the cursor. The displayed name comes from `display_name`; toggle the banner with `hacking_show_overlay` and reposition with the `*_fraction` settings.
 
 For full schemas, message shapes, and integration notes, see [ACTIONS.md](ACTIONS.md#pragmata_hack_plan).
 

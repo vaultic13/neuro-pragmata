@@ -237,21 +237,39 @@ re.on_draw_ui(function()
         end
 
         emit("")
-        emit("full cell list (excluding type=None padding):")
-        emit("  (gold=_IsGoldenPath, parry=IsParryHacking, skill=ActiveSkill type, skillN=ActiveSkillCount)")
+        emit("full cell list (excluding undecorated type=None padding):")
+        emit("  (gold=_IsGoldenPath [auto-hack route marker; NOT the blue nodes - those are type=Open],")
+        emit("   parry=IsParryHacking, skill=ActiveSkill type, skillN=ActiveSkillCount,")
+        emit("   deadfil=_DeadFilamentType [boss-content variant; None on standard grids],")
+        emit("   hide=_IsHide [node not yet revealed], obs=_ObstacleReasons bitmask [nonzero = blocked;")
+        emit("   1=ObstacleGrid aka the red error nodes, 2=DeadFilament, 4=Ch16092, 8=Ch14100, 16=AllPassed],")
+        emit("   stun=_StunReasons bitmask, skipR/skipC=IsSkipRow/IsSkipCol [row/col removed by sticky bomb])")
         for i, c in ipairs(cells) do
-            if c.type ~= "None" then
+            -- A cell can be type=None yet still carry a decoration the AI
+            -- must know about (error nodes live exactly there). Filtering on
+            -- type alone is what hid dead filaments from earlier dumps.
+            local decorated = c.dead_filament or c.is_erase or c.is_parry_hacking
+                or c.is_golden_path or c.active_skill_type ~= nil
+                or c.is_hide or c.is_skip_row or c.is_skip_col
+                or (c.obstacle_reasons or 0) ~= 0 or (c.stun_reasons or 0) ~= 0
+            if c.type ~= "None" or decorated then
                 emit(string.format(
-                    "  [%3d] pos=(%d,%d) type=%-11s gold=%-5s parry=%-5s skill=%-12s skillN=%-3s in=%-12s out=%-12s erase=%-5s trail=%s",
+                    "  [%3d] pos=(%d,%d) type=%-11s gold=%-5s parry=%-5s skill=%-12s skillN=%-3s deadfil=%-8s in=%-12s out=%-12s erase=%-5s hide=%-5s obs=%-3s stun=%-3s skipR=%-5s skipC=%-5s trail=%s",
                     i, c.x, c.y,
                     tostring(c.type),
                     tostring(c.is_golden_path),
                     tostring(c.is_parry_hacking),
                     tostring(c.active_skill_type),
                     tostring(c.active_skill_count),
+                    tostring(c.dead_filament_type),
                     tostring(c.in_way_type),
                     tostring(c.out_way_type),
                     tostring(c.is_erase),
+                    tostring(c.is_hide),
+                    tostring(c.obstacle_reasons),
+                    tostring(c.stun_reasons),
+                    tostring(c.is_skip_row),
+                    tostring(c.is_skip_col),
                     tostring(c.in_trail)
                 ))
             end

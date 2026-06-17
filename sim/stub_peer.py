@@ -49,7 +49,8 @@ logger = logging.getLogger("stub_peer")
 _GLYPH_TO_TYPE: dict[str, CellType] = {
     "S": CellType.START,
     "G": CellType.GOAL,
-    ".": CellType.OPEN,
+    ".": CellType.NONE,
+    "O": CellType.OPEN,
     "#": CellType.OBSTACLE,
     "s": CellType.SHIELD,
     "C": CellType.CHAIN,
@@ -115,7 +116,7 @@ def _parse_grid(rendered: str) -> Optional[Grid]:
     cursor: Optional[tuple[int, int]] = None
     start: Optional[tuple[int, int]] = None
     goal: Optional[tuple[int, int]] = None
-    cells = [[Cell(type=CellType.OPEN) for _ in range(width)] for _ in range(height)]
+    cells = [[Cell(type=CellType.NONE) for _ in range(width)] for _ in range(height)]
 
     for y, row in enumerate(data_rows):
         for x, glyph in enumerate(row):
@@ -128,7 +129,7 @@ def _parse_grid(rendered: str) -> Optional[Grid]:
                 cells[y][x] = Cell(type=CellType.START)
                 start = start or (x, y)
             elif glyph == "~":
-                cells[y][x] = Cell(type=CellType.OPEN)
+                cells[y][x] = Cell(type=CellType.NONE)
             elif glyph in _ONE_WAY_DIRS:
                 cells[y][x] = Cell(type=CellType.ONE_WAY, direction=_ONE_WAY_DIRS[glyph])
             elif glyph in _GLYPH_TO_TYPE:
@@ -139,7 +140,7 @@ def _parse_grid(rendered: str) -> Optional[Grid]:
                 elif ct is CellType.GOAL:
                     goal = (x, y)
             else:
-                cells[y][x] = Cell(type=CellType.OPEN)
+                cells[y][x] = Cell(type=CellType.NONE)
 
     # Prefer explicit "Cursor:" / "Goal:" metadata over what we inferred.
     for line in lines:
