@@ -57,9 +57,27 @@ local function encode_table(t)
         return "[" .. table.concat(parts, ",") .. "]"
     end
 
+    -- Object. Lua `pairs()` order is non-deterministic for string keys, but
+    -- some consumers care about property order — notably a tool schema's
+    -- `properties`, where the order maps to the order the LLM generates the
+    -- arguments in (e.g. a `reasoning` field must come BEFORE the answer field
+    -- to actually function as chain-of-thought). A table may set a `__keyorder`
+    -- array to pin the leading keys; it is consumed here and never emitted.
+    local order = rawget(t, "__keyorder")
     local parts = {}
+    local emitted = {}
+    if type(order) == "table" then
+        for _, k in ipairs(order) do
+            if t[k] ~= nil and not emitted[k] then
+                parts[#parts + 1] = '"' .. escape_string(tostring(k)) .. '":' .. encode_value(t[k])
+                emitted[k] = true
+            end
+        end
+    end
     for k, v in pairs(t) do
-        parts[#parts + 1] = '"' .. escape_string(tostring(k)) .. '":' .. encode_value(v)
+        if k ~= "__keyorder" and not emitted[k] then
+            parts[#parts + 1] = '"' .. escape_string(tostring(k)) .. '":' .. encode_value(v)
+        end
     end
     return "{" .. table.concat(parts, ",") .. "}"
 end

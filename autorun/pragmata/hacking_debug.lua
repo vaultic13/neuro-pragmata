@@ -57,6 +57,19 @@ end
 -- without requiring the user to dig through log.txt.
 local _last_test_outcome = "(not yet pressed)"
 
+-- Live ASCII-grid preview state. Lets us eyeball exactly what the renderer
+-- produces for the current puzzle ON SCREEN (in the panel), so glyph/legend
+-- changes can be verified without running the AI peer and reading the force
+-- context. `live` re-renders every frame the node is expanded; legend/adjacency
+-- mirror render.render's opts so we can check those blocks too.
+local _preview = {
+    live           = true,
+    with_legend    = true,
+    with_adjacency = true,
+    text           = nil,
+    err            = nil,
+}
+
 local function send_test_force()
     log.info("hacking_debug: send_test_force() ENTER")
 
@@ -152,6 +165,14 @@ re.on_draw_ui(function()
     else
         imgui.text("Active instance (matched to target): no")
     end
+    -- Instances bound to the aimed enemy, by lifecycle. >1 total with an
+    -- "ended" present = the "invisible enemy" bug: a leftover completed
+    -- PuzzleSnake shares the target. The matcher now skips ended ones in
+    -- favor of a playable instance; picked = what it actually chose.
+    imgui.text(string.format(
+        "Instances matching target: %d (playable=%d idle=%d ended=%d), picked=%s",
+        s.match_total or 0, s.match_playable or 0, s.match_idle or 0,
+        s.match_ended or 0, tostring(s.picked_lifecycle)))
     imgui.text("GUI handle present: " .. bool_text(s.gui_handle_present))
     imgui.text("is_active(): " .. bool_text(s.active))
 
@@ -172,6 +193,43 @@ re.on_draw_ui(function()
         imgui.text(string.format("Cursor: (%d, %d)", s.cursor.x, s.cursor.y))
     else
         imgui.text("Cursor: <unreadable>")
+    end
+
+    imgui.separator()
+    -- Equipped hacking mode (PuzzleSnakeMode). Read-only probe: equip each mode
+    -- at the Tram Terminal and confirm 'mapped' matches it. This feeds the
+    -- force-context mode line. engine='<name>' with mapped=Unknown = a hash we
+    -- haven't mapped (report it).
+    local mode = snake.read_hacking_mode()
+    if mode == nil then
+        imgui.text("Hacking mode: <binding not ready>")
+    elseif not mode.ok then
+        imgui.text("Hacking mode: read FAILED (" .. tostring(mode.err) .. ")")
+    else
+        imgui.text(string.format("Hacking mode: mapped=%s  mode=%s  engine='%s'  hash=%s",
+            tostring(mode.key), tostring(mode.style),
+            tostring(mode.engine_name), tostring(mode.hash)))
+        if mode.desc then imgui.text("  -> " .. mode.desc) end
+    end
+
+    -- Equipped active SKILL (the '*' node). Read-only probe: equip each skill at
+    -- the Tram Terminal and confirm 'skill' matches it (this also confirms the
+    -- inferred relabels Stun=Freeze / DefenseDown=Expose / Shock=Decode). The
+    -- equipped_id is the raw ObjectID fallback if auto-matching fails.
+    local skill = snake.read_active_skill()
+    if skill == nil then
+        imgui.text("Active skill: <binding not ready>")
+    elseif not skill.ok then
+        imgui.text("Active skill: read FAILED (" .. tostring(skill.err) .. ")")
+    elseif skill.none then
+        imgui.text(string.format("Active skill: none matched (slots=%s)", tostring(skill.count)))
+    else
+        imgui.text(string.format("Active skill: skill=%s  enum=%s  engine='%s'  id=%s  distinct=%s slots=%s%s",
+            tostring(skill.display), tostring(skill.key),
+            tostring(skill.engine_name), tostring(skill.equipped_id),
+            tostring(skill.distinct), tostring(skill.count),
+            skill.multiple and "  (MULTIPLE - Code Generator)" or ""))
+        if skill.desc then imgui.text("  -> " .. skill.desc) end
     end
 
     imgui.separator()
@@ -287,7 +345,7 @@ re.on_draw_ui(function()
         )
     end
     imgui.same_line()
-    if imgui.button("Render current grid (preview)") then
+    if imgui.button("Render current grid (to log)") then
         local state = snake.get_state()
         if state == nil then
             _last_test_outcome = "get_state returned nil"
@@ -300,6 +358,58 @@ re.on_draw_ui(function()
                 _last_test_outcome = "RENDER FAILED: " .. tostring(rendered)
             end
         end
+    end
+
+    imgui.separator()
+    -- On-screen ASCII grid preview. Exactly what render.render() produces for
+    -- the live puzzle, drawn here in the panel (not the log) so glyph/legend/
+    -- mode changes can be verified at a glance. Open this node next to the game.
+    if imgui.tree_node("Live ASCII grid preview") then
+        local _
+        _, _preview.live = imgui.checkbox("Live (re-render every frame)", _preview.live)
+        imgui.same_line()
+        _, _preview.with_legend = imgui.checkbox("legend", _preview.with_legend)
+        imgui.same_line()
+        _, _preview.with_adjacency = imgui.checkbox("adjacency", _preview.with_adjacency)
+
+        local do_render = _preview.live
+        if imgui.button("Render once") then do_render = true end
+
+        if do_render then
+            local state = snake.get_state()
+            if state == nil then
+                _preview.text = nil
+                _preview.err = "get_state() returned nil "
+                    .. "(no active/interactive puzzle right now)"
+            else
+                local ok, rendered = pcall(render.render, state, {
+                    with_legend    = _preview.with_legend,
+                    with_adjacency = _preview.with_adjacency,
+                })
+                if ok then
+                    _preview.text = rendered
+                    _preview.err  = nil
+                else
+                    _preview.err  = "render failed: " .. tostring(rendered)
+                end
+            end
+        end
+
+        if _preview.err then
+            imgui.text(_preview.err)
+        end
+        if _preview.text then
+            imgui.separator()
+            -- Draw line-by-line so every newline breaks regardless of build
+            -- (imgui.text on the whole block is unreliable). The panel font is
+            -- proportional, so columns won't perfectly align — fine for
+            -- verifying glyphs; cross-check exact spacing in the log dump if
+            -- needed.
+            for line in (_preview.text .. "\n"):gmatch("([^\n]*)\n") do
+                imgui.text(line)
+            end
+        end
+        imgui.tree_pop()
     end
 
     imgui.separator()

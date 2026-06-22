@@ -176,15 +176,18 @@ class Cell:
     # CellType.DEAD_FILAMENT instead; this flag exists so grids reconstructed
     # from live cell reads behave identically.
     blocked: bool = False
-    # The engine's separate _DeadFilamentType decoration (None on standard
-    # grids; authored for dead-filament boss content). Treated as one more
-    # error-node flavor.
+    # The engine's separate _DeadFilamentType decoration. This is the PURPLE
+    # "slow" node (verified in-game): walkable — the cursor passes through it,
+    # just pausing briefly — and frequently on the route to the goal. It can
+    # overlap an Open cell, in which case it's also a blue bonus. NOT an error
+    # node; kept here for parity with live cell reads but it does not block.
     dead_filament: bool = False
 
     def rule(self) -> _CellRule:
-        if (self.blocked or self.dead_filament) \
-                and self.type is not CellType.DEAD_FILAMENT:
-            # Decorated hazard wins over the underlying terrain.
+        if self.blocked and self.type is not CellType.DEAD_FILAMENT:
+            # The red ObstacleGrid error-node decoration wins over the
+            # underlying terrain. (dead_filament/purple slow nodes do NOT
+            # block — they keep their underlying type's rule.)
             return CELL_RULES[CellType.DEAD_FILAMENT]
         if self.type is CellType.ONE_WAY and self.direction is not None:
             return oneway_rule(self.direction)

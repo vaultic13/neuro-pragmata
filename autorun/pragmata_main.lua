@@ -22,6 +22,12 @@ local puzzle_snake = require("pragmata.bindings.puzzle_snake")
 -- and forwards each new line to the AI as a silent context message.
 require("pragmata.dialogue")
 
+-- Collectible-document ("Archive") capture. Forwards the text of a document
+-- as a silent context message when one is opened/read, so the AI peer can be
+-- asked to read or recall it. Idle until mod_config.archive_gui_path is set (see the
+-- discovery instructions in archive.lua / mod_config.lua).
+require("pragmata.archive")
+
 -- Ability state emitters. Polls binding state each frame; emits gauge/scan/
 -- overdrive/auto-hack-unlock edges as context updates with appropriate lanes.
 require("pragmata.ability_state")
@@ -159,15 +165,33 @@ local hack_plan_required = { "moves" }
 if config.hacking_require_reasoning then
     hack_plan_properties.reasoning = {
         type = "string",
+        -- Hard cap so a model that can't find a route can't spiral into a
+        -- multi-paragraph "let me reconsider…" and time the force out. A compact
+        -- per-step trace of even a long path fits well under this.
+        maxLength = 700,
         description = (
-            "Trace your plan one step at a time, copying the cursor "
-            .. "and goal coordinates from the state field exactly. "
-            .. "Format: '1:down(1,2)open; 2:right(2,2)open; 3:down(2,3)G'. "
-            .. "Aim for ~150 chars; one line per move."
+            "BEFORE the moves, trace ONE route step by step from the cursor in "
+            .. "the state. For each move write the cell you land on and what's "
+            .. "there, read straight from the grid, e.g. '1:up(2,0)O; 2:right(3,0).; "
+            .. "3:right(4,0)O; 4:down(4,1)G'. A step onto # or X is ILLEGAL — pick "
+            .. "another direction; never write a # or X step. Be DECISIVE: commit "
+            .. "to ONE route and keep it short — do NOT second-guess, restart, or "
+            .. "write prose like 'let me reconsider'. If you can't quickly find a "
+            .. "safe route through a blue, just take the shortest safe path to G. "
+            .. "End on G; the moves array must match the trace exactly."
         ),
     }
     hack_plan_required = { "reasoning", "moves" }
 end
+-- Pin the SERIALIZED property order so `reasoning` (when present) comes out
+-- BEFORE `moves`. The order properties appear in the schema maps to the order
+-- the model generates the arguments, and chain-of-thought only works if the
+-- trace is generated FIRST — otherwise the moves come straight from the model's
+-- reflex and the reasoning is a post-hoc rationalization that doesn't even match
+-- them (observed: a correct trace next to a wrong move list). Lua's pairs() order
+-- is non-deterministic, so json_encode honors this __keyorder hint. Mirrors the
+-- required-order. Backend-agnostic — applies to whatever peer reads the schema.
+hack_plan_properties.__keyorder = hack_plan_required
 
 dispatcher.register("pragmata_hack_plan", {
     description = (
@@ -180,22 +204,28 @@ dispatcher.register("pragmata_hack_plan", {
         .. "Read the state field carefully — the cursor and goal positions "
         .. "are given there, and the Adjacency block lists which first-moves "
         .. "are legal. Use those positions verbatim; do not infer or guess.\n"
-        .. "Avoid # walls, X EraseCode traps, d error nodes, and ~ trail cells. "
-        .. "Plan ends on G.\n"
-        .. "BONUS NODES: the state lists 'Bonus nodes'. Passing through them does "
-        .. "more damage to the enemy and makes the hack last longer, so route "
-        .. "through as MANY as you can. BLUE 'O' bonus nodes are worth the most — "
-        .. "grab those first; YELLOW '*' skill nodes are a secondary bonus. A "
-        .. "longer, winding path that collects more bonuses is better than the "
-        .. "shortest path, as long as it still ends on G and never steps on an X "
-        .. "trap, a d error node, or a ~ trail cell."
+        .. "NEVER step on a # (a wall — the cursor just stops), a d (an error "
+        .. "node — entering RESETS the whole hack and you lose all progress), or "
+        .. "an X (it fails the hack), and never re-enter a ~ trail cell against "
+        .. "its arrow. Check "
+        .. "EVERY move's destination cell against the grid, not just the first "
+        .. "one. Plan ends on G.\n"
+        .. "BONUS NODES: blue 'O' nodes are where the damage comes from — a hack "
+        .. "that grabs none is nearly useless, so ACTIVELY prefer a SAFE route "
+        .. "that passes through one or two O's on the way to G, even a few moves "
+        .. "longer. Collect them going forward; do NOT detour out to a blue and "
+        .. "double back, since retracing your own path undoes the blues. Hard "
+        .. "limits: never step on a # (wall) or d (error node) to reach one - a d "
+        .. "resets the whole hack - and only fall back to the shortest path if no "
+        .. "O is reachable without crossing a # or d. (Yellow '*' = minor "
+        .. "secondary bonus.)"
     ),
     schema = {
         type = "object",
         required = hack_plan_required,
         properties = hack_plan_properties,
     },
-    handler = function(args)
+    handler = function(args, ctx)
         local moves = args.moves or {}
         local count = #moves
 
@@ -210,8 +240,16 @@ dispatcher.register("pragmata_hack_plan", {
             return true, "observer unavailable; plan dropped"
         end
 
-        local applied, info = hacking_observer.on_plan_received(moves)
+        -- DEFER the action result. The plan executes asynchronously over the
+        -- next ~second; its REAL outcome (reached the goal, hit an error node and
+        -- reset, stopped at a wall, fell short) is reported as the tool result
+        -- via ctx.resolve when the plan resolves — so the AI sees what actually
+        -- happened, not a blind "plan applied". The observer stores ctx.resolve
+        -- on the puzzle and the binding fires it at the terminal point.
+        local applied, info = hacking_observer.on_plan_received(moves, ctx.resolve)
         if not applied then
+            -- Couldn't park the plan (puzzle gone / no in-flight force). Resolve
+            -- synchronously — there's nothing to wait on.
             log.info("pragmata_hack_plan: " .. tostring(count)
                   .. " moves not applied (" .. tostring(info) .. ")")
             return true, ("plan discarded (" .. tostring(info) .. "): "
@@ -219,10 +257,10 @@ dispatcher.register("pragmata_hack_plan", {
         end
 
         local parked = info  -- on success, info is the `parked` bool
-        log.info(string.format("pragmata_hack_plan: applied %d moves (parked=%s)",
+        log.info(string.format("pragmata_hack_plan: applied %d moves (parked=%s); "
+                            .. "result deferred until the plan resolves",
                                count, tostring(parked)))
-        return true, string.format("plan applied: %d moves%s",
-                                   count, parked and " (parked until you re-aim)" or "")
+        return ctx.defer()
     end,
 })
 

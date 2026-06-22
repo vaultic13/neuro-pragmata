@@ -142,7 +142,8 @@ local function send_force(id)
         rendered = "Hacking grid is active."
     else
         local ok, r = pcall(render.render, state, {
-            with_legend = config.hacking_render_legend,
+            with_legend    = config.hacking_render_legend,
+            with_adjacency = config.hacking_render_adjacency,
         })
         if ok then
             rendered = r
@@ -166,15 +167,12 @@ local function send_force(id)
         command = "actions/force",
         game = GAME,
         data = {
+            -- Keep the query a one-liner: all routing rules, the legend, and
+            -- any bonus list live in `state` (the render), so repeating them
+            -- here is just bloat that dilutes the signal.
             state = rendered,
-            query = "Hacking grid is live. Plan moves from cursor (@) to Goal "
-                 .. "(G) via pragmata_hack_plan. IMPORTANT: route through as MANY "
-                 .. "bonus nodes as possible on the way -- BLUE 'O' nodes are worth "
-                 .. "the most (more damage + longer-lasting hack), then YELLOW '*' "
-                 .. "skill nodes (see the 'Bonus nodes' list in the state). A longer, "
-                 .. "winding route that collects more bonuses is better than the "
-                 .. "shortest path, as long as you still reach G and never step on an "
-                 .. "X trap or revisit a ~ trail cell.",
+            query = "Hacking grid is live. Call pragmata_hack_plan with your "
+                 .. "moves from @ to G (see the grid).",
             ephemeral_context = true,
             action_names = { "pragmata_hack_plan" },
         },
@@ -188,7 +186,7 @@ end
 -- on that puzzle's record; they dispatch when the player is/becomes aimed at
 -- it (validity is re-checked at dispatch time). Returns (applied, info) where
 -- info is the `parked` bool on success or a reason string on discard.
-function M.on_plan_received(moves)
+function M.on_plan_received(moves, resolve)
     local id = _inflight_id
     _inflight_id = nil
     _inflight_since = 0
@@ -205,7 +203,10 @@ function M.on_plan_received(moves)
         return false, "puzzle gone"
     end
 
-    local queued, parked = snake.set_plan(id, moves or {})
+    -- `resolve` is the dispatcher's deferred-result callback. Parking it on the
+    -- puzzle lets the binding report the plan's true outcome (reached goal /
+    -- error-node reset / wall / fell short) as the hack_plan tool result.
+    local queued, parked = snake.set_plan(id, moves or {}, resolve)
     log.info("hacking_observer: applied plan to puzzle " .. tostring(id)
           .. " (" .. tostring(queued) .. " moves, parked=" .. tostring(parked) .. ")")
     return true, parked
@@ -247,41 +248,52 @@ local function on_grid_change()
 end
 
 
-local function on_reset()
-    log.info("hacking_observer: hack reset")
+-- For end-of-hack triggers: resolve the puzzle's deferred hack_plan result (so
+-- the outcome reaches the AI as the tool result), tear down its plan/snapshot,
+-- and report whether a deferred result was actually pending. When it was, the
+-- hack ended a plan the AI drove, so we DON'T also narrate it as silent context
+-- — the tool result already covers it. A manual/auto hack (nothing pending)
+-- still gets the narrative.
+local function _end_hack(success, result_msg)
     local id = snake.matched_puzzle_id()
+    local plan_driven = false
     if id ~= nil then
+        plan_driven = snake.resolve_plan(id, success, result_msg)
         snake.discard_plan(id)
         snake.clear_force_snapshot(id)
         if _inflight_id == id then _inflight_id = nil; _inflight_since = 0 end
     end
-    emit.narrative("Hacking grid was reset.")
+    return plan_driven
+end
+
+
+local function on_reset()
+    log.info("hacking_observer: hack reset")
+    local plan_driven = _end_hack(false,
+        "The hacking grid reset to the start; none of the planned moves counted.")
+    if not plan_driven then
+        emit.narrative("Hacking grid was reset.")
+    end
 end
 
 
 local function on_success()
     log.info("hacking_observer: hack succeeded")
-    local id = snake.matched_puzzle_id()
-    if id ~= nil then
-        snake.discard_plan(id)
-        snake.clear_force_snapshot(id)
-        if _inflight_id == id then _inflight_id = nil; _inflight_since = 0 end
-    end
+    local plan_driven = _end_hack(true, "Reached the goal — the hack is complete.")
     _set_flash("success")
-    emit.narrative("Hack succeeded.")
+    if not plan_driven then
+        emit.narrative("Hack succeeded.")
+    end
 end
 
 
 local function on_failed()
     log.info("hacking_observer: hack failed")
-    local id = snake.matched_puzzle_id()
-    if id ~= nil then
-        snake.discard_plan(id)
-        snake.clear_force_snapshot(id)
-        if _inflight_id == id then _inflight_id = nil; _inflight_since = 0 end
-    end
+    local plan_driven = _end_hack(false, "The hack failed.")
     _set_flash("failed")
-    emit.narrative("Hack failed.")
+    if not plan_driven then
+        emit.narrative("Hack failed.")
+    end
 end
 
 
@@ -303,6 +315,7 @@ local function _reconcile(cur_id)
     if cur_id == nil then return end
     if not snake.is_interactive() then return end
     if snake.is_jamming() then return end        -- jammer suppresses hacking entirely
+    if snake.is_game_paused() then return end    -- don't force while the game is paused
     if snake.has_plan(cur_id) then return end    -- a plan is queued / executing
     if _inflight_id == cur_id then return end     -- already waiting on this puzzle's plan
     if _inflight_id ~= nil then return end        -- busy on another puzzle (overlay shows it)
@@ -361,10 +374,31 @@ re.on_frame(function()
     -- aborted because the grid structure changed under it. tick_plan only
     -- dispatches the currently-aimed puzzle, so these are about cur_id.
     for _, e in ipairs(snake.consume_plan_events()) do
-        if e == "resumed" then
+        local kind = (type(e) == "table") and e.kind or e
+        if kind == "resumed" then
             _set_flash("resumed", cur_id)
-        elseif e == "grid_changed" then
-            _signal_retry(cur_id)
+        elseif kind == "succeeded" then
+            -- The dispatcher detected completion (the cursor stepped onto the
+            -- goal). on_success usually drives this flash off the success
+            -- trigger, but flash here too in case the post-completion puzzle
+            -- reset swaps the matched instance before that edge is caught.
+            _set_flash("success")
+        elseif kind == "grid_changed" then
+            -- The puzzle's STRUCTURE actually changed (sticky bomb, or a fresh
+            -- puzzle). "PUZZLE CHANGED" is accurate here. The binding already
+            -- reported the replan to the AI as the tool result; here we only
+            -- drive the overlay (no silent narrative).
+            _set_flash("retrying", cur_id)
+        elseif kind == "settling" or kind == "move_failed" then
+            -- A planned move hit a wall / error node (the cursor didn't land
+            -- where expected) — the puzzle did NOT change. So this gets its own
+            -- "rerouting" banner, NOT the misleading "PUZZLE CHANGED". The
+            -- accurate, specific outcome (error-node reset / wall / fell short)
+            -- still reaches the AI as the hack_plan TOOL RESULT (the binding
+            -- resolves the deferred action result), so we deliberately do NOT
+            -- narrate it as silent context here. "settling" flashes the instant
+            -- a miss is detected; "move_failed" once the settle has classified it.
+            _set_flash("rerouting", cur_id)
         end
     end
 
@@ -397,14 +431,17 @@ end
 
 -- Status for the on-screen overlay (hacking_overlay.lua). Returns:
 --   { phase = "idle"|"planning"|"busy"|"executing"|"resumed"|"retrying"
---             |"jammed"|"success"|"failed",
+--             |"rerouting"|"jammed"|"paused"|"success"|"failed",
 --     executed = <number>, total = <number> }   -- counts only when executing
 -- "planning"  : a force is out for the current puzzle; waiting on the reply.
 -- "busy"      : a force is out for a DIFFERENT puzzle; the current one waits.
 -- "executing" : the current puzzle's plan is dispatching cell-by-cell.
 -- "resumed"   : a parked plan just began running on return (brief flash).
--- "retrying"  : the grid changed (e.g. sticky bomb); replanning (brief flash).
+-- "retrying"  : the grid STRUCTURE changed (e.g. sticky bomb); replanning (flash).
+-- "rerouting" : a planned move hit a wall/error node; replanning (brief flash).
 -- "jammed"    : a jammer is suppressing hacking; planning is paused.
+-- "paused"    : the GAME is paused mid-hack; the cursor is frozen and we hold
+--               off forcing/dispatch until it resumes.
 -- "success"/"failed": short-lived flash after the hack resolves.
 function M.overlay_status()
     local cur = snake.current_puzzle_id()
@@ -421,6 +458,15 @@ function M.overlay_status()
 
     if cur == nil or not snake.is_interactive() then
         return { phase = "idle" }
+    end
+
+    -- Game paused mid-hack: nothing is progressing (the cursor is frozen and we
+    -- hold off forcing/dispatch). Only surface it when there's actually a hack
+    -- to pause — a plan queued/executing or a force in flight — so a plain pause
+    -- while merely aiming doesn't pop the banner.
+    if snake.is_game_paused()
+        and (snake.has_plan(cur) or _inflight_id ~= nil) then
+        return { phase = "paused" }
     end
 
     -- Jammer active: hacking is suppressed entirely; no plan will be forced

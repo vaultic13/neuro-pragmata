@@ -54,7 +54,10 @@ _HACK_PLAN_DESCRIPTION = (
     "Read the state field carefully — the cursor and goal positions are "
     "given there, and the Adjacency block lists which first-moves are "
     "legal. Use those positions verbatim; do not infer or guess.\n"
-    "Avoid # walls, X EraseCode traps, d error nodes, and ~ trail cells. "
+    "NEVER step on a # (a wall — the cursor just stops), a d (an error node — "
+    "entering RESETS the whole hack and you lose all progress), or an X (it "
+    "fails the hack), and never re-enter a ~ trail cell against its arrow. Check "
+    "EVERY move's destination cell against the grid, not just the first one. "
     "Plan ends on G."
 )
 

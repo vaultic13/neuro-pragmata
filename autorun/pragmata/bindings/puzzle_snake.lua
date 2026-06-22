@@ -59,7 +59,10 @@
 --       in-game 2026-06-10). NOT a _GridType: affected cells read as plain None
 --       with a bit set here. Bitmask of app.PuzzleSnake.ObstacleReason:
 --       ObstacleGrid=1 (the red warning-triangle nodes), DeadFilament=2,
---       Ch16092=4, Ch14100=8, AllPassed=16. Nonzero => cell currently blocked.
+--       Ch16092=4, Ch14100=8, AllPassed=16. ONLY the ObstacleGrid bit blocks
+--       the cursor; Ch16092/Ch14100 are the purple "slow" nodes (walkable),
+--       DeadFilament is boss content (handled via _DeadFilamentType), and
+--       AllPassed is a completion flag. See is_blocked in read_cell.
 --     - _DeadFilamentType (UInt32)               -- app.DeadFilamentType hash
 --       (None | Random | Fixed). Observed 0/None on standard grids; likely only
 --       authored for dead-filament boss content. Read + surfaced anyway.
@@ -81,6 +84,7 @@ local _sdk = {
     grid_type_td = nil,      -- app.PuzzleSnakeGridType (for getName)
     df_type_td = nil,        -- app.DeadFilamentType (for getName)
     hacking_mgr_td = nil,    -- app.HackingManager
+    pause_mgr_td = nil,      -- app.PauseManager
     m_get_size_x = nil,
     m_get_size_y = nil,
     m_get_start_pos = nil,
@@ -91,6 +95,61 @@ local _sdk = {
     m_get_name = nil,
     m_get_df_name = nil,
     m_get_is_jamming = nil,
+    m_is_paused = nil,       -- app.PauseManager.isPaused()
+    enhance_mgr_td = nil,    -- app.EnhanceManager (managed singleton; equipped hacking style)
+    mode_td = nil,           -- app.PuzzleSnakeMode (smart-enum; getName for engine label)
+    m_get_cur_mode = nil,    -- EnhanceManager.getCurrentPuzzleSnakeMode() -> UInt32 hash
+    m_mode_getname = nil,    -- PuzzleSnakeMode.getName(UInt32) -> String
+    skill_td = nil,          -- app.ActiveSkill (smart-enum; getName for engine label)
+    m_skill_getname = nil,   -- ActiveSkill.getName(UInt32) -> String
+    m_get_equipped_skills = nil, -- EnhanceManager.getEquippedActiveSkillInfos() -> ActiveSkillItemInfo[]
+    m_skill_to_id = nil,     -- EnhanceManager.convertActiveSkillToActiveSkillID(UInt32 enumHash) -> UInt32 objectID
+}
+
+-- Hacking "modes" (equipped at the Tram Terminal). The mode decides what the
+-- blue OPEN nodes turn into on an EXPOSED (repeat) hack. Only offense actually
+-- retypes the cell's _GridType (-> Attack); every other mode leaves the node as
+-- Open and changes its EFFECT, so the mode value (not the grid) is the only way
+-- to know which is in play. Keyed by the app.PuzzleSnakeMode member hash (6
+-- members, CountOf=6). `style` is the in-game card name; nil style = no banner.
+local PUZZLE_SNAKE_MODES = {
+    [1106175613] = { key = "Default", style = nil,       desc = nil },
+    [1092595404] = { key = "Attack",  style = "Offense",
+        desc = "the blue OPEN nodes ('O') turn into blue ATTACK nodes ('A') on an exposed hack - route through the A nodes just like O nodes; they raise the damage of your next hack." },
+    [2947211997] = { key = "Mix",     style = "Hybrid",
+        desc = "on an exposed hack you get a mix of blue OPEN ('O') and blue ATTACK ('A') nodes - route through BOTH; you get more damage AND a longer vulnerable window." },
+    [1992221496] = { key = "OneShot", style = "Strike",
+        desc = "the blue OPEN ('O') nodes become STRIKE nodes on an exposed hack - they hit harder, so route through them as usual." },
+    [402367616]  = { key = "Active",  style = "Boost",
+        desc = "the blue OPEN ('O') nodes become BOOST nodes on an exposed hack - route through a boost node AND a yellow skill node ('*') on the way to the goal to amplify that skill's effect." },
+    [4064461264] = { key = "Heat",    style = "Combust",
+        desc = "the blue OPEN ('O') nodes become HEAT nodes on an exposed hack - route through them to build the heat gauge and overheat the enemy faster." },
+}
+
+-- Equipped hacking SKILL (the yellow '*' node on the grid). app.ActiveSkill is a
+-- 9-member smart-enum (8 skills + None); only ONE can be equipped, so only one
+-- ever appears on a grid. Keyed by the ActiveSkill member hash. `display` is the
+-- in-game card name (some differ from the internal enum name): Stun=Freeze,
+-- Shock=Expose, DefenseDown=Decode (in-game confirmed); rest match. `desc` is a
+-- self-contained, AI-facing sentence for that skill node. nil display = None.
+local ACTIVE_SKILLS = {
+    [3965989474] = { key = "Chain",       display = "Chain",       grid_type = "Chain",
+        desc = "passing through it lets the hack keep going after the goal; each chain stacks more damage, released all at once when you finish a puzzle WITHOUT a chain node." },
+    [2636730176] = { key = "Drain",       display = "Drain",
+        desc = "route through it to siphon enemy filament and slowly repair the suit." },
+    [1601673713] = { key = "Stun",        display = "Freeze",
+        desc = "route through it to briefly stun the target." },
+    [4064461264] = { key = "Heat",        display = "Heat",
+        desc = "route through it to make the enemy overheat more easily; passing through several extends the effect." },
+    [2139049636] = { key = "DefenseDown", display = "Decode",
+        desc = "route through it to disrupt the enemy's internal systems and temporarily raise damage dealt; passing through several boosts damage further." },
+    [939523450]  = { key = "Confuse",     display = "Confuse",
+        desc = "route through it to disrupt the enemy's sensors and cause friendly fire (effect varies by bot); passing through several increases friendly-fire damage." },
+    [4176994072] = { key = "Multi",       display = "Multihack",
+        desc = "route through it to link enemies and open multiple targets; OPEN time is extended but per-target damage is reduced; passing through several extends OPEN duration." },
+    [3784658649] = { key = "Shock",       display = "Expose",
+        desc = "route through it so the next hack deals critical damage and staggers the target; passing through several increases the damage." },
+    [139421919]  = { key = "None",        display = nil,        desc = nil },
 }
 
 -- All PuzzleSnake instances we've observed via hooks. The engine keeps one
@@ -147,6 +206,14 @@ local function _sweep_dead_instances()
         local existing = _known_instances[i]
         local ok = pcall(function() return existing.inst:get_type_definition() end)
         if not ok then
+            -- If this puzzle owed a deferred action result (its plan was still
+            -- pending/parked), resolve it now so the tool call doesn't dangle
+            -- forever. Inlined (the shared _resolve_pending is declared later).
+            if existing.pending_resolve then
+                local cb = existing.pending_resolve
+                existing.pending_resolve = nil
+                pcall(cb, false, "The hack target is gone; the plan was abandoned.")
+            end
             table.remove(_known_instances, i)
             log_discovery("dropped dead instance (remaining=" .. #_known_instances .. ")")
         end
@@ -245,6 +312,9 @@ local function ensure_init()
     _sdk.grid_type_td     = td("app.PuzzleSnakeGridType")
     _sdk.df_type_td       = td("app.DeadFilamentType")
     _sdk.hacking_mgr_td   = td("app.HackingManager")
+    _sdk.pause_mgr_td     = td("app.PauseManager")
+    _sdk.enhance_mgr_td   = td("app.EnhanceManager")
+    _sdk.mode_td          = td("app.PuzzleSnakeMode")
 
     _init_report.snake_td     = _sdk.snake_td ~= nil
     _init_report.accessor_td  = _sdk.grid_accessor_td ~= nil
@@ -268,6 +338,26 @@ local function ensure_init()
     _sdk.m_get_name          = method(_sdk.grid_type_td, "getName(System.UInt32)")
     _sdk.m_get_df_name       = method(_sdk.df_type_td, "getName(System.UInt32)")
     _sdk.m_get_is_jamming    = method(_sdk.hacking_mgr_td, "get_IsJamming()")
+    -- app.PauseManager.isPaused() — the no-arg overload returns true while ANY
+    -- pause type is active (pause menu, system pause). Used to halt forcing +
+    -- dispatch so a paused, frozen cursor isn't misread as a wall-blocked move.
+    _sdk.m_is_paused         = method(_sdk.pause_mgr_td, "isPaused()")
+    -- Equipped hacking style. EnhanceManager.getCurrentPuzzleSnakeMode() returns
+    -- a hash into app.PuzzleSnakeMode; getName turns a hash into the engine's own
+    -- label (cross-check vs PUZZLE_SNAKE_MODES). Both no-arg/single-arg overloads
+    -- are tried (signature spelling varies across REFramework builds).
+    _sdk.m_get_cur_mode      = method(_sdk.enhance_mgr_td, "getCurrentPuzzleSnakeMode()")
+        or method(_sdk.enhance_mgr_td, "getCurrentPuzzleSnakeMode")
+    _sdk.m_mode_getname      = method(_sdk.mode_td, "getName(System.UInt32)")
+    -- Equipped active SKILL (the '*' node). getEquippedActiveSkillInfos() returns
+    -- ActiveSkillItemInfo[] (.ID = an ObjectID, NOT the enum hash), so we match
+    -- the equipped ID against convertActiveSkillToActiveSkillID(enumHash) to
+    -- recover the app.ActiveSkill enum member.
+    _sdk.skill_td            = td("app.ActiveSkill")
+    _sdk.m_skill_getname     = method(_sdk.skill_td, "getName(System.UInt32)")
+    _sdk.m_get_equipped_skills = method(_sdk.enhance_mgr_td, "getEquippedActiveSkillInfos()")
+        or method(_sdk.enhance_mgr_td, "getEquippedActiveSkillInfos")
+    _sdk.m_skill_to_id       = method(_sdk.enhance_mgr_td, "convertActiveSkillToActiveSkillID(System.UInt32)")
 
     _init_report.m_get_size_x       = _sdk.m_get_size_x       ~= nil
     _init_report.m_get_size_y       = _sdk.m_get_size_y       ~= nil
@@ -353,6 +443,28 @@ end
 -- aim (LastHackingTarget), or nil. This is the matched puzzle regardless of
 -- whether its triggers say it's ending — callers that need "on screen and
 -- not ending" use is_active()/is_interactive() on top.
+-- Coarse lifecycle of a PuzzleSnake instance, used to break ties when more
+-- than one tracked instance is bound to the same enemy:
+--   "ended"    -> a finish trigger is set (success/failed) — a completed,
+--                 leftover instance. Picking it makes is_active() permanently
+--                 false (is_active bails on _SuccessTrigger), so the enemy
+--                 looks "invisible": no _StartTrg, no force ever emitted.
+--   "idle"     -> not ended but _State == Stop(0); not yet (or no longer)
+--                 accepting input.
+--   "playable" -> _State == Play, or state unreadable (assume playable so a
+--                 reflection hiccup never hides a live puzzle).
+-- read_bool isn't in scope yet here (defined below), so read inline.
+local function _instance_lifecycle(inst)
+    local function flag(name)
+        local ok, v = pcall(function() return inst:get_field(name) end)
+        return ok and v == true
+    end
+    if flag("_SuccessTrigger") or flag("_FailedTrigger") then return "ended" end
+    local ok_s, st = pcall(function() return inst:get_field("_State") end)
+    if ok_s and type(st) == "number" and st == 0 then return "idle" end
+    return "playable"
+end
+
 local function _get_current_record()
     if not ensure_init() then return nil end
 
@@ -374,16 +486,32 @@ local function _get_current_record()
     -- Find the PuzzleSnake whose _TargetPuzzleUnit (inherited from
     -- PuzzleBase) is the targeted enemy. == on managed-object handles is
     -- reference equality, which is what we want.
+    --
+    -- The engine pools/leaks instances (observed 80+ alive at once), and a
+    -- previously-hacked enemy can leave a COMPLETED PuzzleSnake bound to the
+    -- same _TargetPuzzleUnit as the live one — verified in-game: matched
+    -- instance had _SuccessTrigger=true, _State=Stop, cursor parked on goal,
+    -- so is_active() stayed false and the enemy was un-forceable. So don't
+    -- just take the first match: prefer a PLAYABLE instance, fall back to a
+    -- non-ended one, and only return an ended instance if it's the sole match
+    -- (end-of-hack handlers still need to resolve the just-completed puzzle).
+    local first_match, not_ended = nil, nil
     for _, rec in ipairs(_known_instances) do
         local ok, this_target = pcall(function()
             return rec.inst:get_field("_TargetPuzzleUnit")
         end)
         if ok and this_target == target_unit then
-            return rec
+            first_match = first_match or rec
+            local life = _instance_lifecycle(rec.inst)
+            if life == "playable" then
+                return rec               -- best possible match; take it
+            elseif life == "idle" then
+                not_ended = not_ended or rec
+            end
         end
     end
 
-    return nil
+    return not_ended or first_match
 end
 
 
@@ -504,6 +632,197 @@ function M.is_jamming()
 end
 
 
+-- Resolve the app.PauseManager singleton. Cached after first success. Tries the
+-- native singleton registry first, then the static get_sPauseManager accessor.
+local _pause_mgr = nil
+local function _get_pause_manager()
+    if _pause_mgr ~= nil then
+        local ok = pcall(function() return _pause_mgr:get_type_definition() end)
+        if ok then return _pause_mgr end
+        _pause_mgr = nil
+    end
+    local ok, mgr = pcall(function()
+        return sdk.get_managed_singleton("app.PauseManager")
+    end)
+    if ok and mgr ~= nil then _pause_mgr = mgr; return mgr end
+    -- Fallback: the static sPauseManager accessor (PauseManager may not be in
+    -- the via singleton registry on every build).
+    if _sdk.pause_mgr_td ~= nil then
+        local getter = nil
+        pcall(function() getter = _sdk.pause_mgr_td:get_method("get_sPauseManager") end)
+        if getter ~= nil then
+            local ok2, m2 = pcall(function() return getter:call(nil) end)
+            if ok2 and m2 ~= nil then _pause_mgr = m2; return m2 end
+        end
+    end
+    return nil
+end
+
+
+-- True while the game is paused (pause menu / system pause). The hacking
+-- observer halts forcing AND the dispatcher halts move execution while paused:
+-- a paused cursor never moves, so a dispatched move would never land where the
+-- plan expected, churning re-forces forever (and the post-move position check
+-- would misclassify the frozen cursor as wall-blocked). Conservative: unreadable
+-- => false, so a reflection hiccup never silently freezes planning for good.
+function M.is_game_paused()
+    ensure_init()
+    if _sdk.m_is_paused == nil then return false end
+    local mgr = _get_pause_manager()
+    if mgr == nil then return false end
+    local ok, v = pcall(function() return _sdk.m_is_paused:call(mgr) end)
+    return ok and v == true
+end
+
+
+-- ---------------------------------------------------------------------------
+-- Equipped hacking style (app.PuzzleSnakeMode)
+-- ---------------------------------------------------------------------------
+local _enhance_mgr = nil
+local function _get_enhance_manager()
+    if _enhance_mgr ~= nil then
+        local ok = pcall(function() return _enhance_mgr:get_type_definition() end)
+        if ok then return _enhance_mgr end
+        _enhance_mgr = nil
+    end
+    local ok, mgr = pcall(function()
+        return sdk.get_managed_singleton("app.EnhanceManager")
+    end)
+    if ok and mgr ~= nil then _enhance_mgr = mgr end
+    return _enhance_mgr
+end
+
+-- Read the player's currently-equipped hacking style. The mode dictates what
+-- OPEN nodes become on an exposed hack (see PUZZLE_SNAKE_MODES). Returns
+--   { ok=true, hash, engine_name, key, style, desc }   on success, or
+--   { ok=false, err }                                  on failure.
+-- Read-only and cheap; safe to poll from the debug panel / get_state. A nil
+-- `style` (Default, or unmapped hash) means "no style banner".
+function M.read_hacking_mode()
+    ensure_init()
+    if _sdk.m_get_cur_mode == nil then
+        return { ok = false, err = "getCurrentPuzzleSnakeMode method unresolved" }
+    end
+    local mgr = _get_enhance_manager()
+    if mgr == nil then
+        return { ok = false, err = "EnhanceManager singleton nil" }
+    end
+    local ok, hash = pcall(function() return _sdk.m_get_cur_mode:call(mgr) end)
+    if not ok or hash == nil then
+        return { ok = false, err = "getCurrentPuzzleSnakeMode call failed" }
+    end
+    -- The engine's own label for this hash — lets us spot an unmapped/new hash
+    -- (engine_name set but key="Unknown") rather than silently mis-mapping.
+    local engine_name = nil
+    if _sdk.m_mode_getname ~= nil then
+        local ok2, n = pcall(function() return _sdk.m_mode_getname:call(nil, hash) end)
+        if ok2 and type(n) == "string" then engine_name = n end
+    end
+    local info = PUZZLE_SNAKE_MODES[hash]
+    return {
+        ok          = true,
+        hash        = hash,
+        engine_name = engine_name,
+        key         = info and info.key or "Unknown",
+        style       = info and info.style or nil,
+        desc        = info and info.desc or nil,
+    }
+end
+
+
+-- Read the player's currently-equipped active SKILL (the '*' node). Returns
+--   { ok=true, none=true, count=0 }                       if no skill equipped, or
+--   { ok=true, count, equipped_id, key, display, desc, engine_name }  on success, or
+--   { ok=false, err }                                     on failure.
+-- The equipped info's .ID is an ObjectID; we recover the app.ActiveSkill enum by
+-- matching it against convertActiveSkillToActiveSkillID(hash) for each member.
+-- Read-only; safe to poll. A nil `display` means None / unmatched.
+function M.read_active_skill()
+    ensure_init()
+    if _sdk.m_get_equipped_skills == nil then
+        return { ok = false, err = "getEquippedActiveSkillInfos method unresolved" }
+    end
+    local mgr = _get_enhance_manager()
+    if mgr == nil then
+        return { ok = false, err = "EnhanceManager singleton nil" }
+    end
+    local ok, infos = pcall(function() return _sdk.m_get_equipped_skills:call(mgr) end)
+    if not ok then
+        return { ok = false, err = "getEquippedActiveSkillInfos call failed" }
+    end
+    if infos == nil then return { ok = true, none = true, count = 0, distinct = 0 } end
+
+    -- Array length (REFramework SystemArray): try get_size, then get_Length.
+    -- NOTE: this is the equipped-slot CAPACITY, not the number of skills set, so
+    -- empty slots are normal — we must scan and count DISTINCT matched skills.
+    local count = 0
+    if not pcall(function() count = infos:get_size() end) then
+        pcall(function() count = infos:get_Length() end)
+    end
+    if type(count) ~= "number" then count = 0 end
+
+    -- ObjectID -> skill lookup, built once from the 8 enum->ID conversions.
+    local id_to_skill = {}
+    if _sdk.m_skill_to_id ~= nil then
+        for hash, info in pairs(ACTIVE_SKILLS) do
+            if info.key ~= "None" then
+                local oid = nil
+                local okc = pcall(function() oid = _sdk.m_skill_to_id:call(mgr, hash) end)
+                if okc and oid ~= nil then id_to_skill[oid] = { hash = hash, info = info } end
+            end
+        end
+    end
+
+    -- Scan every equipped slot; collect distinct real skills (skip empty/None).
+    local first_id = nil
+    local matched, order = {}, {}
+    for i = 0, count - 1 do
+        local elem = nil
+        if not pcall(function() elem = infos:get_element(i) end) then
+            pcall(function() elem = infos[i] end)
+        end
+        if elem ~= nil then
+            local id = nil
+            if not pcall(function() id = elem:get_field("<ID>k__BackingField") end) then
+                pcall(function() id = elem:call("get_ID") end)
+            end
+            if id ~= nil and id ~= 0 then
+                if first_id == nil then first_id = id end
+                local m = id_to_skill[id]
+                if m ~= nil and matched[m.info.key] == nil then
+                    matched[m.info.key] = m
+                    order[#order + 1] = m.info.key
+                end
+            end
+        end
+    end
+
+    local distinct = #order
+    if distinct == 0 then
+        return { ok = true, none = true, count = count, distinct = 0, equipped_id = first_id }
+    end
+
+    local m = matched[order[1]]
+    local engine_name = nil
+    if _sdk.m_skill_getname ~= nil then
+        pcall(function() engine_name = _sdk.m_skill_getname:call(nil, m.hash) end)
+    end
+
+    return {
+        ok          = true,
+        count       = count,        -- raw slot capacity
+        distinct    = distinct,     -- number of DISTINCT real skills equipped
+        multiple    = distinct > 1, -- true with the Code Generator weapon
+        equipped_id = first_id,
+        key         = m.info.key,
+        display     = m.info.display,
+        desc        = m.info.desc,
+        grid_type   = m.info.grid_type,   -- dedicated grid type (Chain), else nil
+        engine_name = engine_name,
+    }
+end
+
+
 -- ---------------------------------------------------------------------------
 -- Grid snapshot
 -- ---------------------------------------------------------------------------
@@ -565,6 +884,29 @@ local function resolve_df_name(hash)
     local s = _DF_HASH_NAMES[hash] or ("Type" .. tostring(hash))
     _df_name_cache[hash] = s
     return s
+end
+
+
+-- app.PuzzleSnake.ObstacleReason bitmask values (decoded from the IL2CPP
+-- dump): ObstacleGrid=1, DeadFilament=2, Ch16092=4, Ch14100=8, AllPassed=16.
+-- ONLY ObstacleGrid is the visible red "error node" that genuinely blocks the
+-- cursor (verified in-game 2026-06-10). The other bits are distinct effects
+-- that must NOT render as impassable 'd' error nodes:
+--   * DeadFilament(2) is boss content — actual dead filaments come through the
+--     separate _DeadFilamentType field, which read_cell handles on its own.
+--   * Ch16092(4)/Ch14100(8) are the PURPLE "slow" nodes: they briefly pause
+--     the cursor but are walkable and frequently sit on the required path to
+--     the goal.
+--   * AllPassed(16) is a completion flag, not an obstacle at all.
+-- Treating the whole nonzero mask as "blocked" mislabeled purple slow nodes as
+-- error nodes, so the peer routed around cells it needed to cross.
+local OBSTACLE_REASON_ERROR_NODE = 1   -- ObstacleReason.ObstacleGrid
+
+-- Test whether a single power-of-two bit is set in `mask`. Pure arithmetic so
+-- it doesn't depend on the LuaJIT `bit` library being present.
+local function has_bit(mask, bit_value)
+    if mask == nil or mask == 0 then return false end
+    return (mask % (bit_value * 2)) >= bit_value
 end
 
 
@@ -655,18 +997,21 @@ local function read_cell(cell_obj)
     local active_skill_count = read_uint_field("<ActiveSkillCount>k__BackingField")
     local active_skill_index = read_uint_field("<ActiveSkillIndex>k__BackingField")
 
-    -- _ObstacleReasons IS the red "error node" marker — VERIFIED in-game
-    -- 2026-06-10: a grid's four red warning-triangle cells were exactly the
-    -- cells with _ObstacleReasons=1 (ObstacleReason.ObstacleGrid), everything
-    -- else 0. It's a bitmask (see file-level field notes), so any nonzero
-    -- value means "currently blocked"; the engine can set/clear bits
-    -- mid-fight, which the structural signature turns into a replan.
-    -- _IsHide marks not-yet-revealed nodes (seen on FinishBlow). _StunReasons
-    -- is the analogous stun bitmask; no nonzero observation yet — dump-only.
+    -- _ObstacleReasons is a bitmask (see OBSTACLE_REASON_ERROR_NODE notes
+    -- above). VERIFIED in-game 2026-06-10: a grid's four red warning-triangle
+    -- cells were exactly the cells with the ObstacleGrid bit (=1) set. Only
+    -- that bit blocks the cursor — the other bits flag purple "slow" nodes,
+    -- boss dead-filament content, and a completion flag, none of which are
+    -- impassable. Gate is_blocked on the ObstacleGrid bit alone so purple
+    -- slow nodes (often on the required path) aren't mislabeled as error
+    -- nodes. The engine can set/clear the bit mid-fight, which the structural
+    -- signature turns into a replan. _IsHide marks not-yet-revealed nodes
+    -- (seen on FinishBlow). _StunReasons is the analogous stun bitmask; no
+    -- nonzero observation yet — dump-only.
     local is_hide          = read_bool(cell_obj, "_IsHide", false)
     local obstacle_reasons = read_uint_field("_ObstacleReasons")
     local stun_reasons     = read_uint_field("_StunReasons")
-    local is_blocked       = (obstacle_reasons or 0) ~= 0
+    local is_blocked       = has_bit(obstacle_reasons, OBSTACLE_REASON_ERROR_NODE)
 
     return {
         x = pos.x, y = pos.y,
@@ -888,10 +1233,33 @@ function M.get_state()
 
     -- Cursor position from _CurrentUnit (engine coords -> render coords).
     local cursor = nil
+    local engine_cursor = nil
     local ok_cu, unit = pcall(function() return inst:get_field("_CurrentUnit") end)
     if ok_cu and unit ~= nil and _sdk.m_unit_get_position ~= nil then
         local ok_p, pos_raw = pcall(function() return _sdk.m_unit_get_position:call(unit) end)
-        if ok_p then cursor = remap(read_int2(pos_raw)) end
+        if ok_p then
+            engine_cursor = read_int2(pos_raw)
+            cursor = remap(engine_cursor)
+        end
+    end
+
+    -- Backtrack target: the one visited cell the cursor may REVERSE onto. The
+    -- engine's undo lets the cursor step straight back the way it came (which
+    -- frees that cell again); no other ~ cell is re-enterable. It's the cursor
+    -- minus the Unit's _LastMoveDirection. Computed in engine space (skip-safe)
+    -- then mapped, and only honored if it's actually a visited cell.
+    local came_from = nil
+    if ok_cu and unit ~= nil and engine_cursor ~= nil then
+        local ok_d, dir_raw = pcall(function() return unit:get_field("_LastMoveDirection") end)
+        local dir = ok_d and read_int2(dir_raw) or nil
+        if dir ~= nil and (dir.x ~= 0 or dir.y ~= 0) then
+            local cf = remap({ x = engine_cursor.x - dir.x, y = engine_cursor.y - dir.y })
+            if cf ~= nil then
+                for _, p in ipairs(trail) do
+                    if p.x == cf.x and p.y == cf.y then came_from = cf; break end
+                end
+            end
+        end
     end
 
     -- Start position from accessor (remapped; nil if its row/col is removed).
@@ -901,27 +1269,118 @@ function M.get_state()
         if ok then start_pos = remap(read_int2(sp)) end
     end
 
+    -- Full backtrack route. The engine's `_History` stack (app.PuzzleSnake.Unit
+    -- ._History : Stack<via.Int2>) is the ORDERED list of visited positions, so
+    -- we can surface the whole return path, not just the one cell behind the
+    -- cursor. For each visited cell we record its "backtrack-in" direction = the
+    -- way to MOVE to step back onto it while retracing toward start (= reverse
+    -- of how the cursor left it). The renderer draws these as arrows so the AI
+    -- can plan a multi-cell reverse in one go. Falls back to the single
+    -- came_from above if the history is unreadable / doesn't reconcile.
+    local trail_back = nil
+    if ok_cu and unit ~= nil and cursor ~= nil then
+        local path = nil
+        local ok_h, hist = pcall(function() return unit:get_field("_History") end)
+        if ok_h and hist ~= nil then
+            local size = 0
+            pcall(function() size = hist:get_field("_size") or 0 end)
+            local arr = nil
+            pcall(function() arr = hist:get_field("_array") end)
+            if type(size) == "number" and size > 0 and arr ~= nil then
+                path = {}
+                for i = 0, size - 1 do
+                    local elem
+                    local ok_e = pcall(function() elem = arr[i] end)
+                    if not ok_e or elem == nil then
+                        pcall(function() elem = arr:get_element(i) end)
+                    end
+                    local rp = elem and remap(read_int2(elem)) or nil
+                    if rp ~= nil then path[#path + 1] = rp end
+                end
+            end
+        end
+        if path ~= nil and #path >= 2 then
+            local function eq(a, b) return a and b and a.x == b.x and a.y == b.y end
+            local function adj(a, b)
+                return a and b and (math.abs(a.x - b.x) + math.abs(a.y - b.y)) == 1
+            end
+            -- The history may or may not include the live cursor; if an end is
+            -- adjacent to it, splice the cursor on so orientation works.
+            if not eq(path[1], cursor) and not eq(path[#path], cursor) then
+                if adj(path[#path], cursor) then path[#path + 1] = cursor
+                elseif adj(path[1], cursor) then table.insert(path, 1, cursor) end
+            end
+            -- Orient so the cursor is LAST (path runs start -> cursor).
+            if eq(path[1], cursor) then
+                local r = {}
+                for i = #path, 1, -1 do r[#r + 1] = path[i] end
+                path = r
+            end
+            if eq(path[#path], cursor) then
+                trail_back = {}
+                for i = 1, #path - 1 do
+                    local a, b = path[i], path[i + 1]   -- a nearer start, b nearer cursor
+                    local dx, dy = a.x - b.x, a.y - b.y -- move from b to step onto a
+                    local dir = nil
+                    if dx == 0 and dy == -1 then dir = "up"
+                    elseif dx == 0 and dy == 1 then dir = "down"
+                    elseif dx == -1 and dy == 0 then dir = "left"
+                    elseif dx == 1 and dy == 0 then dir = "right" end
+                    if dir then trail_back[a.x .. "," .. a.y] = dir end
+                end
+            end
+        end
+    end
+
     -- Goal cell: scan for the cell whose type name is "Goal". The hash is
     -- known from the dump (1599924820) but resolving by name is portable
     -- across patches that might re-roll hashes.
     local goal = nil
+    local goal_engine = nil
     for y = 1, #active_rows do
         for x = 1, #active_cols do
             local c = cells[y][x]
             if c ~= nil and c.type == "Goal" then
                 goal = { x = c.x, y = c.y }
+                -- Engine coords too: the dispatcher compares a move's engine
+                -- target against this to tell "stepped onto the goal" (= the
+                -- hack completed) from an error-node reset.
+                goal_engine = { x = c.engine_x, y = c.engine_y }
                 break
             end
         end
         if goal then break end
     end
 
+    -- Equipped hacking style for the renderer's mode note. nil for Default /
+    -- unreadable, so the renderer simply omits the line. Read here so the live
+    -- force context AND the debug preview both reflect it.
+    local mode_info = nil
+    local m = M.read_hacking_mode()
+    if m and m.ok and m.style then
+        mode_info = { key = m.key, style = m.style, desc = m.desc }
+    end
+
+    -- Equipped active skill (the '*' node) for the renderer's skill note. ONLY
+    -- when exactly ONE skill is equipped — with the "Code Generator" weapon
+    -- multiple node types can coexist and we can't tell which '*' is which, so
+    -- we fall back to the generic "skill node" rather than mislabel.
+    local skill_info = nil
+    local sk = M.read_active_skill()
+    if sk and sk.ok and not sk.none and sk.distinct == 1 and sk.display then
+        skill_info = { key = sk.key, display = sk.display, desc = sk.desc,
+                       grid_type = sk.grid_type }
+    end
+
     return {
         width  = #active_cols,
         height = #active_rows,
         cursor = cursor,
+        came_from = came_from,   -- the one ~ cell the cursor may reverse onto
+        trail_back = trail_back, -- "x,y" -> backtrack-in dir for each visited cell
         start  = start_pos,
         goal   = goal,
+        goal_engine = goal_engine,   -- goal in engine coords (completion check)
         cells  = cells,
         trail  = trail,
         -- Skip diagnostics: engine-space dims + which engine rows/cols are
@@ -934,6 +1393,8 @@ function M.get_state()
         finished = read_bool(inst, "_SuccessTrigger", false)
                 or read_bool(inst, "_FailedTrigger", false),
         success  = read_bool(inst, "_SuccessTrigger", false),
+        mode = mode_info,   -- equipped hacking style { key, style, desc } or nil
+        active_skill = skill_info,  -- equipped skill { key, display, desc } or nil (count==1 only)
     }
 end
 
@@ -1353,7 +1814,11 @@ function M.move_via_next_position(direction)
             direction, hopped, target_x, target_y))
     end
 
-    return M.write_next_move_position(target_x, target_y)
+    -- Return the resolved engine target as extra results so the dispatcher can
+    -- record where the cursor is expected to land (used to detect error-node
+    -- cursor resets between moves).
+    local ok, msg = M.write_next_move_position(target_x, target_y)
+    return ok, msg, target_x, target_y
 end
 
 
@@ -1383,12 +1848,14 @@ end
 -- ---------------------------------------------------------------------------
 -- A fingerprint of the parts of the grid that DON'T change as the cursor
 -- traverses it: dimensions, goal position, and the location of every wall,
--- EraseCode trap, and dead-filament error node. Deliberately EXCLUDES the
--- cursor and the trail (IsPassed) — those advance as a plan executes, so
--- including them would make every normal move look like a "change".
--- Error nodes ARE included: _ObstacleReasons is a runtime bitmask the engine
--- can set/clear mid-fight, and a hazard-map change is exactly when a stale
--- plan needs invalidating. (If error nodes turn out to pulse rapidly, this
+-- EraseCode trap, and red (ObstacleGrid) error node. Deliberately EXCLUDES
+-- the cursor and the trail (IsPassed) — those advance as a plan executes, so
+-- including them would make every normal move look like a "change". Also
+-- excludes purple slow nodes (dead_filament): they're walkable, so they're
+-- not blockers and shouldn't perturb the plan-validity fingerprint.
+-- Red error nodes ARE included: _ObstacleReasons is a runtime bitmask the
+-- engine can set/clear mid-fight, and a hazard-map change is exactly when a
+-- stale plan needs invalidating. (If error nodes turn out to pulse rapidly, this
 -- will show up as replan churn — the observer's retry dedup absorbs it, but
 -- it's the first place to look.)
 --
@@ -1425,8 +1892,11 @@ local function _struct_sig_from_state(state)
                 marks[#marks + 1] = "w" .. x .. "," .. y     -- missing cell = wall
             elseif c.is_erase or c.type == "EraseCode" then
                 marks[#marks + 1] = "x" .. x .. "," .. y     -- trap
-            elseif c.is_blocked or c.dead_filament or c.type == "DeadFilament" then
+            elseif c.is_blocked or c.type == "DeadFilament" then
                 marks[#marks + 1] = "d" .. x .. "," .. y     -- error node (blocked)
+            -- NOTE: c.dead_filament (purple slow nodes) is intentionally NOT a
+            -- structural blocker — those cells are walkable, so they're plain
+            -- floor for routing and must not show up as 'd' marks.
             elseif _is_wall_type(c.type) then
                 marks[#marks + 1] = "w" .. x .. "," .. y     -- wall
             end
@@ -1460,11 +1930,42 @@ end
 
 local _plan_cooldown_frames = 8     -- ~130ms at 60fps
 
+-- Frames to wait after a move doesn't land before classifying + re-forcing. An
+-- error node resets the WHOLE puzzle a few frames AFTER the bad move, so reading
+-- the cursor immediately races the reset: it still reads the pre-reset position
+-- and the grid still shows the old trail (the "cursor shown one move before the
+-- error node" bug). We hold, watch for the cursor to snap back to start (= reset
+-- confirmed), and only then re-force — so the next force renders the real, reset
+-- grid. Generous so a slow reset animation still resolves as an error-node hit
+-- rather than timing out into a wall classification.
+local FAIL_SETTLE_FRAMES = 90       -- ~1.5s at 60fps
+-- Grace after a plan's queue drains before declaring it fell short of the goal:
+-- the goal-arrival success trigger fires a few frames after the final move
+-- lands, and we want on_success to claim the deferred result as a WIN first.
+local DRAIN_GRACE_FRAMES = 30       -- ~0.5s at 60fps
+
 -- One-shot events the dispatcher raises for the observer/overlay to react to
--- ("resumed" a parked plan; "grid_changed" forced a replan). Drained via
--- M.consume_plan_events().
+-- ("resumed" a parked plan; "grid_changed" forced a replan; "settling"/"move_failed"
+-- around a failed move). Drained via M.consume_plan_events().
 local _plan_events = {}
 local function _push_plan_event(e) _plan_events[#_plan_events + 1] = e end
+
+-- Resolve a puzzle's DEFERRED action result exactly once. pragmata_hack_plan
+-- defers its action/result (sends nothing immediately) so the tool result the AI
+-- sees reflects what the plan ACTUALLY did — reached the goal, hit an error node
+-- and reset, stopped at a wall, or fell short — instead of a blind "plan applied".
+-- The resolve callback (captured from the dispatcher) is stored on the RECORD,
+-- not the plan table, so it survives `rec.plan = nil` and fires at any terminal.
+-- Returns true iff a pending result was actually resolved (the caller uses this
+-- to tell a plan-driven hack ending from a manual/auto one).
+local function _resolve_pending(rec, success, message)
+    if rec == nil then return false end
+    local cb = rec.pending_resolve
+    if cb == nil then return false end
+    rec.pending_resolve = nil
+    pcall(cb, success and true or false, message or "")
+    return true
+end
 
 function M.consume_plan_events()
     if #_plan_events == 0 then return {} end
@@ -1543,6 +2044,7 @@ function M.needs_force(id)
     local rec = _get_current_record()
     if rec == nil or rec.id ~= id then return false end
     if not M.is_interactive() then return false end
+    if rec.fail_settle ~= nil then return false end  -- waiting for a failed move to settle
     if rec.plan ~= nil and #rec.plan.queue > 0 then return false end
     local state = M.get_state()
     if state == nil then return false end
@@ -1559,10 +2061,24 @@ end
 -- planned against). `parked` is true when the reply arrived while the player
 -- was NOT aimed at this puzzle — it'll resume when they return. Returns
 -- (queued_count, parked).
-function M.set_plan(id, moves)
+function M.set_plan(id, moves, resolve)
     local rec = _record_by_id(id)
-    if rec == nil then return 0, false end
-    if type(moves) ~= "table" then return 0, false end
+    if rec == nil then
+        -- No record to attach to: resolve immediately so the deferred action
+        -- result doesn't dangle (the dispatcher deferred on our say-so).
+        if resolve then pcall(resolve, false, "the hack target is no longer tracked") end
+        return 0, false
+    end
+    if type(moves) ~= "table" then
+        if resolve then pcall(resolve, false, "no moves to apply") end
+        return 0, false
+    end
+
+    -- A fresh plan supersedes any still-pending deferred result on this record.
+    -- Every terminal already resolves, so this normally finds nothing — but it
+    -- guarantees we never silently drop a prior action's result.
+    _resolve_pending(rec, false, "superseded by a newer plan")
+    rec.pending_resolve = resolve   -- nil for manual/debug queues (no deferral)
 
     local queue = {}
     for _, d in ipairs(moves) do
@@ -1587,6 +2103,9 @@ function M.set_plan(id, moves)
         last_msg        = nil,
         parked          = not is_current,
         validate_struct = validate_struct,
+        expected_pos    = nil,  -- where the last dispatched move aimed the cursor
+        prev_pos        = nil,  -- cursor position just before the last dispatch
+        confirmed       = 0,    -- moves verified to have actually landed
     }
     return #queue, rec.plan.parked
 end
@@ -1594,6 +2113,14 @@ end
 function M.discard_plan(id)
     local rec = _record_by_id(id)
     if rec then rec.plan = nil end
+end
+
+-- Resolve puzzle `id`'s DEFERRED action result (used by the observer when an
+-- engine trigger ends the hack: success / failed / reset). No-op if the puzzle
+-- has no pending deferred result (e.g. a manual or auto hack with no AI plan, or
+-- one already resolved by the dispatcher's own terminal handling).
+function M.resolve_plan(id, success, message)
+    return _resolve_pending(_record_by_id(id), success, message)
 end
 
 function M.has_plan(id)
@@ -1619,21 +2146,152 @@ function M.current_plan_status()
     }
 end
 
+-- Read the puzzle's start cell (where the engine snaps the cursor on an
+-- error-node hit), as {x, y} or nil. Only called on the rare mismatch path.
+local function _read_start_pos()
+    local inst = get_instance()
+    if inst == nil then return nil end
+    local acc = get_accessor(inst)
+    if acc == nil or _sdk.m_get_start_pos == nil then return nil end
+    local ok, raw = pcall(function() return _sdk.m_get_start_pos:call(acc) end)
+    if not ok then return nil end
+    return read_int2(raw)
+end
+
+-- Drive a pending post-failure settle for `rec`. After a dispatched move didn't
+-- land where the plan aimed we DON'T classify + re-force immediately — an error
+-- node resets the whole puzzle a few frames later, and reading the cursor too
+-- early sees a pre-reset position (the "cursor shown one move before the error
+-- node, trail intact" bug). Instead we wait: the moment the cursor snaps back to
+-- start it's a confirmed error-node reset; if the window elapses with the cursor
+-- parked where it stopped, it was a wall. Either way we resolve the deferred tool
+-- result accurately and clear the snapshot so reconciliation re-forces from the
+-- settled position/grid. rec.plan is already nil while this runs.
+local function _resolve_fail_settle(rec)
+    -- Freeze the settle while paused: a paused cursor is frozen wherever it was
+    -- when the pause hit, so neither the start-snap nor the elapse path should
+    -- advance until the game (and any in-flight error-node reset) resumes.
+    if M.is_game_paused() then return end
+    local fs = rec.fail_settle
+    fs.waited = fs.waited + 1
+
+    local unit = _resolve_unit()
+    local cur = unit and _read_cursor_pos(unit) or nil
+    local start = _read_start_pos()
+
+    local function finish(reason, message)
+        rec.fail_settle = nil
+        rec.forced_struct = nil     -- re-force against the settled grid
+        _resolve_pending(rec, false, message)
+        _push_plan_event({ kind = "move_failed", reason = reason,
+                           confirmed = fs.confirmed, total = fs.total })
+    end
+
+    -- Error-node reset confirmed: the cursor snapped back to start.
+    if cur ~= nil and start ~= nil and cur.x == start.x and cur.y == start.y then
+        finish("error_node",
+            "Hit an error node — the puzzle reset to the start, so none of those "
+         .. "moves counted.")
+        return
+    end
+
+    if fs.waited < FAIL_SETTLE_FRAMES then return end   -- still settling
+
+    -- Window elapsed without a reset: the move was wall-blocked (cursor stopped
+    -- at the pre-move cell) or otherwise displaced. The earlier moves DID land.
+    if cur ~= nil and fs.prev_pos ~= nil
+        and cur.x == fs.prev_pos.x and cur.y == fs.prev_pos.y then
+        finish("wall", string.format(
+            "Move blocked by a wall after %d move(s) landed; the cursor stopped "
+         .. "there.", fs.confirmed))
+    else
+        finish("displaced", "The cursor ended up off the planned path.")
+    end
+end
+
+-- Try to claim a completion. When the last dispatched move stepped ONTO the
+-- goal (plan.dispatched_into_goal), the engine auto-completes the hack and then
+-- resets the puzzle so the enemy can be re-hacked — clearing the trail and
+-- snapping the cursor back to start, which looks EXACTLY like an error-node
+-- reset (and changes the grid). So this MUST be checked before the structural
+-- and mismatch handlers, in both the dispatch path and the queue-drain path
+-- (the last move empties the queue, routing the next tick to the drain branch).
+-- Guard: only claim the win if the cursor actually LEFT the pre-move cell; if
+-- it's still parked there the goal-entry was blocked, not completed. Pass `cur`
+-- if already read this tick; otherwise it's read here. Returns true if claimed.
+local function _try_claim_completion(rec, plan, cur)
+    if not plan.dispatched_into_goal then return false end
+    if cur == nil then
+        local unit = _resolve_unit()
+        cur = unit and _read_cursor_pos(unit) or nil
+    end
+    if cur ~= nil and plan.prev_pos ~= nil
+        and cur.x == plan.prev_pos.x and cur.y == plan.prev_pos.y then
+        plan.dispatched_into_goal = false   -- goal-entry blocked; not a completion
+        return false
+    end
+    rec.plan = nil
+    rec.forced_struct = nil   -- let reconciliation re-force the re-hack
+    _resolve_pending(rec, true, "Reached the goal — the hack is complete.")
+    _push_plan_event({ kind = "succeeded" })
+    return true
+end
+
 -- Per-frame tick. Wire into pragmata_main.lua's re.on_frame loop. Dispatches
 -- the CURRENTLY-aimed puzzle's queue only; other puzzles' queues stay parked.
 function M.tick_plan()
     local rec = _get_current_record()
-    if rec == nil or rec.plan == nil then return end
+    if rec == nil then return end
+
+    -- Drive a post-failure settle to completion before anything else — it owns
+    -- the record until it resolves (rec.plan is already nil here).
+    if rec.fail_settle ~= nil then
+        _resolve_fail_settle(rec)
+        return
+    end
+
+    if rec.plan == nil then return end
     local plan = rec.plan
+
+    -- Game paused: freeze dispatch entirely. A paused cursor never moves, so
+    -- dispatching a move would accomplish nothing AND make the next post-move
+    -- check read the frozen cursor as wall-blocked. Keep the queue PARKED; it
+    -- resumes on unpause. (Reconciliation independently halts new forces while
+    -- paused, so we finish the in-flight force's parked plan but don't re-force.)
+    if M.is_game_paused() then return end
 
     -- Not interactive (player dropped aim, post-hack cooldown)? Keep the
     -- queue PARKED — do not drop it. It resumes when the player re-aims.
     if not M.is_interactive() then return end
 
-    -- Finished dispatching: clear the plan so reconciliation can decide
-    -- whether to re-force (e.g. the cursor advanced but didn't reach the goal).
+    -- Finished dispatching: decide the outcome. Wait out the cooldown and the
+    -- final cell transition, then give the goal-arrival success trigger a grace
+    -- window to claim the deferred result as a WIN (observer.on_success resolves
+    -- it). If no success comes, the plan ran out short of the goal — resolve as
+    -- such and let reconciliation re-force to continue from the new position.
     if #plan.queue == 0 then
         if plan.cooldown > 0 then plan.cooldown = plan.cooldown - 1; return end
+        if M.is_unit_moving() then return end
+        -- The last move stepped onto the goal → completion (the engine resets
+        -- the puzzle afterward, which would otherwise read as "fell short" once
+        -- the cursor snaps back to start). Claim the win deterministically.
+        if _try_claim_completion(rec, plan) then return end
+        plan.drain_grace = plan.drain_grace or DRAIN_GRACE_FRAMES
+        if plan.drain_grace > 0 then plan.drain_grace = plan.drain_grace - 1; return end
+        -- Grace elapsed without a success trigger. If the cursor is actually ON
+        -- the goal, the hack is just completing slowly — claim the win (the
+        -- success trigger then no-ops). Otherwise the plan ran out short of the
+        -- goal: resolve as such and let reconciliation re-force to continue.
+        local st = M.get_state()
+        local dcur = st and st.cursor or nil
+        local dgoal = st and st.goal or nil
+        if dcur ~= nil and dgoal ~= nil and dcur.x == dgoal.x and dcur.y == dgoal.y then
+            _resolve_pending(rec, true, "Reached the goal — the hack is complete.")
+        else
+            _resolve_pending(rec, false, string.format(
+                "Ran all %d planned move(s) without reaching the goal%s.", plan.total,
+                dcur and string.format(" (cursor now at %d,%d)", dcur.x, dcur.y) or ""))
+        end
         rec.plan = nil
         return
     end
@@ -1643,22 +2301,66 @@ function M.tick_plan()
     -- Cursor is mid-cell-transition — let it settle before the next move.
     if M.is_unit_moving() then return end
 
-    -- Continuous structural validation, evaluated only when we're about to
-    -- dispatch (past the cooldown/isMove gates) so the full grid scan runs at
-    -- dispatch rate (~7Hz), not every frame. If the grid's structure changed
-    -- since the plan was built (sticky bomb deleted a row, puzzle reset), the
-    -- remaining moves are computed against a layout that no longer exists.
-    -- Abort and clear the force snapshot so reconciliation re-forces against
-    -- the new grid. Checked BEFORE the "resumed" flag so a parked plan
-    -- returning to a mutated grid flashes "retrying", not "resuming".
-    if plan.validate_struct ~= nil then
-        local state = M.get_state()
-        if state ~= nil and _struct_sig_from_state(state) ~= plan.validate_struct then
-            log.info("tick_plan: grid structure changed under plan (id=" .. rec.id
-                  .. "); aborting " .. tostring(#plan.queue) .. " queued moves")
+    -- Read the grid + cursor once for the checks below (completion, structural
+    -- validation, landing verification). get_state runs at dispatch rate (~7Hz)
+    -- here, not every frame.
+    local state = M.get_state()
+    local unit = _resolve_unit()
+    local cur = unit and _read_cursor_pos(unit) or nil
+
+    -- COMPLETION preempt — MUST come before the structural-change and mismatch
+    -- checks (a completion resets the puzzle, which would otherwise read as an
+    -- error-node reset or a grid change). See _try_claim_completion.
+    if _try_claim_completion(rec, plan, cur) then return end
+
+    -- Continuous structural validation: if the grid's structure changed since
+    -- the plan was built (sticky bomb deleted a row), the remaining moves are
+    -- computed against a layout that no longer exists. Abort + clear the force
+    -- snapshot so reconciliation re-forces against the new grid. Checked BEFORE
+    -- the "resumed" flag so a parked plan returning to a mutated grid flashes
+    -- "retrying", not "resuming".
+    if plan.validate_struct ~= nil and state ~= nil
+        and _struct_sig_from_state(state) ~= plan.validate_struct then
+        log.info("tick_plan: grid structure changed under plan (id=" .. rec.id
+              .. "); aborting " .. tostring(#plan.queue) .. " queued moves")
+        rec.plan = nil
+        rec.forced_struct = nil
+        _resolve_pending(rec, false,
+            "The grid changed mid-plan (a sticky bomb shifted it).")
+        _push_plan_event("grid_changed")
+        return
+    end
+
+    -- Verify the cursor actually landed where the previous move aimed. If it
+    -- didn't, the engine moved it somewhere the plan never predicted, so the
+    -- rest of the queue is computed against a wrong position. DON'T classify the
+    -- cause here — an error node resets the whole puzzle a few frames LATER, so
+    -- the cursor may still read its pre-reset position this instant. Hand the
+    -- record to the settle machine: it waits for the cursor to snap back to
+    -- start (error-node reset) or for the window to elapse (wall), then resolves
+    -- the deferred result accurately and lets reconciliation re-force. Stop
+    -- dispatching now. Checked after the cooldown/isMove gates so the cursor has
+    -- settled from the *previous* transition (just not from an error-node reset).
+    if plan.expected_pos ~= nil and cur ~= nil then
+        if cur.x == plan.expected_pos.x and cur.y == plan.expected_pos.y then
+            plan.confirmed = (plan.confirmed or 0) + 1
+        else
+            log.warn(string.format(
+                "tick_plan: cursor at (%d,%d) but expected (%d,%d); entering "
+             .. "settle (%d confirmed, %d queued dropped)",
+                cur.x, cur.y, plan.expected_pos.x, plan.expected_pos.y,
+                plan.confirmed or 0, #plan.queue))
+            rec.fail_settle = {
+                waited    = 0,
+                confirmed = plan.confirmed or 0,
+                total     = plan.total,
+                prev_pos  = plan.prev_pos,
+            }
             rec.plan = nil
-            rec.forced_struct = nil
-            _push_plan_event("grid_changed")
+            -- Flash the "rerouting" banner immediately (via the settling event)
+            -- so the overlay isn't blank during the settle; the classified
+            -- move_failed event follows when the settle resolves.
+            _push_plan_event({ kind = "settling" })
             return
         end
     end
@@ -1672,12 +2374,24 @@ function M.tick_plan()
               .. tostring(#plan.queue) .. " moves)")
     end
 
+    plan.prev_pos = cur   -- cursor right before this dispatch
     local dir = table.remove(plan.queue, 1)
-    local ok, msg = M.move_via_next_position(dir)
+    local ok, msg, tx, ty = M.move_via_next_position(dir)
     plan.last_msg = string.format("move %s: %s",
                                   dir, tostring(msg or (ok and "ok" or "error")))
     log.info("tick_plan: " .. plan.last_msg)
     plan.cooldown = _plan_cooldown_frames
+    -- Record where this move aimed the cursor so the next tick can confirm it
+    -- got there (and catch an error-node reset if it didn't). Also flag when the
+    -- move steps ONTO the goal: the hack auto-completes and resets, and next
+    -- tick's completion preempt uses this to claim the win instead of reading
+    -- the reset as an error node.
+    if ok and tx ~= nil and ty ~= nil then
+        plan.expected_pos = { x = tx, y = ty }
+        plan.dispatched_into_goal =
+            state ~= nil and state.goal_engine ~= nil
+            and tx == state.goal_engine.x and ty == state.goal_engine.y
+    end
 
     -- Abort the rest of the queue on a rejected move (OOB, no unit, etc.).
     -- Continuing would dispatch follow-up moves from a position the plan
@@ -1687,6 +2401,12 @@ function M.tick_plan()
         log.warn("tick_plan: move rejected; dropping remaining "
               .. tostring(#plan.queue) .. " queued moves")
         rec.plan = nil
+        rec.forced_struct = nil
+        _resolve_pending(rec, false,
+            "A planned move couldn't run (it ran off the grid), so the plan "
+         .. "stopped before reaching the goal.")
+        _push_plan_event({ kind = "move_failed", reason = "rejected",
+                           confirmed = plan.confirmed or 0, total = plan.total })
         return
     end
 
@@ -1857,7 +2577,32 @@ function M.debug_status()
         active               = false,
         grid_dims            = nil,
         cursor               = nil,
+        -- How many tracked instances are bound to the currently-aimed enemy,
+        -- broken down by lifecycle. >1 match with an "ended" one present is
+        -- the "invisible enemy" signature: a leftover completed PuzzleSnake
+        -- sharing the target. picked_lifecycle is what the matcher chose.
+        match_total          = 0,
+        match_playable       = 0,
+        match_idle           = 0,
+        match_ended          = 0,
+        picked_lifecycle     = nil,
     }
+
+    -- Lifecycle breakdown of all instances matching the aimed enemy.
+    if target_unit ~= nil then
+        for _, rec in ipairs(_known_instances) do
+            local ok, t = pcall(function() return rec.inst:get_field("_TargetPuzzleUnit") end)
+            if ok and t == target_unit then
+                s.match_total = s.match_total + 1
+                local life = _instance_lifecycle(rec.inst)
+                if life == "playable" then s.match_playable = s.match_playable + 1
+                elseif life == "idle" then s.match_idle = s.match_idle + 1
+                else s.match_ended = s.match_ended + 1 end
+            end
+        end
+        if inst ~= nil then s.picked_lifecycle = _instance_lifecycle(inst) end
+    end
+
     if inst == nil then return s end
 
     -- Read each trigger field. A nil read is reported separately from false.

@@ -35,10 +35,18 @@ M.autonomy_nudge_interval_frames = 1800
 -- via an out-of-band tool call.
 M.hacking_auto_force = true
 
--- Whether to include the cell-glyph legend in each grid render. Useful
--- the first few hacks while the AI is learning the format; can be
--- turned off later to save tokens.
+-- Whether to include the cell-glyph legend in each grid render. The legend
+-- is dynamic — it only lists the glyphs that actually appear in the current
+-- puzzle — so it stays short. Can still be turned off to save tokens once
+-- the AI knows the format.
 M.hacking_render_legend = true
+
+-- Whether to include the per-direction "adjacency block" (up/down/left/right
+-- from the cursor, each labelled legal / ILLEGAL / bonus). It grounds the
+-- coordinate convention and the immediate legal moves, which helps weaker
+-- spatial reasoners, but it's the largest chunk of per-puzzle text. Turn it
+-- off to test whether the grid + legend alone are enough.
+M.hacking_render_adjacency = true
 
 -- Whether the `pragmata_hack_plan` action requires a `reasoning` string
 -- alongside `moves`. When true, the peer must emit a step-by-step trace
@@ -49,12 +57,33 @@ M.hacking_render_legend = true
 M.hacking_require_reasoning = false
 
 -- ----------------------------------------------------------------
+-- Collectible-document (abandoned) "Archive" capture
+-- ----------------------------------------------------------------
+-- When a collectible document is opened in-game, the mod can capture its text
+-- and forward it to the AI as a silent context message (so the AI peer can be
+-- asked to read / recall it). See autorun/pragmata/archive.lua.
+M.archive_enabled = true
+
+-- GUI asset path of the document panel. NOT known from the static dump and
+-- build-dependent, so it must be set here. To find it: set
+-- `archive_discover_paths = true` below, open a document in-game, and watch
+-- reframework/log.txt for "[pragmata] archive: candidate GUI path '<path>'
+-- text='<sample>'". Put the document panel's path here and turn discovery off.
+M.archive_gui_path = nil
+
+-- Discovery aid: when true, logs every GUI panel that currently shows visible
+-- text (once each) to help identify `archive_gui_path`. Leave false in normal
+-- use — it's purely a one-time setup tool.
+M.archive_discover_paths = true
+
+-- Some Pragmata panels fill their text slots bottom-up. If a captured document
+-- reads in reverse order, set this true to flip the slot iteration.
+M.archive_reverse_slots = false
+
+-- ----------------------------------------------------------------
 -- AI peer display name
 -- ----------------------------------------------------------------
 -- Name shown in the on-screen UI (the "<NAME> IS HACKING" banner, etc.).
--- This repo is public, so the committed default is the generic peer name;
--- set it locally to your peer's name before streaming. Purely cosmetic —
--- nothing in the wire protocol or dispatch logic reads this value.
 M.display_name = "Neuro"
 
 -- ----------------------------------------------------------------

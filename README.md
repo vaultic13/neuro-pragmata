@@ -19,6 +19,8 @@ A REFramework Lua mod for [Pragmata](https://www.capcom-games.com/pragmata/) tha
 **Context emitted to Neuro** (as Neuro-SDK `context` messages):
 
 - Subtitle dialogue, formatted with speaker name + dialogue type
+- Collectible-document text, captured when a document is opened (optional;
+  needs the document panel's GUI path set in `mod_config.archive_gui_path`)
 - Hacking gauge crossings (25 / 50 / 75 / 100%)
 - Overdrive readiness edges
 - Auto-Hack upgrade unlock event

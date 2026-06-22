@@ -41,16 +41,29 @@ _GLYPHS: dict[CellType, str] = {
     CellType.TWO_WAY_LD:  "7",
     CellType.TWO_WAY_RT:  "L",
     CellType.TWO_WAY_RD:  "r",
+    # All ActiveSkill variants render '*'. The 1/2/3 suffixes are NOT skill level;
+    # they tag which of multiple equipped skills a node belongs to (Code Generator
+    # only) — never in normal play, and we don't distinguish it. Mirrors
+    # snake_render.lua GLYPHS.
     CellType.ACTIVE_SKILL:   "*",
-    CellType.ACTIVE_SKILL_1: "1",
-    CellType.ACTIVE_SKILL_2: "2",
-    CellType.ACTIVE_SKILL_3: "3",
+    CellType.ACTIVE_SKILL_1: "*",
+    CellType.ACTIVE_SKILL_2: "*",
+    CellType.ACTIVE_SKILL_3: "*",
     CellType.BOMB_3X3:    "b",
     CellType.BOMB_5X5:    "B",
     CellType.PURGE:       "P",
     CellType.ATTACK:      "A",
     CellType.ERASE_CODE:  "X",
-    CellType.FINISH_BLOW: "F",
+    # FinishBlow renders as plain floor, NOT a distinct 'F'. In-game the
+    # finish-blow node is almost always invisible (it only shows under specific
+    # conditions) yet the engine reports it on nearly every grid, and a small
+    # model reads "F"/"finish" as a finish/goal space. It's walkable floor to the
+    # planner, so render it as such. Mirrors snake_render.lua GLYPHS.FinishBlow.
+    CellType.FINISH_BLOW: ".",
+    # Red error nodes get their OWN glyph 'd', distinct from inert walls '#':
+    # both impassable, but entering an error node RESETS the whole hack while a
+    # wall just stops the cursor. Mirrors snake_render.lua GLYPHS.DeadFilament
+    # (the ObstacleGrid bit of _ObstacleReasons / is_blocked).
     CellType.DEAD_FILAMENT: "d",
 }
 
@@ -61,6 +74,35 @@ _ONE_WAY_GLYPH = {
 
 CURSOR_GLYPH = "@"
 TRAIL_GLYPH = "~"
+
+# Backtrack arrows: each visited cell shows the direction to MOVE to step back
+# onto it while retracing toward start (mirrors snake_render.lua trail_back).
+_DELTA_DIR = {(0, -1): "up", (0, 1): "down", (-1, 0): "left", (1, 0): "right"}
+_DIR_ARROW = {"up": "^", "down": "v", "left": "<", "right": ">"}
+
+
+def _trail_back(grid: Grid) -> dict[tuple[int, int], str]:
+    """Map (x,y) -> backtrack-in direction for each visited cell except the
+    cursor. grid.trail is ordered start..cursor, so a cell's backtrack-in dir
+    is the move FROM its cursor-side neighbour onto it."""
+    t = grid.trail
+    out: dict[tuple[int, int], str] = {}
+    if len(t) < 2 or t[-1] != grid.cursor:
+        return out
+    for i in range(len(t) - 1):
+        a, b = t[i], t[i + 1]  # a nearer start, b nearer cursor
+        d = (a[0] - b[0], a[1] - b[1])
+        if d in _DELTA_DIR:
+            out[a] = _DELTA_DIR[d]
+    return out
+
+
+def _trail_glyph_for(tb: dict[tuple[int, int], str], x: int, y: int,
+                     start: tuple[int, int] | None = None) -> str:
+    # Keep "home" visible while retracing (the start is always on the trail).
+    if start is not None and (x, y) == start:
+        return _GLYPHS[CellType.START]
+    return _DIR_ARROW.get(tb.get((x, y), ""), TRAIL_GLYPH)
 
 
 # Bonus nodes the AI should route through, mapped against in-game footage.
@@ -74,8 +116,9 @@ TRAIL_GLYPH = "~"
 # marker — it floods most walkable cells and is intentionally NOT rendered or
 # treated as a bonus; it would both hide the real blue nodes and hand the AI
 # a pre-solved route.
-# Other special types (FinishBlow, Attack, Bomb, Chain, Purge) still render with
-# their glyphs but aren't collect-targets.
+# Other special types (Attack, Bomb, Chain, Purge) still render with their
+# glyphs but aren't collect-targets. (FinishBlow is the exception: it renders as
+# plain floor — see _GLYPHS.)
 _ACTIVE_SKILL_TYPES = {
     CellType.ACTIVE_SKILL, CellType.ACTIVE_SKILL_1,
     CellType.ACTIVE_SKILL_2, CellType.ACTIVE_SKILL_3,
@@ -85,8 +128,11 @@ _ACTIVE_SKILL_TYPES = {
 def cell_glyph(cell: Cell) -> str:
     # Red "error node" hazards win over everything else: in live grids
     # they're a decoration on an otherwise plain (often None) cell, not a
-    # grid type — see Cell.blocked / Cell.dead_filament.
-    if getattr(cell, "blocked", False) or getattr(cell, "dead_filament", False):
+    # grid type — see Cell.blocked (the ObstacleGrid bit). Purple slow nodes
+    # (Cell.dead_filament, _DeadFilamentType) are NOT error nodes: they're
+    # walkable and fall through to their underlying type ('.' floor or 'O'
+    # when also Open).
+    if getattr(cell, "blocked", False):
         return _GLYPHS[CellType.DEAD_FILAMENT]
     if cell.type is CellType.ONE_WAY:
         if cell.direction is None:
@@ -99,15 +145,21 @@ def bonus_info(cell: Cell) -> tuple[int, str, str] | None:
     """(tier, color, label) for a bonus cell, else None. tier 2=blue, 1=yellow."""
     if cell.type in (CellType.GOAL, CellType.START):
         return None
-    # Hazards are never collect-targets — the danger labels must win.
+    # Hazards are never collect-targets — the danger labels must win. Purple
+    # slow nodes (dead_filament) are NOT hazards: a purple node that's also
+    # Open is a real blue bonus and must stay collectible.
     if cell.type in (CellType.ERASE_CODE, CellType.DEAD_FILAMENT) \
-            or getattr(cell, "blocked", False) \
-            or getattr(cell, "dead_filament", False):
+            or getattr(cell, "blocked", False):
         return None
     if cell.type is CellType.OPEN:
-        return 2, "BLUE", "bonus node: more damage + longer-lasting hack"
+        return 2, "blue OPEN node", "route THROUGH it - this is what makes the hack deal damage"
+    if cell.type is CellType.ATTACK:
+        # Offense/Hybrid mode reward node. Same BLUE color in-game, different
+        # icon ('A'); never label it another color (clashes with what the
+        # streamer says aloud). Mirrors snake_render.lua bonus_info.
+        return 2, "blue ATTACK node", "route THROUGH it (just like an OPEN node) to boost your next hack's damage"
     if cell.type in _ACTIVE_SKILL_TYPES:
-        return 1, "YELLOW", "skill node"
+        return 1, "yellow skill node", "an effective but LIMITED-use bonus - grab it when it's on your way"
     return None
 
 
@@ -128,14 +180,43 @@ def render(grid: Grid, *, inline: bool = True, with_legend: bool = True,
 
     parts.append("")
     parts.append(f"Cursor: ({grid.cursor[0]}, {grid.cursor[1]})")
-    parts.append(f"Start:  ({grid.start[0]}, {grid.start[1]})")
     parts.append(f"Goal:   ({grid.goal[0]}, {grid.goal[1]})")
 
+    # The whole task in one line; y grows DOWNWARD (LLMs flip this), hazards
+    # stated once. Mirrors snake_render.lua's M.render.
+    parts.append(
+        "Plan moves (up=-y, down=+y, left=-x, right=+x) from @ to G. NEVER step "
+        "on a # (wall - cursor just stops), a d (error node - RESETS the whole "
+        "hack), or X (fails it); never enter ~ either. A hack that grabs NO blue "
+        "reward nodes (the OPEN 'O' and ATTACK 'A' icons) does almost no damage, "
+        "so PREFER a route that passes through an O or A or two on the way to G - "
+        "even a few moves longer - as long as every cell is safe (never a # or d)."
+    )
     if grid.trail and len(grid.trail) > 1:
-        trail_str = ", ".join(f"({x},{y})" for x, y in grid.trail)
-        parts.append(f"Visited: {trail_str}")
-        parts.append("Hack already in progress: @ is the CURRENT cursor (not the start);")
-        parts.append("~ cells are already visited and CANNOT be re-entered. Plan from @.")
+        parts.append(
+            "Hack in progress: @ is the CURRENT cursor (not the start); plan from @."
+        )
+        if _trail_back(grid):
+            parts.append(
+                "Your visited path is drawn as ARROWS (^v<>) leading back toward S. "
+                "You may RETRACE it: move the way an arrow points to step back onto "
+                "that cell (it frees up), and chain arrows to undo many moves at "
+                "once - even all the way to S. Stop anywhere and head a new way. You "
+                "CANNOT cross your path any other way (entering a visited cell "
+                "against its arrow is blocked)."
+            )
+        else:
+            came_from = _backtrack_cell(grid)
+            if came_from is not None:
+                parts.append(
+                    f"You CAN reverse one step back onto the cell you came from "
+                    f"({came_from[0]},{came_from[1]}) - it frees up. "
+                    "No other ~ cell is enterable."
+                )
+
+    if with_legend:
+        parts.append("")
+        parts.append(legend(grid))
 
     if with_hint:
         parts.append("")
@@ -153,12 +234,12 @@ def render(grid: Grid, *, inline: bool = True, with_legend: bool = True,
         if plan is not None:
             parts.append("")
             if bonuses is not None:
-                # With bonus nodes present, the shortest path is a floor, not a
-                # target — a longer bonus-collecting route is the goal.
+                # Bonus nodes present: a longer route is fine ONLY if it stays
+                # safe and picks up blue O's — never extend a path into # for them.
                 parts.append(
-                    f"The shortest possible path to G is {len(plan)} moves — "
-                    "that's the minimum, not the target. A longer route is "
-                    "expected and good if it collects more bonus nodes."
+                    f"The shortest path to G is {len(plan)} moves. A longer route "
+                    "is fine only if it stays safe (no # / X) and collects blue O "
+                    "nodes along the way; otherwise just reach G."
                 )
             else:
                 parts.append(
@@ -166,11 +247,20 @@ def render(grid: Grid, *, inline: bool = True, with_legend: bool = True,
                     "(your plan should be roughly that length)."
                 )
 
-    if with_legend:
-        parts.append("")
-        parts.append(legend())
-
     return "\n".join(parts)
+
+
+def _backtrack_cell(grid: Grid) -> tuple[int, int] | None:
+    """The one visited cell the cursor may reverse onto (mirrors snake_render
+    state.came_from). With reverse/undo, that's the trail cell the cursor
+    arrived from — the entry just before the cursor in the ordered trail."""
+    t = grid.trail
+    if len(t) >= 2 and t[-1] == grid.cursor:
+        cf = t[-2]
+        cx, cy = grid.cursor
+        if abs(cf[0] - cx) + abs(cf[1] - cy) == 1:  # orthogonally adjacent
+            return cf
+    return None
 
 
 def _adjacency_block(grid: Grid) -> str:
@@ -185,6 +275,8 @@ def _adjacency_block(grid: Grid) -> str:
     """
     cx, cy = grid.cursor
     blocked = set(grid.trail) - {grid.cursor}
+    came_from = _backtrack_cell(grid)
+    tb = _trail_back(grid)
     lines = [f"From cursor ({cx}, {cy}):"]
 
     for d in (Dir.UP, Dir.DOWN, Dir.LEFT, Dir.RIGHT):
@@ -204,29 +296,49 @@ def _adjacency_block(grid: Grid) -> str:
         target = grid.at(nx, ny)
         target_glyph = cell_glyph(target)
         target_type = target.type.value
+        # FinishBlow renders as floor (see _GLYPHS); normalize its label too so
+        # the adjacency line doesn't leak "FinishBlow" (read as a finish space).
+        if target.type is CellType.FINISH_BLOW:
+            target_type = "None"
+        # Reward nodes: relabel to match their "blue OPEN/ATTACK node" reward tag
+        # (and so "Attack" doesn't read as a hazard). Mirrors snake_render.lua.
+        elif target.type is CellType.OPEN:
+            target_type = "OPEN node"
+        elif target.type is CellType.ATTACK:
+            target_type = "ATTACK node"
+        # Red error nodes ('d') are shown distinct from inert walls ('#'): both
+        # impassable, but entering an error node RESETS the whole hack while a
+        # wall just stops the cursor. Mirrors snake_render.lua adjacency_block.
         is_error_node = (target.type is CellType.DEAD_FILAMENT
-                         or getattr(target, "blocked", False)
-                         or getattr(target, "dead_filament", False))
+                         or getattr(target, "blocked", False))
         if is_error_node:
-            # A cell carrying an error node must read as one, whatever the
-            # underlying terrain type says.
-            target_type = "ErrorNode" if target.type is not CellType.DEAD_FILAMENT \
-                else CellType.DEAD_FILAMENT.value
+            target_type = "Error node"
         info = f"({nx}, {ny}) [{target_glyph}] {target_type}"
 
         if (nx, ny) in blocked:
-            lines.append(f"{label}{info}  ILLEGAL: in trail (already visited)")
+            # Enterable only via its backtrack arrow (move into it == its
+            # trail_back dir); fall back to the single came_from cell.
+            back = tb.get((nx, ny))
+            if (back is not None and back == d.value) \
+                    or (not tb and came_from is not None and (nx, ny) == came_from):
+                lines.append(f"{label}{info}  legal - BACKTRACK: "
+                             "step back along your visited path (frees it)")
+            else:
+                lines.append(f"{label}{info}  ILLEGAL: visited - "
+                             "can't re-enter from this side")
             continue
 
         rule = target.rule()
         if is_error_node:
-            lines.append(f"{label}{info}  ILLEGAL: error node — currently blocked, cannot enter")
+            lines.append(f"{label}{info}  ILLEGAL: error node - "
+                         "entering RESETS the whole hack to start")
             continue
         if rule.blocks_step:
-            lines.append(f"{label}{info}  ILLEGAL: wall — cannot enter")
+            lines.append(f"{label}{info}  ILLEGAL: wall - cannot enter "
+                         "(cursor just stops)")
             continue
         if rule.fails_on_step:
-            lines.append(f"{label}{info}  DANGER: EraseCode — entering ends the hack as failure")
+            lines.append(f"{label}{info}  DANGER: X trap - entering FAILS the hack")
             continue
         if rule.transitions is not None:
             entries = {e for (e, _) in rule.transitions}
@@ -235,8 +347,8 @@ def _adjacency_block(grid: Grid) -> str:
                 continue
         binfo = bonus_info(target)
         if binfo is not None:
-            _, bcolor, blabel = binfo
-            lines.append(f"{label}{info}  legal — {bcolor} BONUS: {blabel}")
+            _, bname, blabel = binfo
+            lines.append(f"{label}{info}  legal — {bname}, {blabel}")
         else:
             lines.append(f"{label}{info}  legal")
 
@@ -267,12 +379,18 @@ def _bonus_block(grid: Grid) -> str | None:
     found.sort(key=lambda t: (-t[0], t[1], t[2]))
 
     lines = [
-        "Bonus nodes - pass through as MANY as possible on the way to G. They",
-        "make the hack do more damage and last longer, so a longer, winding",
-        "route that collects more bonuses is BETTER than the shortest path - as",
-        "long as the plan still ends on G, never steps on an X (EraseCode)",
-        "trap or a d (error node), and never revisits a ~ trail cell. BLUE (O)",
-        "nodes are worth the most; grab them first, then YELLOW (*) skill nodes:",
+        "Blue reward nodes (the OPEN 'O' and ATTACK 'A' icons) are where the "
+        "damage comes from - a hack that grabs NONE is nearly useless. ACTIVELY "
+        "pick a SAFE route that "
+        "passes through one or two on the way to G, even if it is a few moves "
+        "longer than the straight line. Collect them by passing THROUGH them "
+        "going forward - do NOT detour out to one and come back the same way, "
+        "since retracing your own path UNDOES the rewards you grabbed. Hard "
+        "limits: never step on a # (wall) or d (error node) to reach one - a d "
+        "resets the whole hack - and only fall back to the shortest path if none "
+        "can be reached without crossing a # or d. (Yellow skill nodes - '*' or "
+        "'C' - are effective but limited-use: grab one when it's on your way, "
+        "but you don't need one every hack.)",
     ]
     for _tier, y, x, glyph, color, label in found:
         lines.append(f"  ({x}, {y}) [{glyph}] {color} - {label}")
@@ -283,6 +401,7 @@ def _render_terrain(grid: Grid, *, overlay: bool) -> str:
     """Render the grid as ASCII rows. Optionally overlays cursor and trail."""
     cursor = set([grid.cursor])
     trail = set(grid.trail) - cursor  # cursor takes priority over trail glyph
+    tb = _trail_back(grid)
 
     # Header row with x coordinates. Single-digit x is fine since width <= 8.
     header = "    " + " ".join(str(x) for x in range(grid.width))
@@ -293,7 +412,7 @@ def _render_terrain(grid: Grid, *, overlay: bool) -> str:
             if overlay and (x, y) in cursor:
                 g = CURSOR_GLYPH
             elif overlay and (x, y) in trail:
-                g = TRAIL_GLYPH
+                g = _trail_glyph_for(tb, x, y, grid.start)
             else:
                 g = cell_glyph(grid.at(x, y))
             row_glyphs.append(g)
@@ -349,14 +468,55 @@ def available_moves(grid: Grid) -> list[Dir]:
     return valid
 
 
-def legend() -> str:
-    return (
-        "Legend: S=start G=goal .=walkable floor #=wall  @=cursor ~=trail (cannot revisit)\n"
-        "        O=BLUE bonus node (more damage + longer hack - TOP priority)\n"
-        "        *=YELLOW skill node (1/2/3 variants) - secondary bonus\n"
-        "        Route through as many O and * nodes as you can en route to G.\n"
-        "        X=ERASE_CODE (DO NOT STEP — ends hack as failure)\n"
-        "        d=ERROR NODE (red warning node — BLOCKED, cannot enter)\n"
-        "        > < ^ v=oneway (only this direction) = | J L 7 r=twoway/corner\n"
-        "        b=bomb3x3 B=bomb5x5 P=purge C=chain A=attack F=finishblow s=shield"
-    )
+# Dynamic legend — only the glyphs that actually appear in the grid. Mirrors
+# snake_render.lua's LEGEND_ENTRIES / dynamic_legend so offline prompts match
+# what the mod sends live. Order is priority; some entries group glyphs.
+_LEGEND_ENTRIES: list[tuple[list[str], str]] = [
+    (["G"], "goal - reach this to finish the hack"),
+    (["S"], "start"),
+    (["@"], "cursor - your current position"),
+    (["."], "walkable floor"),
+    (["#"], "wall - CANNOT enter (cursor just stops there)"),
+    (["d"], "error node - CANNOT enter; entering RESETS the whole hack back to start"),
+    (["~"], "visited cell (direction unknown) - cannot re-enter"),
+    (["O"], "blue OPEN node - route THROUGH these; they're what makes the hack deal damage (a path that skips them does almost nothing)"),
+    (["A"], "blue ATTACK node - route THROUGH these just like OPEN nodes to boost your next hack's damage"),
+    (["*"], "YELLOW skill node - an effective but limited-use bonus (grab when it's on the way)"),
+    (["X"], "ERASE trap - stepping here FAILS the hack"),
+    (["b", "B"], "bomb node"),
+    (["P"], "purge node"),
+    (["C"], "chain node"),
+    (["s"], "shield - blocked"),
+    (["^", "v", "<", ">"], "one-way gate - only enter along its arrow"),
+    (["=", "|", "J", "7", "L", "r"],
+     "directional gate - only enter/exit along its arrows"),
+]
+
+
+def _present_glyphs(grid: Grid) -> set[str]:
+    present: set[str] = set()
+    trail = set(grid.trail) - {grid.cursor}
+    tb = _trail_back(grid)
+    for y in range(grid.height):
+        for x in range(grid.width):
+            if (x, y) == grid.cursor:
+                present.add("@")
+            elif (x, y) in trail:
+                present.add(_trail_glyph_for(tb, x, y, grid.start))
+            else:
+                present.add(cell_glyph(grid.at(x, y)))
+    return present
+
+
+def legend(grid: Grid | None = None) -> str:
+    if grid is None:
+        # No grid context: fall back to listing every entry.
+        present = {g for entry in _LEGEND_ENTRIES for g in entry[0]}
+    else:
+        present = _present_glyphs(grid)
+    lines = ["Legend:"]
+    for glyphs, desc in _LEGEND_ENTRIES:
+        shown = [g for g in glyphs if g in present]
+        if shown:
+            lines.append("  " + "/".join(shown) + " = " + desc)
+    return "\n".join(lines)

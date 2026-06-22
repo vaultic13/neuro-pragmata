@@ -19,14 +19,18 @@
 --      call is pcall-wrapped; a single ImGui failure flips a flag and we stay
 --      on the fallback for the rest of the session.
 --
--- Phases come from hacking_observer.overlay_status():
---   planning  -> "<NAME> IS HACKING / planning route..."
---   busy      -> "<NAME> IS HACKING / finishing another target..."
---   executing -> "<NAME> IS HACKING / move N / M"
---   resumed   -> brief "resuming planned route" flash
---   retrying  -> brief "PUZZLE CHANGED / replanning" flash
---   success   -> brief "HACK COMPLETE" flash
---   failed    -> brief "HACK FAILED" flash
+-- Phases come from hacking_observer.overlay_status(); each has a DISTINCT
+-- accent color (see DRAW) so the state reads at a glance, not just from text:
+--   planning  (cyan)   -> "<NAME> IS HACKING / planning route..."
+--   busy      (violet) -> "<NAME> IS HACKING / finishing another target..."
+--   executing (teal)   -> "<NAME> IS HACKING / move N / M"
+--   resumed   (teal)   -> brief "resuming planned route" flash
+--   retrying  (amber)  -> brief "PUZZLE CHANGED / replanning" flash (grid changed)
+--   rerouting (rose)   -> brief "REROUTING / hit a wall, finding another way" flash
+--   jammed    (orange) -> "HACKING JAMMED / waiting for the jammer to clear"
+--   paused    (slate)  -> "HACK PAUSED / waiting for the game to resume" (steady)
+--   success   (green)  -> brief "HACK COMPLETE" flash
+--   failed    (red)    -> brief "HACK FAILED" flash
 
 local M = {}
 
@@ -40,18 +44,36 @@ local observer = require("pragmata.hacking_observer")
 local function abgr(r, g, b, a) a = a or 255; return a * 0x1000000 + b * 0x10000 + g * 0x100 + r end
 local function with_alpha(color, a) return a * 0x1000000 + (color % 0x1000000) end
 
--- Accent palette, keyed by phase ("cyan"/"green"/"red"/"amber"). One table —
--- the `draw` API and ImGui share the ABGR packing. Tuned toward the in-game
--- hacking grid: dark navy panel (slightly translucent for a holographic feel),
--- a deeper electric-blue accent (less green than pure cyan), cool-white text.
+-- Accent palette, keyed by phase. One table — the `draw` API and ImGui share
+-- the ABGR packing. Tuned toward the in-game hacking grid: dark navy panel
+-- (slightly translucent for a holographic feel), cool-white text. Each
+-- overlay state gets a DISTINCT accent so the color alone tells you the state
+-- at a glance (the text was the only differentiator before):
+--   cyan   = planning (waiting on the plan for THIS puzzle)
+--   teal   = executing / resuming (cursor actually moving)
+--   violet = busy (a different enemy's hack is finishing first)
+--   amber  = retrying (the grid STRUCTURE changed; replanning)
+--   rose   = rerouting (a planned move hit a wall/error node; replanning)
+--   orange = jammed (a jammer is blocking hacking entirely)
+--   slate  = paused (the game is paused; the hack is frozen)
+--   green  = success    red = failed
 local DRAW = {
     bg     = abgr(9, 17, 32, 214),
     white  = abgr(235, 244, 255, 255),
     shadow = abgr(0, 0, 0, 200),
     cyan   = abgr(78, 188, 255, 255),
+    teal   = abgr(60, 224, 196, 255),
+    violet = abgr(188, 124, 255, 255),
     green  = abgr(90, 230, 130, 255),
     red    = abgr(255, 80, 80, 255),
     amber  = abgr(255, 195, 70, 255),
+    orange = abgr(255, 140, 40, 255),
+    -- Rose/pink: a distinct "minor snag, rerouting" accent, apart from amber
+    -- (grid changed) and red (hard failure).
+    rose   = abgr(255, 120, 170, 255),
+    -- Desaturated slate-blue: reads as inactive/frozen, clearly apart from the
+    -- saturated "something's happening" accents above.
+    slate  = abgr(150, 170, 200, 255),
 }
 
 -- ImGui enum constants (stable across ImGui versions for these flags).
@@ -129,20 +151,29 @@ local function lines_for(status)
         return NAME .. " IS HACKING", "planning route" .. dots, "cyan", false
     elseif phase == "busy" then
         local dots = string.rep(".", 1 + (math.floor(_frame / 18) % 3))
-        return NAME .. " IS HACKING", "finishing another target" .. dots, "cyan", false
+        return NAME .. " IS HACKING", "finishing another target" .. dots, "violet", false
     elseif phase == "jammed" then
-        return "HACKING JAMMED", name .. " is waiting for the jammer to clear", "amber", false
+        return "HACKING JAMMED", name .. " is waiting for the jammer to clear", "orange", false
+    elseif phase == "paused" then
+        -- is_result=true → steady (no breathing pulse / scan sweep), which reads
+        -- as "frozen" and fits a paused game.
+        return "HACK PAUSED", "waiting for the game to resume", "slate", true
     elseif phase == "executing" then
         local total = status.total or 0
         local n = math.min((status.executed or 0) + 1, math.max(total, 1))
         local sub = (total > 0)
             and string.format("executing move %d / %d", n, total)
             or "executing route"
-        return NAME .. " IS HACKING", sub, "cyan", false
+        return NAME .. " IS HACKING", sub, "teal", false
     elseif phase == "resumed" then
-        return NAME .. " IS HACKING", "resuming planned route", "cyan", true
+        return NAME .. " IS HACKING", "resuming planned route", "teal", true
     elseif phase == "retrying" then
         return "PUZZLE CHANGED", name .. " is replanning", "amber", true
+    elseif phase == "rerouting" then
+        -- Fires for BOTH a wall-stop and an error-node reset (the precise
+        -- outcome only reaches the tool result, not this flash), so keep the
+        -- on-screen text outcome-neutral rather than asserting "hit a wall".
+        return "REROUTING", name .. " got blocked - finding another way", "rose", true
     elseif phase == "success" then
         return "HACK COMPLETE", name .. " finished the hack", "green", true
     elseif phase == "failed" then

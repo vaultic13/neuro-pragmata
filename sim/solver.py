@@ -195,8 +195,7 @@ def validate_plan(grid: Grid, moves: list[Dir]) -> ValidationResult:
         target = grid.at(nx, ny)
         if not _can_enter(target, move):
             blocker = target.type.value
-            if getattr(target, "blocked", False) \
-                    or getattr(target, "dead_filament", False):
+            if getattr(target, "blocked", False):
                 blocker = f"error node (blocked, terrain={target.type.value})"
             return ValidationResult(
                 legal=False, reaches_goal=False, hit_erase_code=False,

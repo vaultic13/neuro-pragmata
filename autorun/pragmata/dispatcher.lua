@@ -1,6 +1,16 @@
 -- Dispatch table for AI-callable actions. Each entry is registered here with a
--- description, JSON schema, and handler. Handlers return (success, message)
--- which is sent back as a Neuro-SDK action/result.
+-- description, JSON schema, and handler. Handlers are called as
+-- handler(args, ctx) and normally return (success, message), sent back as a
+-- Neuro-SDK action/result.
+--
+-- DEFERRED results: a handler whose real outcome isn't known synchronously (e.g.
+-- a hacking plan that executes move-by-move over the next second) can return
+-- `ctx.defer()` instead. The dispatcher then sends NO result immediately; the
+-- handler is responsible for calling `ctx.resolve(success, message)` later, when
+-- the outcome IS known. The Neuro-SDK action protocol lets a result arrive
+-- asynchronously, so the tool result the AI sees reflects what actually happened
+-- rather than a blind acknowledgement. ctx.resolve is idempotent and ignored
+-- once a result has been sent.
 
 local M = {}
 
@@ -8,6 +18,11 @@ local log = require("pragmata.util.log")
 
 local _actions = {}
 local GAME_NAME = "Pragmata"
+
+-- Unique sentinel a handler returns (via ctx.defer()) to suppress the immediate
+-- action/result. Compared by identity, so it can never collide with a real
+-- success value.
+M.DEFER = {}
 
 function M.register(name, def)
     assert(type(name) == "string" and name ~= "", "action name required")
@@ -57,26 +72,40 @@ function M.handle_incoming(msg, send_fn)
     local ok, args = pcall(json.load_string, raw_args)
     if not ok or type(args) ~= "table" then args = {} end
 
-    local h_ok, success, message = pcall(action.handler, args)
-    if not h_ok then
-        log.error("handler crashed for " .. name .. ": " .. tostring(success))
+    -- Send the action/result at most once, whether synchronously or later via
+    -- ctx.resolve (deferred handlers).
+    local sent = false
+    local function send_result(success, message)
+        if sent then return end
+        sent = true
         send_fn({
             command = "action/result",
             game = GAME_NAME,
-            data = { id = id, success = false, message = "handler error" },
+            data = {
+                id = id,
+                success = success and true or false,
+                message = message or "",
+            },
         })
+    end
+
+    local ctx = {
+        id = id,
+        defer = function() return M.DEFER end,
+        resolve = function(success, message) send_result(success, message) end,
+    }
+
+    local h_ok, success, message = pcall(action.handler, args, ctx)
+    if not h_ok then
+        log.error("handler crashed for " .. name .. ": " .. tostring(success))
+        send_result(false, "handler error")
         return
     end
 
-    send_fn({
-        command = "action/result",
-        game = GAME_NAME,
-        data = {
-            id = id,
-            success = success and true or false,
-            message = message or "",
-        },
-    })
+    -- A deferred handler will call ctx.resolve later; send nothing now.
+    if success == M.DEFER then return end
+
+    send_result(success, message)
 end
 
 return M
