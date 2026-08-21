@@ -13,6 +13,7 @@
 local M = {}
 local log = require("pragmata.util.log")
 local emit = require("pragmata.util.emit")
+local object_names = require("pragmata.bindings.object_names")
 
 local function safe_require(name)
     local ok, mod = pcall(require, name)
@@ -33,7 +34,7 @@ local scan      = safe_require("pragmata.bindings.scan")
 
 local GAUGE_THRESHOLDS = { 0.25, 0.5, 0.75, 1.0 }
 local gauge_track             = emit.threshold(GAUGE_THRESHOLDS)
-local overdrive_ready_track   = emit.edge()
+local overdrive_cost_track    = emit.edge()
 local autohack_unlock_track   = emit.edge()
 local scanning_track          = emit.edge()
 
@@ -53,6 +54,11 @@ local SCAN_EMIT_WINDOW_POLLS = 20  -- ~2s at the 6-frame poll cadence below
 local SCAN_DEDUP_WINDOW = 8
 local _scan_recent_keys = {}
 local _scan_recent_set = {}
+local _scan_request_serial = nil
+
+local function reset_scan_records()
+    _scan_recent_keys, _scan_recent_set = {}, {}
+end
 
 local function scan_record_key(key)
     if _scan_recent_set[key] then return false end
@@ -69,7 +75,10 @@ local function summarize_pings(pings)
     if type(pings) ~= "table" or #pings == 0 then return nil, nil end
     local counts, order, key_parts = {}, {}, {}
     for _, p in ipairs(pings) do
-        local kind = tostring(p.icon_type or "unknown")
+        -- Resolve the icon hash the same way the main path does, so even this
+        -- fallback says "Item" rather than "4253710839".
+        local kind = object_names.icon_name(p.icon_type)
+            or tostring(p.icon_type or "unknown")
         if not counts[kind] then
             counts[kind] = 0
             table.insert(order, kind)
@@ -114,12 +123,12 @@ re.on_frame(function()
             end
         end)
 
+        -- Readiness now comes from the engine's own status flags rather than
+        -- from a gauge threshold alone (see bindings/overdrive.lua:readiness).
         local ready = safe_call(overdrive.is_ready)
-        overdrive_ready_track(ready, function(now)
+        overdrive_cost_track(ready, function(now)
             if now then
-                emit.narrative("Diana's Overdrive Protocol is ready.")
-            else
-                emit.narrative("Overdrive Protocol fired.")
+                emit.narrative("Overdrive is ready.")
             end
         end)
     end
@@ -137,17 +146,40 @@ re.on_frame(function()
         -- Open a capture window on each real scan start.
         local scanning = safe_call(scan.is_scanning)
         scanning_track(scanning, function(now)
-            if now then _scan_emit_window = SCAN_EMIT_WINDOW_POLLS end
+            if now then
+                _scan_emit_window = SCAN_EMIT_WINDOW_POLLS
+                reset_scan_records()
+            end
         end)
+
+        -- Native Scan input increments this serial even when the target list
+        -- is identical to the prior scan.  Resetting here makes every scan
+        -- report its own result, while retaining deduplication *within* one
+        -- scan window (the manager can expose the same list for many polls).
+        local serial = safe_call(scan.last_request_serial)
+        if serial ~= nil and serial ~= _scan_request_serial then
+            _scan_request_serial = serial
+            _scan_emit_window = SCAN_EMIT_WINDOW_POLLS
+            reset_scan_records()
+        end
 
         if _scan_emit_window > 0 then
             _scan_emit_window = _scan_emit_window - 1
-            local results = safe_call(scan.get_results)
-            if type(results) == "table" then
-                local pings = results.pings or results
-                local summary, key = summarize_pings(pings)
-                if summary and key and scan_record_key(key) then
-                    emit.narrative("Diana scanned: " .. summary .. ".")
+            local readable = safe_call(scan.describe_results)
+            if type(readable) == "table" and readable.text and readable.fingerprint then
+                if scan_record_key(readable.fingerprint) then
+                    emit.narrative("Diana scanned: " .. readable.text .. ".")
+                end
+            else
+                -- Compatibility fallback for an older or partially resolved
+                -- ScanManager build. IDs remain technical data, not names.
+                local results = safe_call(scan.get_results)
+                if type(results) == "table" then
+                    local pings = results.pings or results
+                    local summary, key = summarize_pings(pings)
+                    if summary and key and scan_record_key(key) then
+                        emit.narrative("Diana scanned: " .. summary .. ".")
+                    end
                 end
             end
         end
