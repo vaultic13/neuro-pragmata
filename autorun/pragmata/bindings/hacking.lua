@@ -68,6 +68,7 @@
 --   rather than "permanently locked."
 
 local log = require("pragmata.util.log")
+local player_drivers = require("pragmata.bindings.player_drivers")
 
 local M = {}
 
@@ -89,6 +90,7 @@ local _state = {
     m_get_is_jamming = nil,
     m_get_is_auto_hacking = nil,           -- on AutoHackWorkUnit
     m_can_auto_hack_workunit = nil,        -- on AutoHackWorkUnit
+    m_start_auto_hack = nil,               -- private, no-argument transition
     m_get_hacking_gauge = nil,             -- on PlayerPuzzleControlDriver
     m_get_empty = nil,                     -- on GaugeUnit
     m_get_remaining_rate = nil,            -- on GaugeUnit
@@ -133,10 +135,19 @@ local function ensure_init()
         _state.m_get_is_auto_hacking   = m(_state.auto_hack_work_td, "get_IsAutoHacking()")
         _state.m_can_auto_hack_workunit = m(_state.auto_hack_work_td,
             "canAutoHack(app.PuzzleUnit, System.Single, System.Single)")
+        -- Confirmed by the manual trace: startAutoHack has no parameters and
+        -- changes IsAutoHacking on the live work unit.  It is private, so the
+        -- caller still verifies the transition on later frames before calling
+        -- the action successful.
+        _state.m_start_auto_hack = m(_state.auto_hack_work_td, "startAutoHack()")
+            or m(_state.auto_hack_work_td, "startAutoHack")
     end
 
     if _state.puzzle_driver_td ~= nil then
         _state.m_get_hacking_gauge = m(_state.puzzle_driver_td, "get_HackingGauge()")
+        -- Player drivers are not managed singletons. Capture the live driver
+        -- through its lifecycle hook, as the Overdrive binding already does.
+        player_drivers.want("app.PlayerPuzzleControlDriver")
     end
 
     if _state.gauge_unit_td ~= nil then
@@ -167,20 +178,12 @@ end
 -- CONFIDENCE: low — the lookup path is approximate. If REFramework can't
 -- enumerate by type-name on this binary, this returns nil and the call sites
 -- degrade to "we don't know, refuse the action".
+-- PlayerPuzzleControlDriver is captured from its own update lifecycle instead
+-- of trying to dispatch DriverBoard's generic findDriver overloads.
 local function find_player_puzzle_driver()
     if _state.puzzle_driver_td == nil then return nil end
 
-    -- Try direct enumeration first (cheapest if available).
-    local ok, found = pcall(function()
-        return sdk.get_managed_singleton("app.PlayerPuzzleControlDriver")
-    end)
-    if ok and found ~= nil then return found end
-
-    -- find_components style fallback. Some REFramework builds expose
-    -- find_game_object / find_component; both are too engine-specific to
-    -- chain blindly here. We just admit defeat for now and let the bindings
-    -- log a warning at use time.
-    return nil
+    return player_drivers.get("app.PlayerPuzzleControlDriver")
 end
 
 local function find_auto_hack_workunit()
@@ -244,9 +247,13 @@ end
 -- CONFIDENCE: medium — the LastHackingTarget convention is well-attested
 -- in the engine (it's the lock the player UI tracks); the fallback to
 -- DefaultHackingTarget is best-effort.
-local function resolve_target(target_id)
-    if target_id ~= nil then return target_id end
-
+-- Which target the engine will hack. This is a GUARD, not a selector:
+-- startAutoHack() takes no parameters, so the engine always acts on whatever
+-- the work unit is already pointed at. Resolving it here only lets auto_hack
+-- refuse early when nothing is locked on, instead of asking the engine to hack
+-- nothing. There is deliberately no caller-supplied override -- one would read
+-- as a target choice while changing nothing.
+local function resolve_target()
     local mgr = get_hacking_singleton()
     if mgr == nil then return nil end
 
@@ -271,9 +278,9 @@ end
 -- Public API
 -- ---------------------------------------------------------------------------
 
--- Try to fire an auto-hack against `target_id`. `target_id` is expected to be
--- an app.PuzzleUnit reference (REManagedObject) or nil to mean "current
--- engine-locked target". Returns (success_bool, message_string).
+-- Try to fire an auto-hack against the currently locked-on target. Takes no
+-- arguments: see resolve_target() for why there is nothing to choose.
+-- Returns (success_bool, message_string).
 --
 -- Failure cases (in order checked):
 --   * SDK not initialized / managers missing
@@ -288,7 +295,7 @@ end
 -- runtime state we can't fully introspect statically.
 -- CONFIDENCE: medium — preconditions are individually high-confidence; the
 -- start-transition path is conservative (see file-level note).
-function M.auto_hack(target_id)
+function M.auto_hack()
     ensure_init()
 
     if not M.is_auto_hack_unlocked() then
@@ -309,21 +316,38 @@ function M.auto_hack(target_id)
         return false, "auto-hack already in progress"
     end
 
-    local target = resolve_target(target_id)
-    if target == nil then
-        return false, "no valid hack target (none locked, none provided)"
+    if resolve_target() == nil then
+        return false, "no valid hack target (nothing is locked on)"
     end
 
     if not gauge_has_juice(driver) then
         return false, "hacking gauge empty; cannot pay auto-hack cost"
     end
 
-    -- We don't have a clean reflective handle on the actual start transition
-    -- (see file-level note). Surface success of the precondition check; the
-    -- parent dispatcher is responsible for any input-synthesis follow-up.
-    -- LOW CONFIDENCE on the "did it actually start" guarantee.
-    log.warn("hacking.auto_hack: preconditions met; engine-side start transition is not directly callable from this binding (input synthesis required by caller). Returning success on precondition pass only.")
-    return true, "auto-hack preconditions satisfied; engine start-transition deferred to caller-level input synthesis"
+    if _state.m_start_auto_hack == nil then
+        return false, "auto-hack start method is unavailable on this game build"
+    end
+
+    local ok, err = pcall(function()
+        _state.m_start_auto_hack:call(workunit)
+    end)
+    if not ok then
+        log.warn("hacking.auto_hack: startAutoHack() raised: " .. tostring(err))
+        return false, "auto-hack start request raised an SDK error"
+    end
+
+    -- This is deliberately only a request acknowledgement. The dispatcher
+    -- waits for get_IsAutoHacking() to rise before it resolves the AI action.
+    -- The transition can occur in this same frame, but it is reported by the
+    -- action observer rather than inferred from this reflection call.
+    return true, "auto-hack start request submitted; awaiting engine transition"
+end
+
+-- Read-only confirmation predicate for deferred action results.
+function M.is_auto_hacking()
+    ensure_init()
+    local workunit = find_auto_hack_workunit()
+    return is_already_auto_hacking(workunit)
 end
 
 -- Returns true iff the auto-hack subsystem looks usable right now. This
@@ -351,6 +375,42 @@ function M.is_auto_hack_unlocked()
     -- Field unreadable but workunit exists — hedge to false rather than
     -- claim an unverified true.
     return false
+end
+
+-- Read-only diagnostic snapshot used by the in-game ability tracer. It does
+-- not claim that auto-hack can be started; it only exposes the state that the
+-- current conservative binding can actually observe.
+function M.debug_status()
+    ensure_init()
+    local mgr = get_hacking_singleton()
+    local workunit, driver = find_auto_hack_workunit()
+    local target = resolve_target(nil)
+    local gauge = nil
+    if driver ~= nil and _state.m_get_hacking_gauge ~= nil then
+        pcall(function() gauge = _state.m_get_hacking_gauge:call(driver) end)
+    end
+    local empty, remaining = nil, nil
+    if gauge ~= nil and _state.m_get_empty ~= nil then
+        pcall(function() empty = _state.m_get_empty:call(gauge) end)
+    end
+    if gauge ~= nil and _state.m_get_remaining_rate ~= nil then
+        pcall(function() remaining = _state.m_get_remaining_rate:call(gauge) end)
+    end
+    local can = nil
+    if workunit ~= nil then pcall(function() can = workunit:get_field("_CanAutoHack") end) end
+    return {
+        manager_present = mgr ~= nil,
+        driver_present = driver ~= nil,
+        workunit_present = workunit ~= nil,
+        target_present = target ~= nil,
+        jamming = is_jamming(),
+        auto_hacking = is_already_auto_hacking(workunit),
+        can_auto_hack = can,
+        gauge_empty = empty,
+        gauge_remaining_rate = remaining,
+        start_method_ok = _state.m_start_auto_hack ~= nil,
+        drivers = player_drivers.debug_status(),
+    }
 end
 
 return M
