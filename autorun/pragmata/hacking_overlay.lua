@@ -20,10 +20,13 @@
 --      on the fallback for the rest of the session.
 --
 -- Phases come from hacking_observer.overlay_status(); each has a DISTINCT
--- accent color (see DRAW) so the state reads at a glance, not just from text:
---   planning  (cyan)   -> "<NAME> IS HACKING / planning route..."
---   busy      (violet) -> "<NAME> IS HACKING / finishing another target..."
---   executing (teal)   -> "<NAME> IS HACKING / move N / M"
+-- accent color (see DRAW) so the state reads at a glance, not just from text.
+-- The three in-progress phases share an animated, CLI-style title (a cycling
+-- spinner glyph + a typewriter cursor overwriting a rotating verb, see the
+-- "status animation" block below); the rest show fixed result/transition text:
+--   planning  (cyan)   -> "<spin> <NAME> IS <verb> / planning route..."
+--   busy      (violet) -> "<spin> <NAME> IS <verb> / finishing another target..."
+--   executing (teal)   -> "<spin> <NAME> IS <verb> / move N / M"
 --   resumed   (teal)   -> brief "resuming planned route" flash
 --   retrying  (amber)  -> brief "PUZZLE CHANGED / replanning" flash (grid changed)
 --   rerouting (rose)   -> brief "REROUTING / hit a wall, finding another way" flash
@@ -103,6 +106,13 @@ local FONT_SUB_SIZE   = 18
 local BANNER_W        = 560
 local BANNER_H        = 106
 
+-- Left-anchor x for the ANIMATED title: the spinner sits in its own fixed slot
+-- and the "<NAME> IS <verb>" text starts at a fixed x, so the cycling glyph's
+-- width and the verb's changing length never shove the text around. (Static
+-- result titles stay centered.) Window-local for ImGui; an offset for `draw`.
+local ACTIVE_SPIN_X = 20
+local ACTIVE_TEXT_X = 52
+
 -- Fonts loaded at real pixel sizes for the ImGui path. Loaded lazily (once)
 -- so we don't depend on ImGui being ready at script-load time.
 local _font_big, _font_med
@@ -140,18 +150,175 @@ local function filled_rect(x, y, w, h, c) pcall(function() draw.filled_rect(x, y
 local function outline_rect(x, y, w, h, c) pcall(function() draw.outline_rect(x, y, w, h, c) end) end
 local function text_at(s, x, y, c) pcall(function() draw.text(s, x, y, c) end) end
 
+
+-- ---------------------------------------------------------------------------
+-- Terminal/CLI-style status animation (the "<NAME> IS <verb>" title).
+--
+-- A cycling spinner glyph + a typewriter cursor that overwrites the current
+-- verb in place with the next one from config.hacking_status_verbs, so the
+-- in-progress banner reads as an AI at work rather than a static string.
+--
+-- ASCII ON PURPOSE: REFramework's ImGui/`draw` fonts are ASCII bitmap fonts
+-- (the whole hacking grid is ASCII for the same reason), so dingbat sparkles
+-- and block-cursor glyphs render as missing-glyph boxes. The fancier CLI sets
+-- are left one swap away below for once a Unicode-capable font is confirmed.
+-- ---------------------------------------------------------------------------
+
+-- ASCII pulse approximating the CLI's ·✢✳✶✻✽ dot->sparkle growth. To try the
+-- real glyphs after confirming the loaded font has them:
+--local SPIN_GLYPHS = { "·", "✢", "✳", "✶", "✻", "✽" }
+local SPIN_GLYPHS = { ".", "+", "*", "#", "*", "+" }
+local SPIN_EVERY  = 8        -- frames between spinner glyph swaps
+local CURSOR      = "|"      -- terminal cursor; try "█" / "▮" if the font has it
+local SWEEP_STEP  = 3        -- frames per character of the overwrite sweep
+local HOLD_FRAMES = 150       -- frames to hold a finished verb (cursor blinking)
+local BLINK_EVERY = 18       -- frames per cursor blink toggle while holding
+local EGG_VERB    = "HACKING"
+local EGG_ODDS    = 18       -- ~1-in-N verb picks is the "she's an AI" easter egg
+
+-- Seed once so the verb order and failure lines vary run-to-run (best-effort;
+-- some builds restrict `os`).
+pcall(function() if os and os.time then math.randomseed(os.time()) end end)
+
+local function verb_pool()
+    local p = config.hacking_status_verbs
+    if type(p) ~= "table" or #p == 0 then return { "HACKING" } end
+    return p
+end
+
+-- Next verb, avoiding an immediate repeat so the overwrite is always visible.
+-- Returns (verb, is_egg).
+local function pick_verb(prev)
+    if math.random(EGG_ODDS) == 1 then return EGG_VERB, true end
+    local p = verb_pool()
+    local v = p[math.random(#p)]
+    for _ = 1, 4 do
+        if v ~= prev then break end
+        v = p[math.random(#p)]
+    end
+    return v, false
+end
+
+local _typer = { old = "", new = nil, pos = 0, t = 0, mode = "sweep", hold = 0, egg = false }
+
+-- Advance the typewriter one displayed frame and return (verb_field, is_egg).
+-- Called once per rendered frame from the active-phase branch of lines_for, so
+-- it only animates while the in-progress banner is actually showing.
+local function advance_typer()
+    if _typer.new == nil then
+        _typer.new, _typer.egg = pick_verb(nil)
+        _typer.old, _typer.pos, _typer.t, _typer.mode, _typer.hold = "", 0, 0, "sweep", 0
+    end
+
+    if _typer.mode == "sweep" then
+        _typer.t = _typer.t + 1
+        if _typer.t >= SWEEP_STEP then
+            _typer.t = 0
+            _typer.pos = _typer.pos + 1
+        end
+        if _typer.pos >= math.max(#_typer.old, #_typer.new) then
+            _typer.pos = math.max(#_typer.old, #_typer.new)
+            _typer.mode, _typer.hold = "hold", 0
+        end
+    else -- hold the finished verb, then sweep to the next
+        _typer.hold = _typer.hold + 1
+        if _typer.hold >= HOLD_FRAMES then
+            _typer.old = _typer.new
+            _typer.new, _typer.egg = pick_verb(_typer.old)
+            _typer.pos, _typer.t, _typer.mode = 0, 0, "sweep"
+        end
+    end
+
+    local s
+    if _typer.mode == "hold" then
+        -- Full verb with a blinking cursor.
+        local cursor = ((math.floor(_frame / BLINK_EVERY) % 2) == 1)
+            and string.rep(" ", #CURSOR) or CURSOR
+        s = _typer.new .. cursor
+    else
+        -- Overwrite in place: new[1..pos] + cursor + old's untouched tail.
+        local pos = _typer.pos
+        local head = _typer.new:sub(1, math.min(pos, #_typer.new))
+        if pos > #_typer.new then head = head .. string.rep(" ", pos - #_typer.new) end
+        s = head .. CURSOR .. _typer.old:sub(pos + 1)
+    end
+
+    -- No padding: the title is LEFT-anchored at draw time, so the verb can grow
+    -- and shrink to the right without moving anything.
+    return s, _typer.egg
+end
+
+local function spinner_glyph()
+    return SPIN_GLYPHS[1 + (math.floor(_frame / SPIN_EVERY) % #SPIN_GLYPHS)]
+end
+
+-- Blinking corner tag, branded with the configured peer name ("NEURO-HACK").
+local function hack_tag()
+    return ">> " .. string.upper(config.display_name or "Neuro") .. "-HACK"
+end
+
+-- Neuro-themed flash sub-lines. "NAME" is substituted with display_name. One is
+-- picked per event (on the rising edge into the phase) and held for the flash.
+local FAIL_LINES = {
+    "NAME hit a wall",
+    "NAME fumbled the hack",
+    "skill issue, apparently",
+    "NAME got outplayed",
+    "that one got away",
+    "NAME blames the lag",
+}
+local REROUTE_LINES = {
+    "NAME got blocked - rethinking it",
+    "wrong turn, recalculating",
+    "NAME is plotting a new route",
+    "nope - trying another way",
+}
+local _fail_sub, _reroute_sub
+local function pick_fail(name, fresh)
+    if fresh or _fail_sub == nil then
+        _fail_sub = (FAIL_LINES[math.random(#FAIL_LINES)]):gsub("NAME", name)
+    end
+    return _fail_sub
+end
+local function pick_reroute(name, fresh)
+    if fresh or _reroute_sub == nil then
+        _reroute_sub = (REROUTE_LINES[math.random(#REROUTE_LINES)]):gsub("NAME", name)
+    end
+    return _reroute_sub
+end
+
+-- Tracks phase transitions so flash sub-lines are re-rolled once per event.
+local _prev_phase = nil
+
 -- Title, sub-line, accent key, and whether this is a (steady) result flash.
 -- Returns nil to draw nothing this frame.
 local function lines_for(status)
     local name = config.display_name or "Neuro"
     local NAME = string.upper(name)
     local phase = status.phase
+
+    -- Re-roll flash sub-lines only on the rising edge into a new phase.
+    local fresh = (phase ~= _prev_phase)
+    _prev_phase = phase
+
+    -- In-progress title: animated spinner+typewriter verb (config-gated), or the
+    -- static "<NAME> IS HACKING". The easter-egg verb swaps the sub-line.
+    local function active(default_sub, accent)
+        if config.hacking_status_animate == false then
+            return NAME .. " IS HACKING", default_sub, accent, false
+        end
+        local verb, egg = advance_typer()
+        local title = NAME .. " IS " .. verb
+        -- 5th value (spinner glyph) signals the LEFT-anchored animated layout.
+        return title, (egg and "be patient, she's an AI" or default_sub), accent, false, spinner_glyph()
+    end
+
     if phase == "planning" then
         local dots = string.rep(".", 1 + (math.floor(_frame / 18) % 3))
-        return NAME .. " IS HACKING", "planning route" .. dots, "cyan", false
+        return active("planning route" .. dots, "cyan")
     elseif phase == "busy" then
         local dots = string.rep(".", 1 + (math.floor(_frame / 18) % 3))
-        return NAME .. " IS HACKING", "finishing another target" .. dots, "violet", false
+        return active("finishing another target" .. dots, "violet")
     elseif phase == "jammed" then
         return "HACKING JAMMED", name .. " is waiting for the jammer to clear", "orange", false
     elseif phase == "paused" then
@@ -164,7 +331,7 @@ local function lines_for(status)
         local sub = (total > 0)
             and string.format("executing move %d / %d", n, total)
             or "executing route"
-        return NAME .. " IS HACKING", sub, "teal", false
+        return active(sub, "teal")
     elseif phase == "resumed" then
         return NAME .. " IS HACKING", "resuming planned route", "teal", true
     elseif phase == "retrying" then
@@ -173,11 +340,11 @@ local function lines_for(status)
         -- Fires for BOTH a wall-stop and an error-node reset (the precise
         -- outcome only reaches the tool result, not this flash), so keep the
         -- on-screen text outcome-neutral rather than asserting "hit a wall".
-        return "REROUTING", name .. " got blocked - finding another way", "rose", true
+        return "REROUTING", pick_reroute(name, fresh), "rose", true
     elseif phase == "success" then
         return "HACK COMPLETE", name .. " finished the hack", "green", true
     elseif phase == "failed" then
-        return "HACK FAILED", "the hack was interrupted", "red", true
+        return "HACK FAILED", pick_fail(name, fresh), "red", true
     end
     return nil
 end
@@ -263,7 +430,7 @@ end
 
 -- Returns true if the ImGui banner rendered cleanly, false on any failure
 -- (caller then pins to the draw fallback).
-local function draw_imgui_banner(x, y, w, h, title, sub, akey, is_result, pulse)
+local function draw_imgui_banner(x, y, w, h, title, sub, akey, is_result, pulse, spin)
     draw_hud_frame(x, y, w, h, DRAW[akey], pulse)
 
     return pcall(function()
@@ -273,25 +440,38 @@ local function draw_imgui_banner(x, y, w, h, title, sub, akey, is_result, pulse)
         imgui.push_style_color(IMCOL_BORDER, DRAW[akey])
         imgui.begin_window("##autohack_overlay", nil, OVERLAY_FLAGS)
 
-        -- Blinking AUTO-HACK tag (top-left) — hammers home that it's automated.
+        -- Blinking "<NAME>-HACK" tag (top-left) — hammers home that it's automated.
         if is_result or (math.floor(_frame / 20) % 2) == 0 then
             imgui.set_cursor_pos({ 18, 8 })
             if _font_med then imgui.push_font(_font_med) end
-            imgui.text_colored(">> AUTO-HACK", DRAW[akey])
+            imgui.text_colored(hack_tag(), DRAW[akey])
             if _font_med then imgui.pop_font() end
         end
 
-        -- Title — large, centered, accent-colored.
+        -- Title — large, accent-colored. Animated: spinner in a fixed slot +
+        -- LEFT-anchored text (stable). Static result title: centered.
         if _font_big then imgui.push_font(_font_big) end
-        local tw = im_text_width(title, 15)
-        imgui.set_cursor_pos({ math.max(12, (w - tw) / 2), 32 })
-        imgui.text_colored(title, DRAW[akey])
+        if spin then
+            imgui.set_cursor_pos({ ACTIVE_SPIN_X, 32 })
+            imgui.text_colored(spin, DRAW[akey])
+            imgui.set_cursor_pos({ ACTIVE_TEXT_X, 32 })
+            imgui.text_colored(title, DRAW[akey])
+        else
+            local tw = im_text_width(title, 15)
+            imgui.set_cursor_pos({ math.max(12, (w - tw) / 2), 32 })
+            imgui.text_colored(title, DRAW[akey])
+        end
         if _font_big then imgui.pop_font() end
 
-        -- Status sub-line — medium, centered, white.
+        -- Status sub-line — medium, white. Left-aligned under an animated title,
+        -- centered under a static one.
         if _font_med then imgui.push_font(_font_med) end
-        local sw2 = im_text_width(sub, 9)
-        imgui.set_cursor_pos({ math.max(12, (w - sw2) / 2), 70 })
+        if spin then
+            imgui.set_cursor_pos({ ACTIVE_TEXT_X, 70 })
+        else
+            local sw2 = im_text_width(sub, 9)
+            imgui.set_cursor_pos({ math.max(12, (w - sw2) / 2), 70 })
+        end
         imgui.text_colored(sub, DRAW.white)
         if _font_med then imgui.pop_font() end
 
@@ -330,7 +510,7 @@ local function corner_brackets(x, y, w, h, len, thick, c)
     filled_rect(x + w - thick, y + h - len, thick, len, c)
 end
 
-local function draw_legacy_banner(x, y, w, h, title, sub, akey, is_result, pulse)
+local function draw_legacy_banner(x, y, w, h, title, sub, akey, is_result, pulse, spin)
     if draw == nil then return end
     local accent = DRAW[akey]
 
@@ -350,11 +530,18 @@ local function draw_legacy_banner(x, y, w, h, title, sub, akey, is_result, pulse
         filled_rect(x + 10, sweep, w - 20, 1, with_alpha(accent, 55))
     end
     if is_result or (math.floor(_frame / 20) % 2) == 0 then
-        text_bold(">> AUTO-HACK", x + 16, y + 10, accent)
+        text_bold(hack_tag(), x + 16, y + 10, accent)
     end
-    local cx = x + w / 2
-    text_centered_bold(title, cx, y + 38, accent)
-    text_centered(sub, cx, y + 66, DRAW.white)
+    if spin then
+        -- Animated: spinner slot + LEFT-anchored title/sub (stable).
+        text_bold(spin, x + ACTIVE_SPIN_X, y + 38, accent)
+        text_bold(title, x + ACTIVE_TEXT_X, y + 38, accent)
+        text_bold(sub, x + ACTIVE_TEXT_X, y + 66, DRAW.white)
+    else
+        local cx = x + w / 2
+        text_centered_bold(title, cx, y + 38, accent)
+        text_centered(sub, cx, y + 66, DRAW.white)
+    end
 end
 
 
@@ -366,7 +553,7 @@ re.on_frame(function()
     local ok_status, status = pcall(observer.overlay_status)
     if not ok_status or status == nil or status.phase == "idle" then return end
 
-    local title, sub, akey, is_result = lines_for(status)
+    local title, sub, akey, is_result, spin = lines_for(status)
     if title == nil then return end
 
     load_fonts()
@@ -385,11 +572,11 @@ re.on_frame(function()
     -- `draw` banner if ImGui/font isn't usable (or a render ever throws).
     local used_imgui = false
     if imgui ~= nil and _font_big ~= nil and not _imgui_failed then
-        used_imgui = draw_imgui_banner(x, y, banner_w, banner_h, title, sub, akey, is_result, pulse)
+        used_imgui = draw_imgui_banner(x, y, banner_w, banner_h, title, sub, akey, is_result, pulse, spin)
         if not used_imgui then _imgui_failed = true end
     end
     if not used_imgui then
-        draw_legacy_banner(x, y, banner_w, banner_h, title, sub, akey, is_result, pulse)
+        draw_legacy_banner(x, y, banner_w, banner_h, title, sub, akey, is_result, pulse, spin)
     end
 end)
 
