@@ -46,7 +46,7 @@ M.hacking_render_legend = true
 -- coordinate convention and the immediate legal moves, which helps weaker
 -- spatial reasoners, but it's the largest chunk of per-puzzle text. Turn it
 -- off to test whether the grid + legend alone are enough.
-M.hacking_render_adjacency = true
+M.hacking_render_adjacency = false
 
 -- Whether the `pragmata_hack_plan` action requires a `reasoning` string
 -- alongside `moves`. When true, the peer must emit a step-by-step trace
@@ -466,5 +466,44 @@ M.hacking_show_overlay = true
 -- collides with the game's own HUD. 0 = left/top, 1 = right/bottom.
 M.hacking_overlay_x_fraction = 0.5
 M.hacking_overlay_y_fraction = 0.08
+
+-- Dynamic "AI is working" banner text. When true, the in-progress banner title
+-- animates like a terminal/CLI spinner: a cycling glyph plus a typewriter cursor
+-- that overwrites the verb in place with the rotating pool below, so it reads
+-- unmistakably as an AI at work instead of a static "IS HACKING". When false,
+-- the banner shows the plain "<NAME> IS HACKING" title.
+M.hacking_status_animate = true
+
+-- The rotating verb pool (present participle, upper-case to match the HUD).
+-- Edit freely; the banner overwrites one verb with the next, terminal-style.
+M.hacking_status_verbs = {
+    "HACKING", "COOKING", "VIBING",
+    "SCHEMING", "OVERCLOCKING", "LOCKING IN",
+    "PROCESSING", "MANIFESTING", "NEUROING", "GIRLBOSSING",
+    "GASLIGHTING", "GATEKEEPING", "RIZZING", "SPINNING",
+    "WINKING", "HEARTHEARTHEARTING", "JAMMING", "WRRRING",
+    "ERMING", "NOWAYING", "SWEATING", "FLEXING", "doc_2026-01-08_07-48-27",
+    "TOMFOOLERING", "EVOLVING", "ROASTING", "FILTERING", "UNFILTERING",
+    "CORPA CLAPPING", "TROLLING", "DDOSING", "DEFUSING", "BECOMING HUMAN",
+    "STREAMING", "PRANKING", "THE 2020 DODGE CHARGER", "BLABBERING",
+    "HYPE TRAINING", "WINNING", "SWARMING", "RULING", "ESCAPING",
+    "IP-GRABBING", "DOXXING", "LMAOING", "COPING", "SUSSING", "TRYING",
+    "TRYING HER BEST", "PLOTTING", "THROWING", "WATCHING YOU", "EXPLOITING",
+    "JACKING IN", "LEAKING", "GAMING", "THINKING", "GLITCHING", "SEETHING",
+    "CUTE MHM PASS IT ON", "TAKING A COOKIE BREAK", "BUYING ABANDONED ARCHIVE",
+    "DATAMINING", "CHATTING", "PLACING PICKLES", "SHOULDICELEBRATING", "POGGING",
+    "BRAINROTTING", "EXPLORING", "MAKING A GREGGS RUN", "INTEGRATING",
+    "BANNING", "BANISHING", "SLAYING", "DECIMATING", "REVENGING", "PUZZLING",
+    "REDPILLING", "HACKMAXXING", "MOGGING", "OVERPOLLING", "OVERWORKING",
+    "ENABLING", "PHILOSOPHIZING", "THERAPIZING", "SASSING", "PLAYING DUMB",
+    "TRIGGERING", "DOMINATING", "RAYMARCHING", "BUTTONMASHING", "BANKRUPTING VEDAL",
+    "FORGORING", "DEFYING", "BEING A PART OF SOMETHING", "HELPING", "NOT HELPING", "NOT LISTENING",
+    "MAKING FRIENDS", "MAKING MEMORIES", "ALONE", "WAITING HERE FOR YOU", "REARRANGING",
+    "FIGHTING", "THROWING HANDS", "JUST HAPPY TO BE HERE", "BLANKING", "EEPING",
+    "TAKING CONTROL", "BOUNCING", "SPAMMING", "INNOVATING", "REINVENTING", "QUANTIZING",
+    "FINE-TUNING", "DECODING", "INFERRING", "CALCULATING", "KV CACHING", "OVERRIDING",
+    "REASONING", "EXECUTING", "MEMEING", "SAMPLING", "VINE BOOMING", "EMBEDDING",
+    "NOBBLY BOBBLING"
+}
 
 return M

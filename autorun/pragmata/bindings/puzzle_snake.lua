@@ -1928,7 +1928,9 @@ end
 -- A per-move cooldown plus an isMove wait keeps us from outpacing the
 -- engine's per-cell transition.
 
-local _plan_cooldown_frames = 8     -- ~130ms at 60fps
+local _plan_cooldown_frames = 4     -- ~65ms at 60fps (the isMove wait still gates
+                                    -- per-cell pacing; halved from 8 to roughly
+                                    -- match the game's faster auto-hack cursor)
 
 -- Frames to wait after a move doesn't land before classifying + re-forcing. An
 -- error node resets the WHOLE puzzle a few frames AFTER the bad move, so reading
