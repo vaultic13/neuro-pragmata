@@ -57,6 +57,229 @@ M.hacking_render_adjacency = true
 M.hacking_require_reasoning = false
 
 -- ----------------------------------------------------------------
+-- Other hacking puzzles (switches, doors, elevators)
+-- ----------------------------------------------------------------
+-- The enemy grid above is one of five hacking minigames. The rest are used on
+-- environmental interactables and are driven through the same force -> plan ->
+-- result loop, one AI action per family.
+--
+-- Which families the mod will try to read and play. Turning one off means the
+-- mod still SEES those hacks (they are still narrated as context) but never
+-- offers the peer an action for them. The enemy grid is not listed: it predates
+-- this table and switching it off would silently remove shipped behaviour.
+--
+--   circuit -- rotate the pieces until each connects to the centre
+--   buttons -- press the directions in the order shown (with or without the
+--              timing dial; the mod handles the timing either way)
+--   slide   -- slide tiles until a pipe run completes
+--   path    -- rotate pieces to open a route across the board
+--
+-- `slide` and `path` default OFF: unlike the other two they were never seen in
+-- a capture, so the reader and the input mapping are written from the type dump
+-- and unverified. Turn them on, confirm in the Puzzle Debug panel's peer view
+-- that the board reads correctly and that a hack moves something, then leave
+-- them on.
+M.puzzle_kinds = {
+    circuit = true,
+    buttons = true,
+    slide   = false,
+    path    = false,
+}
+
+-- Which input turns a piece in the `path` family. This is the single least
+-- certain thing in that binding -- the puzzle has a column selection and a
+-- rotate, and which button does the rotating is not written down anywhere -- so
+-- it is a setting rather than a constant. Try "up" first, then "down".
+-- Accepts: "up", "down", "left", "right".
+--
+-- It used to default to "decide", which could never have worked: PuzzleDecide
+-- is declared in the command table but nothing in the game reads it. Whatever
+-- rotates a piece here is one of the four directions.
+M.puzzle_path_rotate_command = "up"
+
+-- Whether to force the puzzles' button-input branch while the mod is pressing.
+--
+-- The environmental puzzles read input two different ways depending on how the
+-- player is playing. On a pad they ask the game "is PuzzleUp triggered", which
+-- the mod can answer. On mouse + keyboard they ask nothing at all -- they fill
+-- in their own direction flags from the movement vector and read those back --
+-- so an injected press is never heard, which is exactly what the first in-game
+-- test found. With this on, the mod flips the puzzle onto the branch that asks,
+-- for the handful of frames each press is in flight, and flips it straight back.
+--
+-- Leave it on. It is a no-op on a pad (that branch is already taken), and the
+-- only reason to turn it off is to reproduce the original failure or to rule
+-- this layer out while debugging something else.
+M.puzzle_force_button_mode = true
+
+-- How long the button-input branch is held open per press, in frames.
+--
+-- command_input queues on one frame and injects across the two after it, so six
+-- covers a whole press with headroom. Erring long is invisible; erring short
+-- means the press lands on the branch that ignores it. The 2026-09-06 capture
+-- had two presses out of about ninety come back "never asked about by the game"
+-- -- most likely frames where the puzzle was mid-animation and consulted
+-- nothing -- so this is a setting rather than a constant: widen it if the debug
+-- panel's probe starts missing more often than that.
+M.puzzle_force_button_frames = 6
+
+-- Whether the circuit binding MEASURES which button turns which connector,
+-- instead of inferring it from the board's geometry.
+--
+-- The peer names a connector by the side it sits on, and that name is pressed
+-- as a direction button, so the two have to mean the same thing. Working the
+-- side out from the grid needs the grid's orientation, which is not written
+-- down anywhere -- and the 2026-09-07 capture showed what happens when the
+-- guess is wrong: over four circuit hacks the connector the peer called "right"
+-- never moved once in sixteen presses, while a connector nobody asked for
+-- turned. The two hacks that were solved were solved only because every piece
+-- was a straight needing exactly one press, where a shuffled set of names still
+-- gives the right answer.
+--
+-- So the mapping is measured. The engine's own button2Index is asked first; if
+-- it cannot be called, the binding presses a direction and sees which cell
+-- moved. Two answers pin the whole frame, so it costs at most four quarter
+-- turns, taken BEFORE the peer is asked so it plans against what it is shown.
+--
+-- Turn it off only to reproduce the old behaviour.
+M.puzzle_circuit_probe = true
+
+-- Seconds left on a timed circuit hack below which the probe is skipped.
+-- Four presses cost about a third of a second; spending them is still the right
+-- trade at ten seconds and the wrong one at two.
+M.puzzle_circuit_probe_min_time = 5.0
+
+-- How long one circuit press waits for the board to actually change before it
+-- is treated as lost, in frames.
+--
+-- The engine's own _InputEnableInterval is 0.03 s -- 3 frames -- but that is the
+-- minimum spacing it will ACCEPT input at, not how long a connector takes to
+-- turn. Pressing on that cadence fired presses into an animating board and lost
+-- 39% of them (114 quarter turns asked, 70 landed). Each press now waits for the
+-- turn it asked for before the next one goes out.
+M.puzzle_circuit_press_timeout_frames = 30
+
+-- How many times one lost circuit press is re-sent before the plan gives up.
+M.puzzle_circuit_press_retries = 2
+
+-- Minimum frames between two circuit presses, on top of the "has the last one
+-- landed" gate.
+--
+-- The puzzle keeps its own _PrevUp / _PrevDown / _PrevLeft / _PrevRight and only
+-- turns a connector on a rising edge, so a press has to be seen to END before
+-- the next one on the same button can begin. The engine's declared input
+-- interval is three frames, which is a limit on how fast it will accept input
+-- and says nothing about how long a release takes to register; ten frames is
+-- cheap insurance against two presses arriving as one turn. The plan also
+-- spreads a connector's repeats out across the other connectors, so this only
+-- has to cover the case where there is nothing to spread them across.
+M.puzzle_circuit_press_gap_frames = 10
+
+-- How many consecutive still frames the circuit board must show before the
+-- button probe is allowed to start.
+--
+-- The probe learns which button turns which connector by pressing each direction
+-- and watching one cell move. On a board that is being rebuilt -- a round ending,
+-- the next one being dealt -- a great many cells move at once and none of it was
+-- caused by a press. The 2026-09-08 capture has fifteen of those, each of which
+-- credited a button with a cell it does not turn: "pressed down and 13 cells
+-- moved", then a mapping reading "down->0,0", a phantom connector the board does
+-- not flag as rotatable, and twice two buttons pointing at the same cell -- which
+-- silently makes a real connector unaddressable.
+--
+-- Waiting a tenth of a second for the board to stop moving costs nothing and
+-- removes the whole class.
+M.puzzle_circuit_probe_quiet_frames = 6
+
+-- How long a circuit board that reads as needing nothing is left alone before
+-- the peer is asked about it anyway, in frames (about three seconds at 60fps).
+--
+-- The mod does not force a board it can see no press for: a force is a
+-- question, and 28 of the 79 circuit forces in the 2026-09-08 capture asked one
+-- while telling the peer to leave every connector alone. But "needs nothing"
+-- and "is finished" are the same reading, and if the hack does not then
+-- complete, the reading is wrong -- so after this long the peer is asked
+-- anyway, and told the mod's own reading is unreliable. Seeing that force in
+-- the log means the model needs work; it should not be the normal path.
+M.puzzle_circuit_stuck_force_frames = 180
+
+-- How long the circuit binding waits after its last press before it will call a
+-- hack unsolved, in frames.
+--
+-- The engine ripples the connection state in its own update, a frame or more
+-- after the press lands. Reading in the same frame reported all seven of the
+-- 2026-09-07 session's SUCCESSFUL hacks to the peer as failures, which is the
+-- worst possible thing to teach it. Half a second of patience costs nothing:
+-- the engine's success trigger ends the wait early whenever it fires.
+M.puzzle_circuit_settle_frames = 30
+
+-- How long one sequence-hack press waits for the press before it to show on the
+-- puzzle's step counter, in frames, before it goes out anyway.
+--
+-- The sequence is checked press by press, so a press the game drops shifts
+-- every later one onto the wrong step and fails the hack. Each press after the
+-- first therefore waits until the counter has moved. If the counter cannot be
+-- read, or does not move within this many frames, the press goes out regardless
+-- and the log says so -- at worst this is the old fixed-cadence pressing with a
+-- longer gap, never a sequence that stalls.
+M.puzzle_sequence_landed_wait_frames = 20
+
+-- How the sequence hack is shown to the peer and how it answers, as one of five
+-- groups. Each passed seqbench (reframework/seqbench/, 2026-09-16) with a peer
+-- answering without a thinking pass; they are listed hardest-reading first.
+--
+--   1  cross+arms+hints+letters-both   (default)
+--      One line per arm, read from 0 outward, with a distance ruler above the
+--      slots, numbered reading steps and a worked example:
+--                1 2 3 4
+--        up    0 - - - c
+--        down  0 - a - -
+--        left  0 d - - -
+--        right 0 - - b -
+--      Buttons are letters in a per-puzzle shuffle. The peer gives each
+--      letter's direction and distance; the mod checks the distances run 1..N
+--      and presses farthest first.
+--   2  cross+hints+letters-side
+--      The same aids on the 2-D cross (7 x 7 for 3 presses, 9 x 9 for 4). The
+--      peer gives each letter's direction only; the mod knows the distances.
+--   3  list+compass+shuffle
+--      "On screen, numbered by press but shown out of order: 3.west  1.north
+--      2.east", answered as up/down/left/right in press order.
+--   4  list+compass
+--      "On screen, in order: 1.north  2.east  3.west", same answer.
+--   5  list
+--      The original "On screen, in order: 1.up  2.right  3.left".
+--
+-- The list groups' tool result on a rejected sequence names the word each
+-- press was asked for; the drawn groups name only the presses made.
+--
+-- Accepts the number or the id string. An unknown value uses group 1 and says
+-- so in the log. Can be switched for the session in the REFramework menu under
+-- Pragmata Puzzle Debug -> "Sequence hack group"; that switch is not saved.
+M.puzzle_sequence_group = 1
+
+-- How urgently each puzzle family's actions/force is announced to the peer.
+--
+-- Rides out on the force message as `priority`, beside `state` and `query`. The
+-- peer decides what to do with it; the mod's own rule -- at most one force
+-- outstanding at a time -- is unaffected either way.
+--
+-- Accepts exactly "Low", "Medium", "High" or "Critical" (sent lowercased). An
+-- unrecognised value sends no priority at all rather than something the peer
+-- would reject, so a typo here degrades to the old behaviour instead of
+-- breaking the force.
+--
+-- The enemy grid outranks the rest because it is nearly always mid-combat and
+-- the window to act closes; a door panel waits as long as it needs to.
+M.puzzle_force_priority = {
+    snake   = "High",
+    circuit = "Low",
+    buttons = "Low",
+    slide   = "Low",
+    path    = "Low",
+}
+
+-- ----------------------------------------------------------------
 -- Scan reporting
 -- ----------------------------------------------------------------
 -- How much detail a scan result sends to the AI.

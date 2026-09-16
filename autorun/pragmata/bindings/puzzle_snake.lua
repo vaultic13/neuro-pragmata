@@ -2647,4 +2647,52 @@ function M.debug_status()
 end
 
 
+-- ---------------------------------------------------------------------------
+-- Family interface
+-- ---------------------------------------------------------------------------
+-- The observer used to call into this module by name. It now drives whichever
+-- puzzle family is active through one shared interface, so the pieces below
+-- adapt this binding to it. Everything else in the file is unchanged: the
+-- interface is a thin naming layer over functions that already existed.
+
+M.kind = "snake"
+M.action_name = "pragmata_hack_plan"
+M.force_query = "Hacking grid is live. Call pragmata_hack_plan with your "
+             .. "moves from @ to G (see the grid)."
+
+-- Neutral lifecycle booleans. The observer edge-tracks these, so it no longer
+-- needs to know that this family spells its triggers _StartTrg / _ResetTrg /
+-- _SuccessTrigger / _FailedTrigger / _GridChangeEndTrg.
+function M.lifecycle()
+    return {
+        started = M.read_trigger("_StartTrg"),
+        changed = M.read_trigger("_GridChangeEndTrg"),
+        reset   = M.read_trigger("_ResetTrg"),
+        success = M.read_trigger("_SuccessTrigger"),
+        failed  = M.read_trigger("_FailedTrigger"),
+    }
+end
+
+-- Required lazily: util/snake_render pulls in nothing from here, but keeping the
+-- require inside the call avoids any load-order question at boot, when this
+-- binding is required from pragmata_main before the util modules are touched.
+local _render, _render_config
+function M.render_state()
+    local state = M.get_state()
+    if state == nil then return nil end
+    _render = _render or require("pragmata.util.snake_render")
+    _render_config = _render_config or require("pragmata.mod_config")
+    local ok, rendered = pcall(_render.render, state, {
+        with_legend    = _render_config.hacking_render_legend,
+        with_adjacency = _render_config.hacking_render_adjacency,
+    })
+    if not ok then
+        log.error("puzzle_snake: render threw: " .. tostring(rendered))
+        return "Hacking grid is active. (rendering failed: "
+            .. tostring(rendered):sub(1, 200) .. ")"
+    end
+    return rendered
+end
+
+
 return M
