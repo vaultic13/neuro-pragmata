@@ -15,7 +15,7 @@ local log = require("pragmata.util.log")
 local mailbox = require("pragmata.bridge_mailbox")
 local dispatcher = require("pragmata.dispatcher")
 local config = require("pragmata.mod_config")
-local gamepad = require("pragmata.bindings.gamepad")
+local command_input = require("pragmata.bindings.command_input")
 local puzzle_snake = require("pragmata.bindings.puzzle_snake")
 
 -- Dialogue capture binding. Pulls subtitle text from UI/Asset/ui2000/gui/ui2010
@@ -56,19 +56,13 @@ require("pragmata.hacking_debug")
 -- Toggle via mod_config.hacking_show_overlay.
 require("pragmata.hacking_overlay")
 
--- Abilities debug panel (ImGui). Renders under "Pragmata Abilities Debug";
--- shows live Scan / Overdrive binding state (singleton + driver capture,
--- gauge, trigger outcomes) and manual trigger buttons for in-game verification.
+-- Abilities debug panel (ImGui) and the manual ability triggers. Renders under
+-- "Pragmata Abilities Debug"; shows live Scan / Overdrive binding state
+-- (singleton + driver capture, gauge, scan inventory) and binds F6 / F7 / F8 to
+-- Scan / Auto-Hack / Overdrive for in-game verification. Each key calls exactly
+-- the binding function the AI peer's action calls, so a working key proves the
+-- peer's route rather than a parallel one.
 require("pragmata.abilities_debug")
-
--- ====================================================================
--- GUI probe is loaded but DISABLED by default. Re-enable from the
--- in-game ImGui panel (Pragmata Probe -> Enable) when you want to do
--- more discovery, e.g. finding the speaker-name source. The dialogue
--- binding above doesn't depend on this.
--- ====================================================================
-require("pragmata.probe_gui")  -- registers UI panel; remains disabled until clicked
--- ====================================================================
 
 log.info("booting")
 
@@ -106,39 +100,62 @@ end
 local hacking_bind = load_binding("pragmata.bindings.hacking")
 local scan_bind = load_binding("pragmata.bindings.scan")
 local overdrive_bind = load_binding("pragmata.bindings.overdrive")
+local ability_actions = load_binding("pragmata.ability_actions")
 
 dispatcher.register("pragmata_scan", {
-    description = "Have Diana scan the environment. Highlights nearby objectives, paths, and (with the Object Scan upgrade) pickups like REM disks, Upgrade Modules, Mods, and Pure Lunum. Fire-and-forget: scan results arrive as separate context updates.",
+    description = "Have Diana scan the environment through the game's native Scan input path. Highlights nearby objectives, paths, and (with the Object Scan upgrade) pickups like REM disks, Upgrade Modules, Mods, and Pure Lunum.",
+    schema = { type = "object" },
+    handler = function(_args, ctx)
+        if not scan_bind then return false, "scan binding not loaded" end
+        if not ability_actions then return false, "ability actions not loaded" end
+        return ability_actions.scan(ctx)
+    end,
+})
+
+-- Read-only companion to pragmata_scan. Re-reading the last result costs
+-- nothing, so the peer never has to burn a scan just to recall what it saw.
+dispatcher.register("pragmata_scan_results", {
+    description = "Report what Diana's most recent scan found. Read-only — it does not perform a new scan. Each entry gives a name, and the distance in metres to every instance the game can place, so '4x Upgrade Components (51 / 63 / 70 / 88 m)' means four separate pickups at those four ranges. Items are named from the game's own catalogs, including by what a container holds; markers the catalogs do not name are described by what they are (objective marker, escape hatch, point of interest). Only live markers the game can actually place are listed, so collected items, deactivated objects, and anything without a known position are omitted. 'cannot be taken yet' means the game is currently refusing interaction.",
     schema = { type = "object" },
     handler = function(_args)
         if not scan_bind then return false, "scan binding not loaded" end
-        return scan_bind.scan()
+        local readable = scan_bind.describe_results()
+        if readable == nil or readable.total_count == 0 then
+            return true, "no scan results are currently held; run pragmata_scan first"
+        end
+        -- The engine keeps the last result list after its display window ends,
+        -- so say when the peer is recalling something old rather than silently
+        -- presenting it as current.
+        -- No marker total here: total_count includes the markers the report
+        -- deliberately does not enumerate, so printing it beside the rows
+        -- would contradict them.
+        return true, string.format("Last scan%s: %s.",
+                                   readable.stale and " (possibly out of date)" or "",
+                                   readable.text)
     end,
 })
 
 dispatcher.register("pragmata_auto_hack", {
-    description = "Have Diana auto-hack a target. Consumes part of the hacking gauge to bypass the manual hacking minigame. Requires the Auto-Hack upgrade (unlocked mid-game from the Unit Printer). target_id is optional; if omitted, the currently locked-on target is used. Returns success on precondition pass; actual hack completion will be confirmed via subsequent context updates.",
-    schema = {
-        type = "object",
-        properties = {
-            target_id = {
-                type = "string",
-                description = "Optional. Identifier of the target to hack. Omit to use the currently locked-on target.",
-            },
-        },
-    },
-    handler = function(args)
+    description = "Have Diana auto-hack the target she is currently locked on to. Consumes part of the hacking gauge to bypass the manual hacking minigame. Requires the Auto-Hack upgrade (unlocked mid-game from the Unit Printer). Takes no arguments: the engine's start call has no target parameter, so the lock-on decides the target. Success means the game entered Auto-Hack, not merely that preconditions passed.",
+    -- No target selector. startAutoHack() takes no parameters; the target_id
+    -- this used to advertise was resolved and then discarded, so a peer that
+    -- sent one got no choice of target AND skipped the "is anything locked on"
+    -- refusal.
+    schema = { type = "object" },
+    handler = function(_args, ctx)
         if not hacking_bind then return false, "hacking binding not loaded" end
-        return hacking_bind.auto_hack(args.target_id)
+        if not ability_actions then return false, "ability actions not loaded" end
+        return ability_actions.auto_hack(ctx)
     end,
 })
 
 dispatcher.register("pragmata_overdrive", {
-    description = "Fire Diana's Overdrive Protocol. An AoE pulse that stuns and exposes the weak points of nearby enemies and grants Hugh a brief energy/Suit Integrity buffer. Requires the hacking gauge to be full. Unlocks during the Sector 1 boss fight.",
+    description = "Fire Diana's Overdrive. Requires a charged gauge and confirms only after the game actually starts the ability and spends the gauge.",
     schema = { type = "object" },
-    handler = function(_args)
+    handler = function(_args, ctx)
         if not overdrive_bind then return false, "overdrive binding not loaded" end
-        return overdrive_bind.trigger()
+        if not ability_actions then return false, "ability actions not loaded" end
+        return ability_actions.overdrive(ctx)
     end,
 })
 
@@ -302,11 +319,10 @@ re.on_frame(function()
         dispatcher.handle_incoming(msg, mailbox.send)
     end
 
-    -- Drive the gamepad-injection state machine. Cheap when idle (early-out
-    -- if queue is empty); does the per-frame button writes when a press is
-    -- in flight. (Now mostly unused — left in for general gamepad-mod
-    -- use since puzzle dispatch went elsewhere.)
-    pcall(gamepad.tick)
+    -- Drive Scan's command input. This injects into the game's own
+    -- app.PlayerInputDriver queries; it writes no controller, no OS keyboard
+    -- state, and no visible device.
+    pcall(command_input.tick)
 
     -- Drive the puzzle-snake plan dispatcher. Pulls moves off the queue,
     -- calls Unit.move() with proper cursor-settle timing.
