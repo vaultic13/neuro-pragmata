@@ -35,6 +35,21 @@ function M.register(name, def)
     log.info("registered action " .. name)
 end
 
+-- Replaces an action's description and schema, keeping its handler. For an
+-- action whose wording can change while the game runs (the sequence hack's
+-- group); re-announcing it to the peer is the caller's job.
+function M.update(name, fields)
+    local action = _actions[name]
+    if action == nil then return false end
+    if fields.description ~= nil then action.description = fields.description end
+    if fields.schema ~= nil then action.schema = fields.schema end
+    return true
+end
+
+-- Set once pragmata_main.lua has sent the startup actions/register. Before
+-- that, a changed action needs no re-announcing: the startup list carries it.
+M.announced = false
+
 function M.action_list()
     local list = {}
     for name, def in pairs(_actions) do

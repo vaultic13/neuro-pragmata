@@ -17,6 +17,13 @@ local dispatcher = require("pragmata.dispatcher")
 local config = require("pragmata.mod_config")
 local command_input = require("pragmata.bindings.command_input")
 local puzzle_snake = require("pragmata.bindings.puzzle_snake")
+-- Discovery + input for the hacking puzzles that are NOT the enemy grid.
+-- puzzle_registry.preload() below loads every enabled family binding; see the
+-- call site for why that cannot wait until a puzzle is sighted.
+local puzzle_registry = require("pragmata.bindings.puzzle_registry")
+local puzzle_input = require("pragmata.bindings.puzzle_input")
+-- pragmata_hack_sequence's definition, which follows the sequence group.
+local sequence_action = require("pragmata.sequence_action")
 
 -- Dialogue capture binding. Pulls subtitle text from UI/Asset/ui2000/gui/ui2010
 -- and forwards each new line to the AI as a silent context message.
@@ -39,9 +46,11 @@ require("pragmata.world_state")
 -- in-combat ability hints on the transient lane while enabled.
 require("pragmata.autonomy")
 
--- Hacking observer. Watches the active PuzzleSnake instance for lifecycle
--- triggers; on grid-start emits the rendered grid as a transient context
--- and fires actions/force so the AI peer plans a route automatically.
+-- Hacking observer. Watches whichever hacking puzzle the player is aimed at --
+-- the enemy grid or any of the environmental ones -- for lifecycle edges; on
+-- start it emits the rendered puzzle as context and fires actions/force so the
+-- AI peer plans automatically. Also carries the player-level outcome backstop
+-- that catches a hack finishing while the player has already looked away.
 require("pragmata.hacking_observer")
 
 -- Hacking debug panel (ImGui). Renders under "Pragmata Hacking Debug" in
@@ -49,6 +58,11 @@ require("pragmata.hacking_observer")
 -- values, instance-cache status, and provides a "send synthetic test grid"
 -- button for end-to-end pipeline verification.
 require("pragmata.hacking_debug")
+
+-- Puzzle debug panel (ImGui). Renders under "Pragmata Puzzle Debug": switches
+-- the sequence hack's group for the session, shows the text the peer is sent
+-- for the live non-grid puzzle, and toggles puzzle families.
+require("pragmata.puzzle_debug")
 
 -- Auto-hack on-screen overlay. Draws a banner over the game while the AI peer
 -- is planning/executing a hack so it's clear the AI (not the player) is
@@ -101,6 +115,13 @@ local hacking_bind = load_binding("pragmata.bindings.hacking")
 local scan_bind = load_binding("pragmata.bindings.scan")
 local overdrive_bind = load_binding("pragmata.bindings.overdrive")
 local ability_actions = load_binding("pragmata.ability_actions")
+
+-- The other puzzle families, loaded here rather than on first sighting because
+-- boot is the only time `require` resolves at all: REFramework's module search
+-- path carries this directory only while it is loading scripts. The registry
+-- pcalls each one and reports a failure as a log line, so a family that cannot
+-- load costs its own action and nothing else.
+pcall(puzzle_registry.preload)
 
 dispatcher.register("pragmata_scan", {
     description = "Have Diana scan the environment through the game's native Scan input path. Highlights nearby objectives, paths, and (with the Object Scan upgrade) pickups like REM disks, Upgrade Modules, Mods, and Pure Lunum.",
@@ -263,7 +284,7 @@ dispatcher.register("pragmata_hack_plan", {
         -- via ctx.resolve when the plan resolves — so the AI sees what actually
         -- happened, not a blind "plan applied". The observer stores ctx.resolve
         -- on the puzzle and the binding fires it at the terminal point.
-        local applied, info = hacking_observer.on_plan_received(moves, ctx.resolve)
+        local applied, info = hacking_observer.on_plan_received("snake", moves, ctx.resolve)
         if not applied then
             -- Couldn't park the plan (puzzle gone / no in-flight force). Resolve
             -- synchronously — there's nothing to wait on.
@@ -280,6 +301,165 @@ dispatcher.register("pragmata_hack_plan", {
         return ctx.defer()
     end,
 })
+
+-- --------------------------------------------------------------------
+-- The other hacking puzzles
+-- --------------------------------------------------------------------
+-- The enemy grid above is one of five hacking minigames; the rest are on
+-- switches, doors and elevators. They share the entry point, the controls and
+-- the outcome, and until now the mod could not see them at all.
+--
+-- One action per family rather than one polymorphic action: the mechanics have
+-- nothing in common (turn a piece / press a sequence / slide a tile), so a
+-- shared schema would be a union of unrelated fields with a description that
+-- contradicted itself half the time. The observer only ever offers the peer the
+-- one action that matches the puzzle actually in front of it.
+--
+-- Each handler follows pragmata_hack_plan exactly: hand the reply to the
+-- observer, which parks it on the puzzle the in-flight force was for, then
+-- defer -- so the tool result the peer sees is what the hack actually did.
+
+local function register_puzzle_action(name, kind, payload_key, description, schema)
+    -- Don't advertise an action for a family this install has switched off: the
+    -- observer would never force it, so a peer calling it could only ever be
+    -- told there was nothing to plan. `slide` and `path` ship off, which is why
+    -- this matters rather than being theoretical.
+    local kinds = config.puzzle_kinds or {}
+    if kinds[kind] == false then
+        log.info("skipping " .. name .. " (mod_config.puzzle_kinds." .. kind .. " is off)")
+        return
+    end
+
+    dispatcher.register(name, {
+        description = description,
+        schema = schema,
+        handler = function(args, ctx)
+            local observer = package.loaded["pragmata.hacking_observer"]
+            if not (observer and observer.on_plan_received) then
+                return true, "observer unavailable; plan dropped"
+            end
+            -- Each family names its payload differently; the observer passes it
+            -- straight through to the binding, which is the only thing that
+            -- knows how to read it. A function key is resolved per call, for
+            -- the sequence hack, whose key follows the group active right now.
+            local key = type(payload_key) == "function" and payload_key() or payload_key
+            local payload = args[key] or {}
+            local applied, info = observer.on_plan_received(kind, payload, ctx.resolve)
+            if not applied then
+                log.info(name .. ": not applied (" .. tostring(info) .. ")")
+                return true, "plan discarded (" .. tostring(info) .. ")"
+            end
+            log.info(string.format("%s: applied (parked=%s); result deferred "
+                                .. "until the hack resolves", name, tostring(info)))
+            return ctx.defer()
+        end,
+    })
+end
+
+local DIRECTION_ENUM = { "up", "down", "left", "right" }
+
+register_puzzle_action("pragmata_hack_rotate", "circuit", "rotations",
+    "Solve the active circuit hack. One to four connectors sit around a centre, "
+    .. "each of them one circuit to close. A circuit is a line running in from the "
+    .. "edge of the board; its connector closes it when it JOINS that line to the "
+    .. "centre, both ends lined up -- pointing at the centre is not enough.\n"
+    .. "`piece` names a connector by the direction button that turns it, which the "
+    .. "mod measures on the board before describing it. The state field lists every "
+    .. "connector under that name, what it opens onto now, and whether it is "
+    .. "already connected; use those names verbatim.\n"
+    .. "`steps` is how many presses to give that connector: 1, 2 or 3. Most "
+    .. "connector lines end in `PRESS n to close it` -- use that "
+    .. "number. It is worked out from the board, so it is not a hint to be improved "
+    .. "on. Where a line gives no press count instead, the three options are "
+    .. "spelled out and the answer is the count you judge joins its line to the "
+    .. "centre.\n"
+    .. "Leave a connector out of your answer to leave it alone, and leave alone "
+    .. "any the state already reports as connected -- turning one disconnects it "
+    .. "again. Work out the whole answer before replying; the timed variants do "
+    .. "not wait.",
+    {
+        type = "object",
+        required = { "rotations" },
+        properties = {
+            rotations = {
+                type = "array",
+                minItems = 1,
+                maxItems = 8,
+                items = {
+                    type = "object",
+                    required = { "piece", "steps" },
+                    properties = {
+                        piece = { type = "string", ["enum"] = DIRECTION_ENUM,
+                                  description = "which piece, by its position relative to the centre" },
+                        steps = { type = "integer", minimum = 1, maximum = 3,
+                                  description = "how many presses to give it" },
+                    },
+                    __keyorder = { "piece", "steps" },
+                },
+            },
+        },
+    })
+
+-- The description, the schema and even the payload key follow the active
+-- group (mod_config.puzzle_sequence_group), which the puzzle debug panel can
+-- switch for the session; sequence_action.lua owns both the definition and
+-- the re-registration a switch needs.
+local sequence_def = sequence_action.definition()
+register_puzzle_action(sequence_action.ACTION_NAME, "buttons", sequence_action.answer_field,
+    sequence_def.description, sequence_def.schema)
+
+register_puzzle_action("pragmata_hack_slide", "slide", "moves",
+    "Solve the active pipe hack. Tiles slide into a single empty space; the hack "
+    .. "completes when an unbroken pipe runs from the source S to the goal O.\n"
+    .. "Each move names the direction the EMPTY SPACE travels, so 'up' pulls the "
+    .. "tile above the gap down into it. (0,0) is TOP-LEFT: x runs left to "
+    .. "right, y runs top to bottom. A move that would push the empty space off "
+    .. "the board does nothing, so keep every move inside the grid and track "
+    .. "where the gap ends up after each one.",
+    {
+        type = "object",
+        required = { "moves" },
+        properties = {
+            moves = {
+                type = "array",
+                minItems = 1,
+                maxItems = 24,
+                items = { ["enum"] = DIRECTION_ENUM },
+                description = "directions the empty space travels, in order",
+            },
+        },
+    })
+
+register_puzzle_action("pragmata_hack_path", "path", "rotations",
+    "Solve the active path hack. Pieces on a board are turned until an unbroken "
+    .. "path runs across it.\n"
+    .. "Pieces are addressed by COLUMN, numbered from 0 at the left; the state "
+    .. "field says which columns can be turned. `steps` is how many QUARTER "
+    .. "TURNS to give that column's piece: 1, 2 or 3. The selection is walked to "
+    .. "each column for you, so list them in whatever order makes sense.",
+    {
+        type = "object",
+        required = { "rotations" },
+        properties = {
+            rotations = {
+                type = "array",
+                minItems = 1,
+                maxItems = 12,
+                items = {
+                    type = "object",
+                    required = { "column", "steps" },
+                    properties = {
+                        column = { type = "integer", minimum = 0, maximum = 15,
+                                   description = "column index, 0 at the left" },
+                        steps  = { type = "integer", minimum = 1, maximum = 3,
+                                   description = "quarter turns" },
+                    },
+                    __keyorder = { "column", "steps" },
+                },
+            },
+        },
+    })
+
 
 -- --------------------------------------------------------------------
 -- Boot + frame loop
@@ -301,6 +481,7 @@ re.on_frame(function()
                 data = { actions = dispatcher.action_list() },
             })
             log.info("sent startup + actions/register")
+            dispatcher.announced = true
             started = true
         else
             -- Throttle warning so we don't spam the log every frame
@@ -324,7 +505,28 @@ re.on_frame(function()
     -- state, and no visible device.
     pcall(command_input.tick)
 
+    -- Drive the other puzzles' input. Sits on top of the same command layer and
+    -- paces presses to the interval the game itself accepts, holding a press
+    -- back until the timing window is open where a puzzle has one. It goes
+    -- BEFORE the plan dispatchers so a press queued this frame is spaced from
+    -- the last one rather than doubling up.
+    --
+    -- It also counts down the window in which those puzzles are made to read
+    -- the command layer at all: on mouse + keyboard they otherwise take a
+    -- branch that asks nothing. Unconditional, not only while a press is
+    -- queued, because the debug probe queues presses of its own.
+    pcall(puzzle_input.tick)
+
     -- Drive the puzzle-snake plan dispatcher. Pulls moves off the queue,
-    -- calls Unit.move() with proper cursor-settle timing.
+    -- writes the next cell with proper cursor-settle timing.
     pcall(puzzle_snake.tick_plan)
+
+    -- Drive every other family. They are all loaded at boot, so this list is
+    -- the set of families this install has enabled -- each tick_plan returns
+    -- immediately unless a puzzle of that family is live and carrying a plan.
+    for _, entry in ipairs(puzzle_registry.loaded_bindings()) do
+        if entry.kind ~= "snake" then
+            pcall(entry.mod.tick_plan)
+        end
+    end
 end)
