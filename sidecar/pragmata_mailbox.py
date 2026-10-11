@@ -67,6 +67,13 @@ async def _tail_outbox(path: Path, send_queue: asyncio.Queue[str], stop: asyncio
         try:
             if path.exists():
                 size = path.stat().st_size
+                # The mod truncates the outbox when the game starts. Without
+                # this the old offset stays past the end and nothing is
+                # forwarded again until the new file outgrows the old one.
+                if size < offset:
+                    logger.info(f"outbox shrank ({offset} -> {size} bytes); "
+                                "the game restarted, reading from the start")
+                    offset = 0
                 if size > offset:
                     with path.open("r", encoding="utf-8", errors="replace") as f:
                         f.seek(offset)

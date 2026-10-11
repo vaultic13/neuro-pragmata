@@ -8,6 +8,12 @@ answers according to --mode:
     wrong       the right answer with the first press changed
     slow:X      the right answer after X seconds
     random      random directions of the right length
+    redblock    grid only: the first time a grid is seen, walk into a red block
+                (then answer right on the re-force); elsewhere as correct
+
+Hacking grids (pragmata_hack_plan) are answered with a shortest safe route
+read off the state text (grid_texts.parse_state), clean of corrupted cells when
+possible; `wrong` turns its first move a quarter, `random` is random moves.
 
     py -3 stub_peer.py --port 8124 --mode slow:2.5
 """
@@ -21,6 +27,9 @@ import re
 import threading
 import uuid
 from typing import Optional
+
+import grid_sim
+import grid_texts
 
 try:  # websockets >= 14
     from websockets.asyncio.server import serve
@@ -105,14 +114,61 @@ def decode_state(state: str) -> list[str]:
     return order_from(decode_buttons(state))
 
 
+def _route_into_red(p) -> Optional[list[str]]:
+    """Moves from the cursor that end on a red block, or None."""
+    from collections import deque
+    prev = {p.cursor: None}
+    q = deque([p.cursor])
+    while q:
+        at = q.popleft()
+        for d, (dx, dy) in grid_texts.DELTAS.items():
+            nxt = (at[0] + dx, at[1] + dy)
+            if p.glyph(*nxt) == "R":
+                moves = [d]
+                while prev[at] is not None:
+                    at, step = prev[at]
+                    moves.append(step)
+                return moves[::-1]
+            if nxt not in prev and p.glyph(*nxt) not in (None, "#", "d", "X") \
+                    and nxt not in p.trail and nxt != p.goal:
+                prev[nxt] = (at, d)
+                q.append(nxt)
+    return None
+
+
 class StubPeer:
     def __init__(self, mode: str = "correct") -> None:
         self.mode = mode
         self.actions: dict[str, dict] = {}
         self.results: list[dict] = []
+        self._seen_grids: set[str] = set()
+
+    def _grid_args(self, state: str) -> dict:
+        """pragmata_hack_plan: a BFS route read off the state text alone."""
+        try:
+            p = grid_texts.parse_state(state)
+        except grid_texts.ParseError:
+            return {"moves": ["up"]}
+        route = grid_sim.shortest_path(p, avoid_c=True) or grid_sim.shortest_path(p) or ["up"]
+        mode = self.mode.split(":", 1)[0]
+        if mode == "wrong":
+            # Turn the first move a quarter: usually a wall, the edge or a detour.
+            route = [DIRECTIONS[(DIRECTIONS.index(route[0]) + 2) % 4]] + route[1:]
+        elif mode == "random":
+            route = [random.choice(DIRECTIONS) for _ in range(len(route))]
+        elif mode == "redblock" and state not in self._seen_grids:
+            # First sight of a grid with a red block: walk into one, so the
+            # refusal (or the failure) can be seen; the re-force gets it right.
+            self._seen_grids.add(state)
+            into = _route_into_red(p)
+            if into:
+                route = into
+        return {"moves": route}
 
     def _answer_args(self, force: dict) -> dict:
         name = (force.get("action_names") or ["pragmata_hack_sequence"])[0]
+        if name == grid_texts.ACTION_NAME:
+            return self._grid_args(force.get("state", ""))
         buttons = sorted(decode_buttons(force.get("state", "")), key=lambda b: -b[0])
         schema = (self.actions.get(name) or {}).get("schema") or {}
         field, spec = next(iter((schema.get("properties") or {"order": {}}).items()))
@@ -203,7 +259,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=8124)
     parser.add_argument("--mode", default="correct",
-                        help="correct | wrong | random | slow:SECONDS")
+                        help="correct | wrong | random | redblock | slow:SECONDS")
     args = parser.parse_args()
     try:
         asyncio.run(_main(args.port, args.mode))

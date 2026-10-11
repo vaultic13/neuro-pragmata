@@ -150,7 +150,6 @@ local function filled_rect(x, y, w, h, c) pcall(function() draw.filled_rect(x, y
 local function outline_rect(x, y, w, h, c) pcall(function() draw.outline_rect(x, y, w, h, c) end) end
 local function text_at(s, x, y, c) pcall(function() draw.text(s, x, y, c) end) end
 
-
 -- ---------------------------------------------------------------------------
 -- Terminal/CLI-style status animation (the "<NAME> IS <verb>" title).
 --
@@ -290,13 +289,14 @@ end
 -- Tracks phase transitions so flash sub-lines are re-rolled once per event.
 local _prev_phase = nil
 
+
 -- Title, sub-line, accent key, and whether this is a (steady) result flash.
 -- Returns nil to draw nothing this frame.
 local function lines_for(status)
     local name = config.display_name or "Neuro"
     local NAME = string.upper(name)
     local phase = status.phase
-
+    
     -- Re-roll flash sub-lines only on the rising edge into a new phase.
     local fresh = (phase ~= _prev_phase)
     _prev_phase = phase
@@ -312,7 +312,8 @@ local function lines_for(status)
         -- 5th value (spinner glyph) signals the LEFT-anchored animated layout.
         return title, (egg and "be patient, she's an AI" or default_sub), accent, false, spinner_glyph()
     end
-
+    
+    
     if phase == "planning" then
         local dots = string.rep(".", 1 + (math.floor(_frame / 18) % 3))
         return active("planning route" .. dots, "cyan")
@@ -452,14 +453,14 @@ local function draw_imgui_banner(x, y, w, h, title, sub, akey, is_result, pulse,
         -- LEFT-anchored text (stable). Static result title: centered.
         if _font_big then imgui.push_font(_font_big) end
         if spin then
-            imgui.set_cursor_pos({ ACTIVE_SPIN_X, 32 })
-            imgui.text_colored(spin, DRAW[akey])
-            imgui.set_cursor_pos({ ACTIVE_TEXT_X, 32 })
-            imgui.text_colored(title, DRAW[akey])
+              imgui.set_cursor_pos({ ACTIVE_SPIN_X, 32 })
+              imgui.text_colored(spin, DRAW[akey])
+              imgui.set_cursor_pos({ ACTIVE_TEXT_X, 32 })
+              imgui.text_colored(title, DRAW[akey])
         else
-            local tw = im_text_width(title, 15)
-            imgui.set_cursor_pos({ math.max(12, (w - tw) / 2), 32 })
-            imgui.text_colored(title, DRAW[akey])
+              local tw = im_text_width(title, 15)
+              imgui.set_cursor_pos({ math.max(12, (w - tw) / 2), 32 })
+              imgui.text_colored(title, DRAW[akey])
         end
         if _font_big then imgui.pop_font() end
 
@@ -467,10 +468,10 @@ local function draw_imgui_banner(x, y, w, h, title, sub, akey, is_result, pulse,
         -- centered under a static one.
         if _font_med then imgui.push_font(_font_med) end
         if spin then
-            imgui.set_cursor_pos({ ACTIVE_TEXT_X, 70 })
+                imgui.set_cursor_pos({ ACTIVE_TEXT_X, 70 })
         else
-            local sw2 = im_text_width(sub, 9)
-            imgui.set_cursor_pos({ math.max(12, (w - sw2) / 2), 70 })
+                local sw2 = im_text_width(sub, 9)
+                imgui.set_cursor_pos({ math.max(12, (w - sw2) / 2), 70 })
         end
         imgui.text_colored(sub, DRAW.white)
         if _font_med then imgui.pop_font() end
@@ -530,17 +531,17 @@ local function draw_legacy_banner(x, y, w, h, title, sub, akey, is_result, pulse
         filled_rect(x + 10, sweep, w - 20, 1, with_alpha(accent, 55))
     end
     if is_result or (math.floor(_frame / 20) % 2) == 0 then
-        text_bold(hack_tag(), x + 16, y + 10, accent)
+         text_bold(hack_tag(), x + 16, y + 10, accent)
     end
     if spin then
-        -- Animated: spinner slot + LEFT-anchored title/sub (stable).
-        text_bold(spin, x + ACTIVE_SPIN_X, y + 38, accent)
-        text_bold(title, x + ACTIVE_TEXT_X, y + 38, accent)
-        text_bold(sub, x + ACTIVE_TEXT_X, y + 66, DRAW.white)
+          -- Animated: spinner slot + LEFT-anchored title/sub (stable).
+          text_bold(spin, x + ACTIVE_SPIN_X, y + 38, accent)
+          text_bold(title, x + ACTIVE_TEXT_X, y + 38, accent)
+          text_bold(sub, x + ACTIVE_TEXT_X, y + 66, DRAW.white)
     else
-        local cx = x + w / 2
-        text_centered_bold(title, cx, y + 38, accent)
-        text_centered(sub, cx, y + 66, DRAW.white)
+          local cx = x + w / 2
+          text_centered_bold(title, cx, y + 38, accent)
+          text_centered(sub, cx, y + 66, DRAW.white)
     end
 end
 

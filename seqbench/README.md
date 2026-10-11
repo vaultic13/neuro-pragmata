@@ -1,11 +1,17 @@
-# seqbench — sequence hack prompt bench
+# seqbench — hacking puzzle prompt bench
 
-A Tk tool that measures how well an AI peer reads the sequence hack
-(`pragmata_hack_sequence`) under different prompt versions — the mod's own
-switches and new candidates — in batches, without the game.
+A Tk tool that measures how well an AI peer handles the mod's hacking puzzles,
+in batches, without the game. Two benches, picked under **Bench** at the top:
+
+- **Sequence hack** (`pragmata_hack_sequence`): the prompt versions and the
+  mod's five groups. Most of this README.
+- **Enemy grid** (`pragmata_hack_plan`): the enemy hacking grid with today's
+  modifiers (red blocks, corruption), big and non-square grids, mid-hack
+  re-forces and the final boss's timed stages. See
+  [Enemy grid bench](#enemy-grid-bench).
 
 ```
-py -3 seqbench_gui.py --url ws://127.0.0.1:8123
+py -3 seqbench_gui.py --url ws://127.0.0.1:8123 [--bench grid]
 ```
 
 Use `py -3` (3.12, which has `websockets` and `tkinter` on this machine), as for
@@ -192,17 +198,126 @@ also for a refused reply, where nothing was pressed. The detail pane adds the
 expected answer in the same shape and, for letters, each misread
 (`c distance 3, is 2`); the raw arguments are below them.
 
+## Enemy grid bench
+
+Tests the enemy hacking grid the way the mod plays it, as of 2026-10-08.
+Nothing is imported from `autorun/`: `grid_texts.py` is a Python port of
+`util/snake_render.lua` (plus the force query, the `pragmata_hack_plan`
+registration and the mod's tool-result strings). The selftest proves the port
+byte for byte against every recorded force. If the mod's render changes, port
+the change on purpose.
+
+### Puzzles
+
+Two sources, picked under **Source** (`both` by default):
+
+- **recorded**: the mod's own forces, snapshot into `grid_corpus.json` by
+  ```
+  py -3 grid_corpus_build.py [lua_to_bridge.jsonl ...]
+  ```
+  - The default source is `../data/pragmata_mailbox/lua_to_bridge.jsonl`.
+  - The snapshot is merged, never replaced, because the mod truncates the mailbox when the game starts. Re-run it after playing.
+  - Forces sent before today's red-block wording are kept, marked `reworded`, and sent in today's wording.
+  - A grid that cannot be solved as drawn is kept but never benched. Today that is r019 and r020: 3-of-4 red-block grids where the cursor is boxed in by R cells of the top-left block, which had already gone down.
+- **generated**: seeded grids from `grid_gen.py`, in the shapes the recorded ones have.
+  - `field` is an open grid with a few walls, blue A/O and yellow * nodes.
+  - `maze` is one-cell corridors, like the finale.
+  - Modifiers go on top of either. Every generated grid is checked solvable.
+
+| Category | What | Recorded | Generated |
+|---|---|---|---|
+| plain | small grid, no modifier, cursor on the start | yes | 4x4–7x7 |
+| error | `d` error nodes (entering one resets the hack) | finale only | 5x5–7x7 |
+| blocks | red blocks `R`, 1–3 of 4 up | yes (5x5) | 5x5, 6x6, 2x2 corner blocks, top-left gone first |
+| corrupt | corrupted `c` cells stun the cursor | yes | ≤ 30 cells (the mod's gate) |
+| big | more than 49 cells | finale only | 8x8, 9x9 |
+| nonsquare | width ≠ height | yes | 3x4, 5x4, 4x6, 5x7, 7x9, 9x7 |
+| resume | a re-force mid-hack: cursor off the start, path drawn as arrows | yes | partway along a safe route |
+| finale | the boss's five fixed stages | yes | — |
+
+- **Per category** puzzles are taken from each ticked category. A grid tagged `finale` is used only by the finale.
+- With `both`, half of each category is recorded and the rest generated. A category short of recorded grids is topped up from the generator.
+- The set depends only on seed and repeat, so every version sees the same puzzles.
+
+### Episodes
+
+A grid trial is an **episode**:
+
+1. The bench forces the puzzle exactly as the mod would: `state`, `query`, `priority: "high"`, `ephemeral_context`.
+2. It plays the reply on the grid (`grid_sim.py`) and sends back the mod's own result string.
+3. While the hack is neither solved nor over, it forces again from where the cursor ended, as the mod re-forces, up to **Max forces** (default 3).
+
+| Move | What happens (game + mod) |
+|---|---|
+| off the grid | the plan stops; earlier moves count |
+| `#`, or a visited cell other than the one it came from | wall: "Move blocked by a wall after N move(s) landed" |
+| back onto the cell it came from | retrace: that cell frees up |
+| `d` | "Hit an error node": back to the start, path cleared |
+| `R` | **Refuse plans into a red block** on (mod `hack_block_refuse_plan`): the whole plan is refused, nothing moves, re-forced. Off: the hack fails |
+| `X` | the hack fails |
+| `c` | walkable, one stun |
+| `G` | solved; later moves never run |
+| plan runs out | "Ran all N planned move(s) without reaching the goal" |
+
+**Finale.** The five stages run in order as one chain:
+- with `ephemeral_context: false`, as the mod now sends them (`hack_finale_keep_context`), so the peer keeps them in context;
+- each stage is retried until its **Finale budget** runs out (default 15 s, about 2–3 tries at today's speed), with up to 12 forces only against a runaway peer.
+
+The clock counts:
+
+| Part | Cost |
+|---|---|
+| each reply's time | as measured |
+| each landed move | 0.12 s |
+| each stun | 0.5 s (the engine's block-input timer) |
+| each reset | 0.5 s |
+
+Past the budget the stage gets "The hack failed." and is rated timeout.
+
+### Grid ratings and columns
+
+| Rating | Meaning |
+|---|---|
+| very good | solved on the first force, reply under 3 s |
+| good | solved on the first force, slower |
+| risky | solved, but only on a retry |
+| fail | not solved within the forces, or the hack failed |
+| timeout | no reply within the cap, or a finale stage over its budget |
+
+One summary row per version and category:
+
+| Column | Meaning |
+|---|---|
+| Solved % | episodes that reached the goal |
+| 1st try % | episodes that reached it on the first force |
+| Very good / Good / Risky / Fail / Timeout | the ratings above |
+| Forces | average forces per episode |
+| Median ms | the median reply time |
+| +Moves | average moves over the shortest safe route, for solved episodes |
+| Blue % | blue nodes collected against the best route at most 4 moves longer (`grid_sim.best_route`) |
+| Stuns / Refused / Resets / Walls | totals for the version and category |
+
+**Versions:**
+- `mod` is the mod's wording as sent today.
+- `mod+adjacency` is a candidate that adds `snake_render`'s per-direction adjacency block. The mod has it, but sends it off.
+
+Select an episode to see each force's moves, the result sent, and the grid with the played path (`+` entered, `!` stopped). It also shows a shortest route and every state sent.
+
+A grid run writes `results/<timestamp>-grid/` with the same four files. `trials.jsonl` holds one episode per line, with every force inside.
+
 ## Testing the bench
 
 ```
-py -3 selftest.py            # renders, round trips, judging, ratings, loopback run
-py -3 stub_peer.py --port 8124 --mode correct|wrong|random|slow:2.5
+py -3 selftest.py            # renders, round trips, judging, ratings, loopback runs
+py -3 stub_peer.py --port 8124 --mode correct|wrong|random|redblock|slow:2.5
 ```
 
-`stub_peer.py` answers from the state text alone (it reads "+", letters,
-compass words and shuffled numbers), in whatever answer shape the registered
-schema asks for, so pointing the GUI at it checks the whole pipeline at no API
-cost.
+`stub_peer.py` answers from the state text alone, in whatever answer shape the
+registered schema asks for, so pointing the GUI at it checks the whole pipeline
+at no API cost:
+- **sequence hack:** it reads "+", letters, compass words and shuffled numbers;
+- **grid:** it parses the state and answers with a shortest safe route, clean of `c` where possible;
+- **`redblock` mode:** it walks into a red block the first time it sees a grid, then answers correctly on the re-force.
 
 ## Files
 
@@ -215,5 +330,11 @@ cost.
 | `puzzles.py` | seeded puzzle sets |
 | `scoring.py` | judging, ratings, summary |
 | `other_actions.py` | fixed plan/rotate registrations |
+| `grid_texts.py` | grid: the mod's render (port), parser, plan action, result strings |
+| `grid_corpus_build.py` | grid: snapshots the mod's forces into `grid_corpus.json` |
+| `grid_gen.py` | grid: seeded generated grids |
+| `grid_puzzles.py` | grid: categories, sets, the finale chain, versions |
+| `grid_sim.py` | grid: plays a reply on a grid; shortest and best routes |
+| `grid_scoring.py` | grid: episode ratings, summary, detail pane |
 | `stub_peer.py` | local test peer |
 | `selftest.py` | offline checks |

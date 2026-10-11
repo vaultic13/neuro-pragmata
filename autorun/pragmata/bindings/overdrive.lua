@@ -516,6 +516,14 @@ local function advance_pending()
     end
 end
 
+-- The single writer of the request state machine. The debug-panel button and
+-- the probe both trigger without an ability_actions waiter, so the window has
+-- to advance here rather than from a caller's poll.
+re.on_frame(function()
+    _frame = _frame + 1
+    advance_pending()
+end)
+
 -- Pure read of the latched request outcome:
 --   true  -- the game started Overdrive
 --   false -- the request concluded without it starting

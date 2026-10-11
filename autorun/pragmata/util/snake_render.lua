@@ -73,7 +73,7 @@ local GLYPHS = {
     -- cursor. Collapsing them into '#' made the grid unable to show which is
     -- which, so the AI couldn't correlate a post-hit "reset" vs "stopped"
     -- message with the cell it hit. (This is the live ObstacleGrid bit of
-    -- _ObstacleReasons / is_blocked, not the _DeadFilamentType purple node.)
+    -- _ObstacleReasons / is_blocked, not a corrupted cell -- see Corrupted.)
     DeadFilament     = "d",
     -- FinishBlow renders as plain floor, NOT a distinct 'F'. In-game the
     -- finish-blow node is almost always INVISIBLE (it only appears under
@@ -82,6 +82,14 @@ local GLYPHS = {
     -- a small model reads "F"/"finish" as a finish/goal space. It's walkable
     -- floor to the planner, so we render it as such and drop it from the legend.
     FinishBlow       = ".",
+    -- A cell inside one of the large red BLOCK rectangles (cell.in_block; the
+    -- antenna enemies). Touching one FAILS the hack, unlike a 'd' error node
+    -- (reset) or a '#' wall (stop), so it gets its own glyph.
+    Block            = "R",
+    -- A corrupted cell (cell.corrupted; the "dead filament" corruption). It is
+    -- walkable, but stepping on it stuns the cursor for a moment -- slower, not
+    -- fatal -- so it is drawn as itself, not as the cell underneath.
+    Corrupted        = "c",
 }
 
 local CURSOR_GLYPH = "@"
@@ -169,6 +177,7 @@ local function cell_glyph(cell)
     -- Decorations layered on top of the terrain take priority. EraseCode,
     -- DeadFilament and ActiveSkill attributes are what the AI cares about;
     -- the underlying terrain (Open / Start / etc.) is less informative.
+    if cell.in_block then return GLYPHS.Block end
     if cell.is_erase then return GLYPHS.EraseCode end
 
     -- Red "error node" hazards. These are a decoration, not a _GridType —
@@ -176,13 +185,14 @@ local function cell_glyph(cell)
     -- render as a walkable '.'. The live marker is the ObstacleGrid bit of
     -- _ObstacleReasons (is_blocked).
     --
-    -- NOTE: dead_filament cells (the PURPLE "slow" nodes, _DeadFilamentType)
-    -- are deliberately NOT treated as error nodes — verified in-game they're
-    -- walkable (the cursor passes through, just pausing briefly) and often sit
-    -- right on the route to the goal. They fall through to their underlying
-    -- type here: plain None floor ('.'), or 'O' when the cell is also Open
-    -- (a purple node can overlap a blue bonus node and is then both).
+    -- Corrupted cells (the purple "slow" nodes, cell.corrupted) are NOT error
+    -- nodes -- verified in-game they're walkable (the cursor passes through,
+    -- just pausing briefly) and often sit right on the route to the goal. They
+    -- get their own 'c' so the peer can prefer a clean route. A corrupted cell
+    -- can also be a blue bonus node; it is drawn 'c' and still listed as a
+    -- bonus (bonus_info looks at its type).
     if cell.is_blocked then return GLYPHS.DeadFilament end
+    if cell.corrupted then return GLYPHS.Corrupted end
 
     -- The BLUE reward node (type Open) -> 'O'. Directional gating is the one
     -- exception — a blue gate tile must show its arrow (routing-critical) — so
@@ -230,10 +240,10 @@ end
 local function bonus_info(cell, skill)
     if cell == nil then return nil end
     if cell.type == "Goal" or cell.type == "Start" then return nil end
-    -- Hazards are never collect-targets — the danger labels must win. Purple
-    -- slow nodes (dead_filament) are NOT hazards: a purple node that's also
-    -- Open is a real blue bonus, so it must stay collectible.
-    if cell.is_erase or cell.is_blocked
+    -- Hazards are never collect-targets — the danger labels must win.
+    -- Corrupted cells are NOT hazards: a corrupted cell that's also Open is a
+    -- real blue bonus, so it must stay collectible.
+    if cell.is_erase or cell.is_blocked or cell.in_block
         or cell.type == "EraseCode" or cell.type == "DeadFilament" then
         return nil
     end
@@ -395,12 +405,13 @@ local function adjacency_block(state)
             -- Hazard decoration trumps the directional overrides above. Red
             -- error nodes ('d') and inert walls ('#') are both impassable but
             -- shown distinctly: entering an error node RESETS the whole hack,
-            -- a wall just stops the cursor. Purple slow nodes (dead_filament)
-            -- are walkable and keep their base type.
+            -- a wall just stops the cursor. Corrupted cells are walkable and
+            -- get their own "legal -- corrupted" line below.
             local is_error_cell = cell and cell.is_blocked
             local is_wall_cell = is_wall_type(type_name)
-                or type_name == "DeadFilament"
-            if is_error_cell then
+            if cell and cell.in_block then
+                display_type = "Red block"
+            elseif is_error_cell then
                 display_type = "Error node"
             elseif is_wall_cell then
                 display_type = "Wall"
@@ -425,10 +436,15 @@ local function adjacency_block(state)
                     table.insert(lines, prefix .. info
                         .. "  ILLEGAL: visited - can't re-enter from this side")
                 end
+            elseif cell and cell.in_block then
+                table.insert(lines, prefix .. info .. "  ILLEGAL: red block - touching it FAILS the hack")
             elseif is_error_cell then
                 table.insert(lines, prefix .. info .. "  ILLEGAL: error node - entering RESETS the whole hack to start")
             elseif is_wall_cell then
                 table.insert(lines, prefix .. info .. "  ILLEGAL: wall - cannot enter (cursor just stops)")
+            elseif cell and cell.corrupted then
+                table.insert(lines, prefix .. info
+                    .. "  legal -- corrupted: stuns the cursor for a moment (slower, not a fail)")
             elseif (cell and cell.is_erase) or type_name == "EraseCode" then
                 table.insert(lines, prefix .. info .. "  DANGER: X trap - entering FAILS the hack")
             else
@@ -533,6 +549,8 @@ local LEGEND_ENTRIES = {
     { g = { "A" }, d = "blue ATTACK node - route THROUGH these just like OPEN nodes to boost your next hack's damage" },
     { g = { "*" }, skill = true, d = "YELLOW skill node - an effective but limited-use bonus (grab when it's on the way)" },
     { g = { "X" }, d = "ERASE trap - stepping here FAILS the hack" },
+    { g = { "R" }, d = "red block - CANNOT enter; touching it FAILS the hack" },
+    { g = { "c" }, d = "corrupted cell - walkable, but stuns the cursor for a moment (the hack does NOT fail); avoid when a clean route exists" },
     { g = { "b", "B" }, d = "bomb node" },
     { g = { "P" }, d = "purge node" },
     { g = { "C" }, skill_grid_type = "Chain", d = "chain node" },
@@ -661,16 +679,34 @@ function M.render(state, opts)
         table.insert(parts, string.format("Goal:   (%d, %d)", state.goal.x, state.goal.y))
     end
 
+    -- Red blocks (the antenna enemies). Said only while one is up; the gate in
+    -- bindings/puzzle_snake.lua keeps a fully sealed grid from being sent.
+    local blocks = state.blocks
+    if blocks and blocks.active and blocks.active > 0 then
+        table.insert(parts, string.format(
+            "RED BLOCKS: %d of %d still up (the R cells). Touching one FAILS the hack - "
+            .. "route around them. Shooting the enemy's antennas removes them one at a "
+            .. "time%s.", blocks.active, blocks.total,
+            blocks.next_corner and (" (next to go: the " .. blocks.next_corner .. " one)") or ""))
+    end
+    -- Corruption (only on grids small enough to be sent at all; the gate in
+    -- bindings/puzzle_snake.lua turns the larger ones away).
+    if state.corruption then
+        table.insert(parts,
+            "CORRUPTED ENEMY: the c cells are corrupted - stepping on one stuns the "
+            .. "cursor for a moment. It does NOT fail the hack, it only costs time, "
+            .. "so prefer a clean route but cross a c when that is the only way.")
+    end
     -- The whole task in one line. y grows DOWNWARD, which LLMs routinely flip,
     -- so state it explicitly. Hazards are a hard constraint stated once here
     -- rather than repeated across legend/bonus/query.
     table.insert(parts,
         "Plan moves (up=-y, down=+y, left=-x, right=+x) from @ to G. NEVER step "
         .. "on a # (wall - cursor stops), a d (error node - RESETS the whole "
-        .. "hack), or X (fails it). A hack that grabs NO blue reward nodes "
+        .. "hack), or an X or R (fails it). A hack that grabs NO blue reward nodes "
         .. "(the OPEN 'O' and ATTACK 'A' icons) does almost no damage, so PREFER "
         .. "a route that passes through an O or A or two on the way to G - even a "
-        .. "few moves longer - as long as every cell is safe (never a # or d).")
+        .. "few moves longer - as long as every cell is safe (never a #, d or R).")
     -- Equipped hacking MODE (the game's term): what the blue reward nodes do
     -- THIS hack. Only shown for a non-Default mode (state.mode set by get_state).
     if state.mode and state.mode.style then
@@ -731,6 +767,29 @@ function M.render(state, opts)
     end
 
     return table.concat(parts, "\n")
+end
+
+
+-- A grid's fixed layout as one string: "WxH|goal|row/row/...", each cell its
+-- glyph if that is a wall '#', error node 'd' or red block 'R', else '.'.
+-- Cursor, trail and bonus nodes don't enter it, so a stage keeps the same
+-- fingerprint from its first move to its last. bindings/puzzle_snake.lua uses
+-- it to recognise the final boss's scripted stages, which are the same
+-- authored grids every run.
+function M.layout_fingerprint(state)
+    if state == nil or state.goal == nil then return nil end
+    local rows = {}
+    for y = 0, state.height - 1 do
+        local row = state.cells[y + 1]
+        local chars = {}
+        for x = 0, state.width - 1 do
+            local g = cell_glyph(row and row[x + 1])
+            chars[#chars + 1] = (g == "#" or g == "d" or g == "R") and g or "."
+        end
+        rows[#rows + 1] = table.concat(chars)
+    end
+    return string.format("%dx%d|%d,%d|%s", state.width, state.height,
+        state.goal.x, state.goal.y, table.concat(rows, "/"))
 end
 
 

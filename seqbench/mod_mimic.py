@@ -14,6 +14,12 @@ A run, per version:
     optional unscored warm-up force
     one actions/force per puzzle -> wait for `action` -> judge -> action/result
 
+A grid run (GridRunPlan, pragmata_hack_plan) plays episodes instead: each
+puzzle is forced, the reply is played on it (grid_sim), the mod's result is sent
+back, and while the hack is neither solved nor over the puzzle is forced again
+from where the cursor ended -- as the mod re-forces -- up to `max_forces`. The
+finale's five stages run as one chain, never ephemeral, each against a clock.
+
 At most one force is outstanding, as in the mod. A reply that misses the cap is
 still waited for (up to one more cap) before the next force, so it can never be
 taken as the next puzzle's answer; when it does arrive it is told it was stale.
@@ -36,6 +42,10 @@ except ImportError:  # pragma: no cover - older installs
     from websockets import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
+import grid_puzzles
+import grid_scoring
+import grid_sim
+import grid_texts as gt
 import other_actions
 import puzzles
 import scoring
@@ -44,6 +54,7 @@ from variants import Version
 
 GAME = "Pragmata"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+FINALE_MAX_FORCES = 12
 STALE_MESSAGE = "stale: this reply arrived after the bench stopped waiting; nothing was pressed"
 
 
@@ -69,6 +80,35 @@ class RunPlan:
 
     def scored_trials(self) -> int:
         return len(self.versions) * self.set_size * self.repeats
+
+    def warmups(self) -> int:
+        return len(self.versions) * self.repeats if self.warmup else 0
+
+
+@dataclass
+class GridRunPlan:
+    versions: list[grid_puzzles.GridVersion]
+    categories: list[str]
+    per_category: int = 3
+    source: str = "both"
+    seed: int = 1
+    repeats: int = 1
+    warmup: bool = True
+    full_catalogue: bool = True
+    max_forces: int = 3
+    finale_budget_s: float = 15.0
+    refuse_red: bool = True
+    cap_s: float = 30.0
+    gap_s: float = 0.5
+    settle_s: float = 0.3
+    out_root: Path = RESULTS_DIR
+
+    def episodes_per_repeat(self) -> int:
+        n = sum(self.per_category for c in self.categories if c != "finale")
+        return n + (len(grid_puzzles.finale_chain()) if "finale" in self.categories else 0)
+
+    def scored_trials(self) -> int:
+        return len(self.versions) * self.episodes_per_repeat() * self.repeats
 
     def warmups(self) -> int:
         return len(self.versions) * self.repeats if self.warmup else 0
@@ -160,8 +200,9 @@ class ModMimic:
                 task.cancel()
             self._ws = None
 
-    def _spawn_run(self, plan: RunPlan) -> None:
-        self._run_task = asyncio.get_running_loop().create_task(self._run(plan))
+    def _spawn_run(self, plan) -> None:
+        run = self._run_grid(plan) if isinstance(plan, GridRunPlan) else self._run(plan)
+        self._run_task = asyncio.get_running_loop().create_task(run)
 
     def _cancel_run(self) -> None:
         if self._run_task is not None and not self._run_task.done():
@@ -272,17 +313,20 @@ class ModMimic:
             json.dumps(versions, indent=2, ensure_ascii=False), encoding="utf-8")
 
     async def _register(self, version: Version, full_catalogue: bool) -> None:
-        if self._registered:
-            await self._send({"command": "actions/unregister", "game": GAME,
-                              "data": {"action_names": list(self._registered)}})
         actions = [texts.action_def(version.cfg)]
         if full_catalogue:
             actions += other_actions.ACTIONS
+        await self._register_actions(actions, version.id)
+
+    async def _register_actions(self, actions: list[dict], label: str) -> None:
+        if self._registered:
+            await self._send({"command": "actions/unregister", "game": GAME,
+                              "data": {"action_names": list(self._registered)}})
         msg = {"command": "actions/register", "game": GAME, "data": {"actions": actions}}
         await self._send(msg)
         self._last_register = msg
         self._registered = [a["name"] for a in actions]
-        self._emit("log", f"registered {version.id} ({', '.join(self._registered)})")
+        self._emit("log", f"registered {label} ({', '.join(self._registered)})")
 
     async def _trial(self, version: Version, puzzle: puzzles.Puzzle,
                      plan: RunPlan, rep: int) -> dict:
@@ -341,6 +385,192 @@ class ModMimic:
             message=verdict.message,
             elapsed_ms=None if elapsed_s is None else int(round(elapsed_s * 1000)),
             rating="warm-up" if record["warmup"] else scoring.rate(verdict.correct, elapsed_s),
+        )
+        return record
+
+    # -- a grid run --------------------------------------------------------
+
+    async def _run_grid(self, plan: GridRunPlan) -> None:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        out_dir = Path(plan.out_root) / f"{stamp}-grid"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        records: list[dict] = []
+        status = "finished"
+        self._write_grid_run_files(out_dir, plan)
+        self._emit("run_started", f"grid run started -> {out_dir}", {
+            "out_dir": str(out_dir), "scored": plan.scored_trials(), "warmups": plan.warmups(),
+            "versions": [v.id for v in plan.versions], "bench": "grid",
+        })
+        try:
+            with open(out_dir / "trials.jsonl", "w", encoding="utf-8") as fp:
+                for rep in range(plan.repeats):
+                    items = grid_puzzles.build_set(plan.categories, plan.per_category, plan.source,
+                                                   plan.seed, rep)
+                    shift = rep % len(plan.versions)
+                    ordered = plan.versions[shift:] + plan.versions[:shift]
+                    for version in ordered:
+                        actions = [gt.ACTION_DEF]
+                        if plan.full_catalogue:
+                            actions += other_actions.catalogue_for_grid()
+                        await self._register_actions(actions, f"grid {version.id}")
+                        await asyncio.sleep(plan.settle_s)
+                        batch = [grid_puzzles.warmup_item(plan.seed, rep)] if plan.warmup else []
+                        for item in batch + items:
+                            rec = await self._episode(version, item, plan, rep)
+                            records.append(rec)
+                            fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                            fp.flush()
+                            self._emit("trial", "", rec)
+                            await asyncio.sleep(plan.gap_s)
+        except asyncio.CancelledError:
+            status = "stopped"
+        except Exception as exc:  # noqa: BLE001 - a dropped peer ends the run, not the app
+            status = "aborted"
+            self._emit("error", f"run aborted: {exc!r}")
+        finally:
+            self._pending = None
+            self._late = None
+            grid_scoring.write_summary_csv(out_dir / "summary.csv", records)
+            self._run_active = False
+            scored = sum(1 for r in records if not r["warmup"])
+            self._emit("run_finished", f"grid run {status}: {scored} scored episodes -> {out_dir}",
+                       {"status": status, "out_dir": str(out_dir), "scored": scored})
+
+    def _write_grid_run_files(self, out_dir: Path, plan: GridRunPlan) -> None:
+        run = {
+            "bench": "grid",
+            "started": datetime.now().isoformat(timespec="seconds"),
+            "categories": plan.categories, "per_category": plan.per_category, "source": plan.source,
+            "seed": plan.seed, "repeats": plan.repeats, "warmup": plan.warmup,
+            "full_catalogue": plan.full_catalogue, "max_forces": plan.max_forces,
+            "finale_budget_s": plan.finale_budget_s, "refuse_red": plan.refuse_red,
+            "cap_s": plan.cap_s, "gap_s": plan.gap_s, "settle_s": plan.settle_s,
+            "move_s": grid_sim.MOVE_S, "stun_s": grid_sim.STUN_S, "reset_s": grid_sim.RESET_S,
+            "versions": [v.id for v in plan.versions],
+        }
+        (out_dir / "run.json").write_text(json.dumps(run, indent=2), encoding="utf-8")
+        versions = {v.id: {"adjacency": v.adjacency, "about": v.about, "query": gt.FORCE_QUERY,
+                           **gt.ACTION_DEF} for v in plan.versions}
+        (out_dir / "versions.json").write_text(
+            json.dumps(versions, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    async def _force(self, state: str, query: str, ephemeral: bool, cap_s: float):
+        """Send one plan force and wait for its action: (msg, seconds), or
+        (None, late reply ms or None) when the cap passes first."""
+        fut = asyncio.get_running_loop().create_future()
+        self._pending = fut
+        await self._send({"command": "actions/force", "game": GAME, "data": {
+            "state": state, "query": query, "ephemeral_context": ephemeral,
+            "action_names": [gt.ACTION_NAME], "priority": gt.PRIORITY,
+        }})
+        sent = time.perf_counter()
+        try:
+            msg, received = await asyncio.wait_for(fut, cap_s)
+        except asyncio.TimeoutError:
+            self._pending = None
+            late = await self._wait_late(cap_s)
+            return None, (int((late[1] - sent) * 1000) if late else None)
+        self._pending = None
+        return msg, max(0.0, received - sent)
+
+    async def _episode(self, version: grid_puzzles.GridVersion, item: grid_puzzles.GridItem,
+                       plan: GridRunPlan, rep: int) -> dict:
+        start = item.puzzle
+        timed = item.finale_stage is not None
+        shortest = grid_sim.shortest_path(start)
+        best = grid_sim.best_route(start)
+        record: dict = {
+            "bench": "grid",
+            "time": datetime.now().isoformat(timespec="milliseconds"),
+            "repeat": rep,
+            "warmup": item.category == "warm-up",
+            "version": version.id,
+            "category": item.category,
+            "puzzle": item.label,
+            "puzzle_id": item.id,
+            "source": item.source,
+            "size": item.size,
+            "finale_stage": item.finale_stage,
+            "chain": item.chain,
+            "ephemeral": item.ephemeral,
+            "optimal_moves": len(shortest) if shortest is not None else None,
+            "optimal": shortest,
+            "best_blues": best[0] if best else None,
+            "forces": [],
+        }
+        puzzle = start
+        clock = 0.0
+        solved = timed_out = False
+        outcome = "no_reply"
+        totals = {"stuns": 0, "refusals": 0, "resets": 0, "walls": 0}
+        moves_made = 0
+        final: Optional[grid_sim.PlayResult] = None
+        # A finale stage is retried until its clock runs out, as in game; the
+        # force limit only stops a runaway peer there.
+        limit = max(plan.max_forces, FINALE_MAX_FORCES) if timed else plan.max_forces
+        for _ in range(limit):
+            state = gt.render(puzzle, adjacency=version.adjacency)
+            msg, took = await self._force(state, gt.FORCE_QUERY, item.ephemeral, plan.cap_s)
+            force: dict = {"state": state, "cursor": list(puzzle.cursor)}
+            record["forces"].append(force)
+            if msg is None:
+                force.update(outcome="no_reply", elapsed_ms=None, late_reply_ms=took,
+                             message=f"no action within {plan.cap_s:g} s")
+                outcome, timed_out = "no_reply", True
+                break
+            data = msg.get("data") or {}
+            raw = data.get("data")
+            try:
+                args = json.loads(raw) if isinstance(raw, str) else raw
+            except json.JSONDecodeError:
+                args = None
+            moves = grid_sim.clean_moves(args.get("moves") if isinstance(args, dict) else None)
+            force.update(action=data.get("name"), raw_args=raw, moves=moves,
+                         elapsed_ms=int(round(took * 1000)))
+            played: Optional[grid_sim.PlayResult] = None
+            if data.get("name") != gt.ACTION_NAME:
+                message, ok, outcome = f"unexpected action {data.get('name')!r}", False, "wrong_action"
+            else:
+                played = grid_sim.play(puzzle, moves, refuse_red=plan.refuse_red)
+                message, ok, outcome = played.message, played.success, played.outcome
+            clock += took + (played.exec_s if played else 0.0)
+            # The finale's timer runs through the peer's thinking and the moves;
+            # past the budget the game has already failed the stage.
+            if timed and clock > plan.finale_budget_s:
+                message, ok, outcome, timed_out = gt.MSG_FAILED, False, "over_budget", True
+            await self._send_result(str(data.get("id", "")), ok, message)
+            force.update(outcome=outcome, message=message, clock_s=round(clock, 2))
+            if played is not None:
+                force.update(landed=played.landed, stuns=played.stuns,
+                             path=[list(c) for c in played.path])
+                moves_made += played.landed
+                totals["stuns"] += played.stuns
+                totals["refusals"] += played.outcome == "refused"
+                totals["resets"] += played.outcome == "reset"
+                totals["walls"] += played.outcome == "wall"
+                final = played
+            if outcome == "solved":
+                solved = True
+                break
+            if timed_out or played is None or played.over:
+                break
+            puzzle = played.after
+            await asyncio.sleep(plan.gap_s)
+
+        blues = 0
+        if solved and final is not None:
+            blues = grid_sim.blues_on(start, final.after.trail + [final.after.cursor])
+        first = record["forces"][0].get("elapsed_ms") if record["forces"] else None
+        record.update(
+            solved=solved,
+            outcome=outcome,
+            forces_used=len(record["forces"]),
+            moves_made=moves_made,
+            blues=blues,
+            clock_s=round(clock, 2),
+            **totals,
+            rating="warm-up" if record["warmup"] else grid_scoring.rate(
+                solved, len(record["forces"]), None if first is None else first / 1000, timed_out),
         )
         return record
 

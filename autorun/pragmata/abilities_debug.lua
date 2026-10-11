@@ -17,6 +17,11 @@
 -- The Overdrive trigger carries the save-corruption warning from ACTIONS.md:
 -- it drives a cinematic pipeline, so test on a disposable save.
 --
+-- SCENE PROMPTS. The "Scene prompt" section shows the scripted scenes that
+-- stop on the Overdrive button (bindings/cutscene_prompt.lua): the live scene
+-- actions and their state, the icon bits the HUD shows, and the last press.
+-- F4 presses the waiting prompt through the function the peer's action calls.
+--
 -- Apart from those triggers this panel is read-only, and it writes no files.
 
 local M = {}
@@ -37,6 +42,8 @@ local overdrive = safe_require("pragmata.bindings.overdrive")
 local hacking   = safe_require("pragmata.bindings.hacking")
 local object_names = safe_require("pragmata.bindings.object_names")
 local config    = safe_require("pragmata.mod_config")
+local cutscene_prompt = safe_require("pragmata.bindings.cutscene_prompt")
+local cutscene_observer = safe_require("pragmata.cutscene_prompt_observer")
 
 -- Amber, packed as ImGui's 0xAABBGGRR.
 local COL_WARN = 255 * 0x1000000 + 60 * 0x10000 + 180 * 0x100 + 255
@@ -95,6 +102,14 @@ local TRIGGERS = {
         call = function()
             if overdrive == nil then return false, "overdrive binding not loaded" end
             return overdrive.trigger()
+        end,
+    },
+    {
+        key = config and config.cutscene_prompt_press_key or 0x73,
+        label = "Press scene prompt", hotkey = "F4",
+        call = function()
+            if cutscene_prompt == nil then return false, "cutscene_prompt binding not loaded" end
+            return cutscene_prompt.press()
         end,
     },
 }
@@ -473,6 +488,58 @@ re.on_draw_ui(function()
     end
 
     imgui.separator()
+
+    -- ---- Scene prompt --------------------------------------------------
+    imgui.text("== Scene prompt (Overdrive button in scripted scenes) ==")
+    if cutscene_prompt == nil then
+        imgui.text("(cutscene_prompt binding not loaded)")
+    else
+        local ok_c, c = pcall(cutscene_prompt.debug_status)
+        if ok_c and c then
+            imgui.text("scene-action hook:  " .. bool_text(c.hook)
+                .. (c.error and ("  ERROR " .. tostring(c.error)) or ""))
+            imgui.text("wait state values:  " .. tostring(c.wait_value))
+            imgui.text("icon latch hooked:  " .. bool_text(c.icon_hooked)
+                .. "   icon open: " .. bool_text(c.icon_open))
+            imgui.text("HUD prompt icons:   " .. tostring(c.opening_bits) .. "  "
+                .. (type(c.opening_names) == "table" and table.concat(c.opening_names, ", ") or "?"))
+            local a = c.active
+            if a then
+                imgui.text_colored(string.format("PROMPT UP: id %s, %s, %s, button=%s",
+                    tostring(a.id), tostring(a.kind), tostring(a.open_type), tostring(a.button)),
+                    COL_WARN)
+            else
+                imgui.text("no prompt waiting")
+            end
+            for _, w in ipairs(c.wrappers or {}) do
+                imgui.text(string.format("  %s %s [%s] state=%s(%s) open=%s wait_id=%s age=%d",
+                    w.address, tostring(w.type_name), tostring(w.kind),
+                    tostring(w.state_name), tostring(w.state), tostring(w.open_type),
+                    tostring(w.waiting_id), tonumber(w.age) or -1))
+            end
+            imgui.text("request: " .. tostring(c.request_state) .. "  " .. tostring(c.request_message or ""))
+            if c.pending_frames then
+                imgui.text(string.format("  pending for %d frames", c.pending_frames))
+            end
+            if c.last_press then
+                imgui.text(string.format("  last press f%d -> %s (%s)", c.last_press.frame,
+                    tostring(c.last_press.ok), tostring(c.last_press.message)))
+            end
+        else
+            imgui.text("debug_status() failed: " .. tostring(c))
+        end
+        if cutscene_observer ~= nil then
+            local ok_ob, ob = pcall(cutscene_observer.debug_status)
+            if ok_ob and ob then
+                imgui.text("force in flight: " .. (ob.inflight and ("prompt " .. tostring(ob.inflight.id)) or "no")
+                    .. "   late-reply window: " .. tostring(ob.late_reply_window))
+                imgui.text("follow-up Overdrive: " .. tostring(ob.followup or "none"))
+                for _, e in ipairs(ob.events or {}) do
+                    imgui.text(string.format("  %.1fs ago  %s", (ob.frame - e.frame) / 60, e.text))
+                end
+            end
+        end
+    end
 
     imgui.separator()
     imgui.text("Last manual trigger: " .. _last_outcome)

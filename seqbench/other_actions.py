@@ -4,49 +4,18 @@ apitest builds its prompt prefix from every forcible action in the
 registration, so registering the sequence action alone would make the prompt
 smaller, and its cache entry different, from what the peer gets in game.
 These copies (pragmata_main.lua as of 2026-09-15, hacking_require_reasoning
-off) keep the catalogue the same size. They are never forced.
+off; the plan action as of 2026-10-08, kept in grid_texts.py) keep the
+catalogue the same size. The sequence bench never forces them; the grid bench
+forces the plan action and registers the others around it.
 """
 from __future__ import annotations
 
+import grid_texts
+
 DIRECTIONS = ["up", "down", "left", "right"]
 
-HACK_PLAN = {
-    "name": "pragmata_hack_plan",
-    "description": (
-        "Plan a path through the active hacking grid from cursor @ to Goal G.\n"
-        "Coordinates: (0,0) is TOP-LEFT. x=column (left->right). y=row "
-        "(top->bottom). 'up' decreases y by 1; 'down' increases y by 1; "
-        "'left' decreases x by 1; 'right' increases x by 1. The first row "
-        "is y=0; the last row is y=height-1. You cannot move 'up' from "
-        "y=0 or 'down' from y=height-1.\n"
-        "Read the state field carefully — the cursor and goal positions "
-        "are given there, and the Adjacency block lists which first-moves "
-        "are legal. Use those positions verbatim; do not infer or guess.\n"
-        "NEVER step on a # (a wall — the cursor just stops), a d (an error "
-        "node — entering RESETS the whole hack and you lose all progress), or "
-        "an X (it fails the hack), and never re-enter a ~ trail cell against "
-        "its arrow. Check "
-        "EVERY move's destination cell against the grid, not just the first "
-        "one. Plan ends on G.\n"
-        "BONUS NODES: blue 'O' nodes are where the damage comes from — a hack "
-        "that grabs none is nearly useless, so ACTIVELY prefer a SAFE route "
-        "that passes through one or two O's on the way to G, even a few moves "
-        "longer. Collect them going forward; do NOT detour out to a blue and "
-        "double back, since retracing your own path undoes the blues. Hard "
-        "limits: never step on a # (wall) or d (error node) to reach one - a d "
-        "resets the whole hack - and only fall back to the shortest path if no "
-        "O is reachable without crossing a # or d. (Yellow '*' = minor "
-        "secondary bonus.)"
-    ),
-    "schema": {
-        "type": "object",
-        "required": ["moves"],
-        "properties": {
-            "moves": {"type": "array", "minItems": 1, "maxItems": 32,
-                      "items": {"enum": DIRECTIONS}},
-        },
-    },
-}
+# One copy of the plan action for both benches; the grid bench forces it.
+HACK_PLAN = grid_texts.ACTION_DEF
 
 HACK_ROTATE = {
     "name": "pragmata_hack_rotate",
@@ -94,3 +63,12 @@ HACK_ROTATE = {
 }
 
 ACTIONS = [HACK_PLAN, HACK_ROTATE]
+
+
+def catalogue_for_grid() -> list[dict]:
+    """The rest of the in-game catalogue around the plan action: rotate, and
+    the sequence action in the mod's default group."""
+    import sequence_texts
+    import variants
+    group = next(g for g in variants.GROUPS if g.number == variants.DEFAULT_GROUP)
+    return [HACK_ROTATE, sequence_texts.action_def(group.version.cfg)]
