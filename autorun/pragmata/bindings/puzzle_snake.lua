@@ -59,15 +59,27 @@
 --       in-game 2026-06-10). NOT a _GridType: affected cells read as plain None
 --       with a bit set here. Bitmask of app.PuzzleSnake.ObstacleReason:
 --       ObstacleGrid=1 (the red warning-triangle nodes), DeadFilament=2,
---       Ch16092=4, Ch14100=8, AllPassed=16. ONLY the ObstacleGrid bit blocks
---       the cursor; Ch16092/Ch14100 are the purple "slow" nodes (walkable),
---       DeadFilament is boss content (handled via _DeadFilamentType), and
---       AllPassed is a completion flag. See is_blocked in read_cell.
+--       Ch16092=4, Ch14100=8, AllPassed=16. The ObstacleGrid bit is the
+--       single-cell red error node. Ch16092/Ch14100 are named after the two
+--       enemies whose grids carry the large red BLOCK rectangles (see
+--       bindings/puzzle_snake_modifiers.lua); they were once taken for purple
+--       "slow" nodes, which the dump does not support. DeadFilament is the
+--       corruption marker (with _DeadFilamentType); AllPassed is a completion
+--       flag. See read_cell.
 --     - _DeadFilamentType (UInt32)               -- app.DeadFilamentType hash
---       (None | Random | Fixed). Observed 0/None on standard grids; likely only
---       authored for dead-filament boss content. Read + surfaced anyway.
+--       (None | Random | Fixed): a corrupted ("dead filament") cell.
 
 local log = require("pragmata.util.log")
+local modifiers = require("pragmata.bindings.puzzle_snake_modifiers")
+local _render_mod = require("pragmata.util.snake_render")
+local config = require("pragmata.mod_config")
+-- Which sector the player is in, for the corruption gate's per-sector
+-- exemption. Optional: without it the gate applies everywhere.
+local area_progress = nil
+do
+    local ok, mod = pcall(require, "pragmata.bindings.area_progress")
+    if ok then area_progress = mod end
+end
 
 local M = {}
 
@@ -604,8 +616,39 @@ end
 function M.is_interactive()
     if not M.is_active() then return false end
     local v = M.read_state_value()
-    if v == nil then return true end
-    return v ~= 0
+    if v ~= nil and v == 0 then return false end
+    -- The final boss's last stage is not playable yet while its opening
+    -- sequence runs, whatever _State says. See M.finale_hold_reason.
+    if M.finale_hold_reason() ~= nil then return false end
+    return true
+end
+
+
+-- The final boss's last stage (2026-10-08). It opens with a scripted sequence
+-- (Diana: "Let me try something!" ... "Optimizing hacking matrix: Initiate!")
+-- in which the grid shrinks a few times, ~14 s from when it appears. Through
+-- all of it the puzzle reads exactly like a playable one -- _State Play, GUI
+-- up, no move block, no queued grid change; a full field dump at the start of
+-- the sequence matched a playable grid field for field. So the mod forced it
+-- and drove the cursor to the goal mid-sequence; the stage "succeeded", the
+-- animation was cut, the hack UI vanished and the game could not go on.
+-- Without the mod, or with hacking_auto_force off, it plays fine.
+--
+-- Nothing marks the sequence, but the stage itself is unmistakable: the same
+-- authored 7x7 grid every run (the fifth of the finale's five fixed stages,
+-- see FINALE_STAGES at the end of the file). On that grid ONLY, the puzzle
+-- counts as not taking input for mod_config.hack_finale_hold_seconds after it
+-- first appears -- no force, no dispatch. Every other grid is untouched.
+local _last_hold_reason = nil
+local _finale_hold          -- assigned at the end of the file (needs later locals)
+
+function M.finale_hold_reason()
+    local reason = _finale_hold and _finale_hold() or nil
+    if reason ~= _last_hold_reason then
+        log.info("puzzle_snake: finale hold " .. (reason and ("ON: " .. reason) or "off"))
+        _last_hold_reason = reason
+    end
+    return reason
 end
 
 
@@ -889,18 +932,24 @@ end
 
 -- app.PuzzleSnake.ObstacleReason bitmask values (decoded from the IL2CPP
 -- dump): ObstacleGrid=1, DeadFilament=2, Ch16092=4, Ch14100=8, AllPassed=16.
--- ONLY ObstacleGrid is the visible red "error node" that genuinely blocks the
--- cursor (verified in-game 2026-06-10). The other bits are distinct effects
--- that must NOT render as impassable 'd' error nodes:
---   * DeadFilament(2) is boss content — actual dead filaments come through the
---     separate _DeadFilamentType field, which read_cell handles on its own.
---   * Ch16092(4)/Ch14100(8) are the PURPLE "slow" nodes: they briefly pause
---     the cursor but are walkable and frequently sit on the required path to
---     the goal.
---   * AllPassed(16) is a completion flag, not an obstacle at all.
--- Treating the whole nonzero mask as "blocked" mislabeled purple slow nodes as
--- error nodes, so the peer routed around cells it needed to cross.
+-- Each bit is a different mechanic with a different consequence, so each gets
+-- its own reading (and glyph):
+--   * ObstacleGrid(1): the single-cell red "error node" -- entering one RESETS
+--     the hack (verified in-game 2026-06-10). is_blocked, 'd'.
+--   * DeadFilament(2): corruption -- walkable, stuns the cursor briefly.
+--     corrupted, 'c' (with _DeadFilamentType).
+--   * Ch16092(4)/Ch14100(8): the large red BLOCK rectangles of the antenna
+--     enemies -- touching one FAILS the hack (verified in-game 2026-10-08).
+--     block_bit -> in_block, 'R'.
+--   * AllPassed(16): a completion flag, not an obstacle at all.
+-- Treating the whole nonzero mask as "blocked" once mislabeled walkable cells
+-- as error nodes, so the peer routed around cells it needed to cross.
 local OBSTACLE_REASON_ERROR_NODE = 1   -- ObstacleReason.ObstacleGrid
+-- The rectangles read by puzzle_snake_modifiers are the primary source for the
+-- blocks, these bits the per-cell cross-check.
+local OBSTACLE_REASON_BLOCK_BITS = { 4, 8 }
+-- ObstacleReason.DeadFilament: the corruption marker (Part B).
+local OBSTACLE_REASON_CORRUPTION = 2
 
 -- Test whether a single power-of-two bit is set in `mask`. Pure arithmetic so
 -- it doesn't depend on the LuaJIT `bit` library being present.
@@ -999,12 +1048,11 @@ local function read_cell(cell_obj)
 
     -- _ObstacleReasons is a bitmask (see OBSTACLE_REASON_ERROR_NODE notes
     -- above). VERIFIED in-game 2026-06-10: a grid's four red warning-triangle
-    -- cells were exactly the cells with the ObstacleGrid bit (=1) set. Only
-    -- that bit blocks the cursor — the other bits flag purple "slow" nodes,
-    -- boss dead-filament content, and a completion flag, none of which are
-    -- impassable. Gate is_blocked on the ObstacleGrid bit alone so purple
-    -- slow nodes (often on the required path) aren't mislabeled as error
-    -- nodes. The engine can set/clear the bit mid-fight, which the structural
+    -- cells were exactly the cells with the ObstacleGrid bit (=1) set, and
+    -- is_blocked is that bit alone. The Ch16092/Ch14100 bits mark the large
+    -- red block rectangles (block_bit, cross-checked against the rectangles in
+    -- get_state); DeadFilament marks corruption; AllPassed is a completion
+    -- flag. The engine can set/clear the bits mid-fight, which the structural
     -- signature turns into a replan. _IsHide marks not-yet-revealed nodes
     -- (seen on FinishBlow). _StunReasons is the analogous stun bitmask; no
     -- nonzero observation yet — dump-only.
@@ -1012,11 +1060,22 @@ local function read_cell(cell_obj)
     local obstacle_reasons = read_uint_field("_ObstacleReasons")
     local stun_reasons     = read_uint_field("_StunReasons")
     local is_blocked       = has_bit(obstacle_reasons, OBSTACLE_REASON_ERROR_NODE)
+    local block_bit        = false
+    for _, b in ipairs(OBSTACLE_REASON_BLOCK_BITS) do
+        if has_bit(obstacle_reasons, b) then block_bit = true end
+    end
+    -- Corruption ("dead filament"): any of the three markers the dump offers
+    -- -- the per-cell _DeadFilamentType, the DeadFilament obstacle bit, or a
+    -- cell whose type is DeadFilament. Walkable; it stuns the cursor briefly.
+    local type_name        = resolve_type_name(type_hash)
+    local corrupted        = dead_filament_type ~= nil
+        or has_bit(obstacle_reasons, OBSTACLE_REASON_CORRUPTION)
+        or type_name == "DeadFilament"
 
     return {
         x = pos.x, y = pos.y,
         type_hash          = type_hash,
-        type               = resolve_type_name(type_hash),
+        type               = type_name,
         in_trail           = in_trail,
         is_erase           = is_erase,
         active_skill_hash  = active_skill_hash,
@@ -1036,6 +1095,8 @@ local function read_cell(cell_obj)
         obstacle_reasons   = obstacle_reasons,
         stun_reasons       = stun_reasons,
         is_blocked         = is_blocked,
+        block_bit          = block_bit,   -- per-cell red-block marker (see get_state)
+        corrupted          = corrupted,   -- corruption: walkable, stuns briefly
         is_skip_row        = is_skip_row,
         is_skip_col        = is_skip_col,
     }
@@ -1352,6 +1413,94 @@ function M.get_state()
         if goal then break end
     end
 
+    -- Red block rectangles (puzzle_snake_modifiers). A cell is in a block when
+    -- an ACTIVE rectangle covers its engine position, or -- the cross-check,
+    -- and the only source when the rectangles can't be read -- when it carries
+    -- a block bit. block_index names which rectangle (nil = bit only).
+    local blocks = modifiers.read_blocks(inst)
+    local block_info = nil
+    if blocks ~= nil then
+        local next_corner, up = nil, {}
+        for _, r in ipairs(blocks.rects) do
+            r.corner = modifiers.corner(r, width, height)
+            if r.active then
+                up[#up + 1] = r.corner
+                if next_corner == nil then next_corner = r.corner end
+            end
+        end
+        block_info = {
+            source = blocks.source, total = blocks.total, active = blocks.active,
+            impossible = blocks.impossible, next_corner = next_corner, corners_up = up,
+        }
+    end
+    for ry = 1, #active_rows do
+        for rx = 1, #active_cols do
+            local c = cells[ry][rx]
+            if c ~= nil then
+                if blocks ~= nil then
+                    for _, r in ipairs(blocks.rects) do
+                        if r.active and r.x0 ~= nil
+                            and c.engine_x >= r.x0 and c.engine_x <= r.x1
+                            and c.engine_y >= r.y0 and c.engine_y <= r.y1 then
+                            c.in_block = true
+                            c.block_index = r.index
+                            break
+                        end
+                    end
+                end
+                if c.block_bit then c.in_block = true end
+            end
+        end
+    end
+
+    -- Corruption: decided by the corrupted cells -- what the player sees, and
+    -- field reads only. The module's isDeadFilament() is a method call, kept to
+    -- the F5 snapshot (see the top of puzzle_snake_modifiers.lua).
+    local corrupted_cells = 0
+    for ry = 1, #active_rows do
+        for rx = 1, #active_cols do
+            local c = cells[ry][rx]
+            if c ~= nil and c.corrupted and not c.in_block then
+                corrupted_cells = corrupted_cells + 1
+            end
+        end
+    end
+    local corruption_info = nil
+    if corrupted_cells > 0 then
+        corruption_info = { cells = corrupted_cells }
+    end
+
+    -- Explosions (the boss's attack system). Each pulsing or exploding cell
+    -- gets c.danger = { explodes_in, ends_in, exploding } in seconds from now;
+    -- where two units overlap, the earliest start and the latest end win. The
+    -- engine reports ENGINE coordinates, so they go through remap() like
+    -- everything else -- a row a sticky bomb removed is simply not there.
+    -- Not structural: _struct_sig_from_state ignores c.danger, so a row going
+    -- off never reads as "the grid changed".
+    local explosion_info = nil
+    local danger = modifiers.read_danger(inst)
+    if danger ~= nil then
+        explosion_info = { live = #danger.units, exploding = false }
+        for _, u in ipairs(danger.units) do
+            if u.state == "Attack" then explosion_info.exploding = true end
+            for _, p in ipairs(u.cells) do
+                local rp = remap(p)
+                local c = rp and cells[rp.y + 1] and cells[rp.y + 1][rp.x + 1] or nil
+                if c ~= nil then
+                    local d = c.danger
+                    if d == nil then
+                        c.danger = { explodes_in = u.explodes_in, ends_in = u.ends_in,
+                                     exploding = u.state == "Attack" }
+                    else
+                        d.explodes_in = math.min(d.explodes_in, u.explodes_in)
+                        d.ends_in = math.max(d.ends_in, u.ends_in)
+                        d.exploding = d.exploding or u.state == "Attack"
+                    end
+                end
+            end
+        end
+    end
+
     -- Equipped hacking style for the renderer's mode note. nil for Default /
     -- unreadable, so the renderer simply omits the line. Read here so the live
     -- force context AND the debug preview both reflect it.
@@ -1395,6 +1544,14 @@ function M.get_state()
         success  = read_bool(inst, "_SuccessTrigger", false),
         mode = mode_info,   -- equipped hacking style { key, style, desc } or nil
         active_skill = skill_info,  -- equipped skill { key, display, desc } or nil (count==1 only)
+        -- Red blocks: { source, total, active, impossible, next_corner,
+        -- corners_up } or nil when this enemy has none.
+        blocks = block_info,
+        -- Corruption: { cells } or nil when the enemy is clean.
+        corruption = corruption_info,
+        -- Explosions: { live, exploding } on an enemy with the attack system
+        -- (even with nothing pulsing right now), nil otherwise.
+        explosions = explosion_info,
     }
 end
 
@@ -1851,7 +2008,7 @@ end
 -- EraseCode trap, and red (ObstacleGrid) error node. Deliberately EXCLUDES
 -- the cursor and the trail (IsPassed) — those advance as a plan executes, so
 -- including them would make every normal move look like a "change". Also
--- excludes purple slow nodes (dead_filament): they're walkable, so they're
+-- excludes corrupted cells (c.corrupted): they're walkable, so they're
 -- not blockers and shouldn't perturb the plan-validity fingerprint.
 -- Red error nodes ARE included: _ObstacleReasons is a runtime bitmask the
 -- engine can set/clear mid-fight, and a hazard-map change is exactly when a
@@ -1890,11 +2047,13 @@ local function _struct_sig_from_state(state)
             local c = row and row[x + 1]
             if c == nil then
                 marks[#marks + 1] = "w" .. x .. "," .. y     -- missing cell = wall
+            elseif c.in_block then
+                marks[#marks + 1] = "r" .. x .. "," .. y     -- red block (shooting one away replans)
             elseif c.is_erase or c.type == "EraseCode" then
                 marks[#marks + 1] = "x" .. x .. "," .. y     -- trap
-            elseif c.is_blocked or c.type == "DeadFilament" then
+            elseif c.is_blocked then
                 marks[#marks + 1] = "d" .. x .. "," .. y     -- error node (blocked)
-            -- NOTE: c.dead_filament (purple slow nodes) is intentionally NOT a
+            -- NOTE: corrupted cells (c.corrupted) are intentionally NOT a
             -- structural blocker — those cells are walkable, so they're plain
             -- floor for routing and must not show up as 'd' marks.
             elseif _is_wall_type(c.type) then
@@ -1945,6 +2104,16 @@ local FAIL_SETTLE_FRAMES = 90       -- ~1.5s at 60fps
 -- the goal-arrival success trigger fires a few frames after the final move
 -- lands, and we want on_success to claim the deferred result as a WIN first.
 local DRAIN_GRACE_FRAMES = 30       -- ~0.5s at 60fps
+-- Corruption stuns the cursor after it steps on a corrupted cell; while the
+-- engine's move block is up a dispatched move is dropped. The dispatcher holds
+-- instead, for at most this long (a block stuck for longer is not a stun).
+local STUN_HOLD_MAX_FRAMES = 300    -- ~5s at 60fps
+-- A move that didn't land counts as eaten by a stun only if the block was up
+-- within this many seconds. The engine's last-move result is NOT used: it
+-- stays "Stun" long after the stun, and on 2026-10-08 that made a plain
+-- blocked move (onto the plan's own trail) retry five times before failing.
+local STUN_GRACE_SECONDS = 0.6
+local STUN_MAX_RETRIES = 3
 
 -- One-shot events the dispatcher raises for the observer/overlay to react to
 -- ("resumed" a parked plan; "grid_changed" forced a replan; "settling"/"move_failed"
@@ -2014,6 +2183,9 @@ function M.snapshot_force_target(id)
     if state == nil then return end
     rec.forced_struct = _struct_sig_from_state(state)
     rec.forced_cursor = _cursor_xy(state)
+    -- This force describes the cursor where it is now, even if it stepped
+    -- aside from an exploding row: the way back no longer applies.
+    rec.dodge_back = nil
 end
 
 -- Drop the force snapshot for a puzzle so the next reconciliation re-forces
@@ -2058,6 +2230,161 @@ function M.needs_force(id)
     return cur.x ~= fc.x or cur.y ~= fc.y
 end
 
+-- ---------------------------------------------------------------------------
+-- Gates: puzzles that cannot be played yet
+-- ---------------------------------------------------------------------------
+-- Some enemy modifiers make a hack pointless until the player deals with them
+-- outside the grid. The observer asks two questions about the puzzle on screen:
+-- blocked_notice(id) -- even while it isn't taking input, since a sealed grid
+-- fails the moment it starts -- and force_blocked(id) before each force. The
+-- notice is said once per puzzle per reason (key), so the peer hears it as
+-- information rather than as a stream.
+
+-- (key, message) when puzzle `inst` must not be planned, else nil.
+local function _clock()
+    local ok, t = pcall(os.clock)
+    if ok and type(t) == "number" then return t end
+    return nil
+end
+
+-- Is the player in a sector listed in mod_config.hack_corruption_gate_skip_sectors
+-- (by sector hash or by the map's sector name)? In "Experimental Pragmatics"
+-- the corrupted enemies come before the scene that unlocks purification, so
+-- refusing their grids until the player purifies would refuse them for good.
+-- The sector read walks the map's stage list, so it is kept for 2 s; it is only
+-- asked when the gate would otherwise block.
+local SECTOR_RECHECK_SECONDS = 2.0
+local _sector_cache = nil
+local function _corruption_gate_exempt()
+    local skip = config.hack_corruption_gate_skip_sectors
+    if type(skip) ~= "table" or next(skip) == nil or area_progress == nil then return false end
+    local now = _clock()
+    if _sector_cache == nil or now == nil or now - _sector_cache.t > SECTOR_RECHECK_SECONDS then
+        local ok, hash, name = pcall(area_progress.current_sector)
+        _sector_cache = { t = now or 0, hash = ok and hash or nil, name = ok and name or nil }
+    end
+    local hash, name = _sector_cache.hash, _sector_cache.name
+    for _, s in ipairs(skip) do
+        if (type(s) == "number" and s == hash)
+            or (type(s) == "string" and type(name) == "string" and s:lower() == name:lower()) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Returns (key, message, settled). settled is false when the answer could
+-- not be complete -- the corruption half is skipped while the puzzle is not
+-- taking input -- so the caller must not cache it: cached, a "no gate" from
+-- just before the hack went live let the force through (sector 5, 2026-10-11).
+local function _gate(rec)
+    local inst = rec and rec.inst
+    if inst == nil then return nil end
+    if config.hack_block_gate ~= false then
+        local b = modifiers.read_blocks(inst)
+        if b ~= nil and (b.impossible == true or (b.total >= 4 and b.active == b.total)) then
+            return "blocks:" .. b.active, string.format(
+                "The enemy's hacking grid is sealed by red blocks (%d of %d up): "
+             .. "touching one fails the hack, so there is no way through. Shoot the "
+             .. "enemy's antennas (weak points) to remove the blocks; they go one at "
+             .. "a time, top-left first. Hacking can start once a block is gone.",
+                b.active, b.total)
+        end
+    end
+    -- The corruption check needs the whole grid, and get_state calls into the
+    -- game (grid size, start cell, equipped mode and skill). It is skipped while
+    -- the puzzle isn't taking input -- before this work get_state never ran in
+    -- that window, and the final boss's last stage plays its shrinking-grid
+    -- animation right there. The notice simply comes once input starts.
+    --
+    -- Some enemies' corrupted cells come and go (sector 5's), so one look with
+    -- no c cell on screen is not "purified": a large grid seen corrupted stays
+    -- gated for hack_corruption_hold_seconds after the last corrupted look.
+    if config.hack_corruption_gate ~= false then
+        if not M.is_interactive() then return nil, nil, false end
+        local st = M.get_state()
+        if st == nil then return nil, nil, false end
+        local limit = tonumber(config.hack_corruption_max_cells) or 30
+        local cells = st.width * st.height
+        local now = _clock()
+        if cells > limit and st.corruption ~= nil then
+            rec.corruption_seen = { t = now, w = st.width, h = st.height }
+        end
+        local seen = rec.corruption_seen
+        local hold = tonumber(config.hack_corruption_hold_seconds) or 3
+        if seen ~= nil and cells > limit and now ~= nil and now - seen.t < hold
+            and not _corruption_gate_exempt() then
+            return "corruption:" .. seen.w .. "x" .. seen.h, string.format(
+                "The enemy is corrupted, and its hacking grid (%dx%d, %d cells) is too "
+             .. "large to hack through the corruption: corrupted cells keep stunning "
+             .. "the cursor. Purify the corruption first, then hack.",
+                seen.w, seen.h, seen.w * seen.h), true
+        end
+    end
+    return nil, nil, true
+end
+
+-- Both questions are asked every frame and the corruption check reads the
+-- whole grid, so the answer is kept on the record for a quarter second.
+local GATE_RECHECK_SECONDS = 0.25
+
+local function _gate_cached(rec)
+    local now = _clock()
+    local g = rec.gate_cache
+    if g ~= nil and now ~= nil and now - g.t < GATE_RECHECK_SECONDS then
+        return g.key, g.message
+    end
+    local key, message, settled = _gate(rec)
+    if settled ~= false then
+        rec.gate_cache = { t = now or 0, key = key, message = message }
+    else
+        rec.gate_cache = nil
+    end
+    return key, message
+end
+
+function M.force_blocked(id)
+    local rec = _get_current_record()
+    if rec == nil or rec.id ~= id then return false end
+    return _gate_cached(rec) ~= nil
+end
+
+function M.blocked_notice(id)
+    local rec = _get_current_record()
+    if rec == nil or rec.id ~= id then return nil end
+    local key, message = _gate_cached(rec)
+    if key == nil then
+        rec.gate_said = nil      -- cleared: say it again if it comes back
+        return nil
+    end
+    if rec.gate_said == key then return nil end
+    rec.gate_said = key
+    return message
+end
+
+-- The first step of `dirs`, walked from the cursor, that lands in a red block:
+-- (step_number, x, y) in render coordinates, or nil. Walls are ignored -- a
+-- wall would stop the cursor short, so this can only over-report.
+--
+-- Red blocks are the ONLY thing a plan is refused for up front (and only with
+-- hack_block_refuse_plan on). A plan into a wall, an error node or off the
+-- grid runs like a player's input would; the peer hears what happened in the
+-- tool result and gets the grid again if the hack is still going.
+local function _first_block_step(state, dirs)
+    if state == nil or state.cursor == nil then return nil end
+    local x, y = state.cursor.x, state.cursor.y
+    for i, d in ipairs(dirs) do
+        local dd = DIR_DELTAS[d]
+        if dd ~= nil then
+            x, y = x + dd.x, y + dd.y
+            local row = state.cells[y + 1]
+            local c = row and row[x + 1]
+            if c ~= nil and c.in_block then return i, x, y end
+        end
+    end
+    return nil
+end
+
 -- Attach a plan (list of directions) to puzzle `id`. Captures the structure
 -- the plan is validated against (the force snapshot, i.e. what the peer
 -- planned against). `parked` is true when the reply arrived while the player
@@ -2098,6 +2425,23 @@ function M.set_plan(id, moves, resolve)
 
     local cur = _get_current_record()
     local is_current = (cur ~= nil and cur.id == id)
+
+    -- A red block fails the hack on contact, so a plan that enters one is
+    -- refused whole rather than run up to the block. Clearing the snapshot
+    -- re-forces the same grid, with this result telling the peer why. With
+    -- hack_block_refuse_plan off the plan runs and fails like a player's would.
+    if is_current and config.hack_block_refuse_plan ~= false then
+        local step, bx, by = _first_block_step(M.get_state(), queue)
+        if step ~= nil then
+            rec.forced_struct = nil
+            _resolve_pending(rec, false, string.format(
+                "Plan refused: move %d would enter a red block at (%d, %d), and "
+             .. "touching a red block fails the hack. None of the moves were made; "
+             .. "plan a route that avoids every R cell.", step, bx, by))
+            return 0, false
+        end
+    end
+
     rec.plan = {
         queue           = queue,
         total           = #queue,
@@ -2176,6 +2520,10 @@ local function _resolve_fail_settle(rec)
     if M.is_game_paused() then return end
     local fs = rec.fail_settle
     fs.waited = fs.waited + 1
+    -- Keep the explosion clock current through the settle (field reads; nil
+    -- at once on an enemy without the attack system), so a reset caused by a
+    -- row going off is reported as that, not as an error node.
+    modifiers.read_danger(rec.inst)
 
     local unit = _resolve_unit()
     local cur = unit and _read_cursor_pos(unit) or nil
@@ -2189,8 +2537,18 @@ local function _resolve_fail_settle(rec)
                            confirmed = fs.confirmed, total = fs.total })
     end
 
-    -- Error-node reset confirmed: the cursor snapped back to start.
+    -- Error-node reset confirmed: the cursor snapped back to start. An
+    -- explosion failure looks the same (the hack restarts from the start);
+    -- tell them apart by whether a row was going off just now.
     if cur ~= nil and start ~= nil and cur.x == start.x and cur.y == start.y then
+        local now = _clock()
+        local boom = modifiers.last_attack_clock
+        if now ~= nil and boom ~= nil and now - boom < 1.0 then
+            finish("explosion",
+                "An exploding row caught the cursor - the hack failed and restarted "
+             .. "from the start, so none of those moves counted.")
+            return
+        end
         finish("error_node",
             "Hit an error node — the puzzle reset to the start, so none of those "
          .. "moves counted.")
@@ -2239,6 +2597,163 @@ local function _try_claim_completion(rec, plan, cur)
     return true
 end
 
+-- ---------------------------------------------------------------------------
+-- Exploding rows (the boss's attack system) -- move timing
+-- ---------------------------------------------------------------------------
+-- get_state marks every pulsing/exploding cell with c.danger = { explodes_in,
+-- ends_in } (seconds from now). A cursor on such a cell anywhere in that
+-- window fails the hack. Two guards, both off with hack_explosion_guard:
+--
+--   _explosion_gate  before each dispatch: simulate the rest of the queue at
+--     hack_explosion_move_seconds per move. Crossing danger cells is fine if
+--     every one of them is left before its window (plus a margin); otherwise
+--     hold on the current cell until they have gone off. If the current cell
+--     is itself about to go off, step to a safe neighbour and back (the two
+--     moves are put in front of the queue, so the plan stays valid and the
+--     gate then holds on the neighbour).
+--   _guard_idle  while no plan is running, or one has run out short of the
+--     goal and is finishing (the peer is replanning -- the case that failed
+--     in testing): if
+--     the cursor stands on a pulsing cell, step to a safe neighbour, and step
+--     back once it has gone off -- or in front of the plan, if the plan
+--     arrives first. A force sent while the cursor is aside describes it
+--     there, so snapshot_force_target forgets the way back.
+
+local OPPOSITE = { up = "down", down = "up", left = "right", right = "left" }
+local DIR_ORDER = { "up", "down", "left", "right" }
+local EXPLOSION_HOLD_MAX_SECONDS = 4.0
+local IDLE_GUARD_INTERVAL = 3          -- frames between idle checks
+
+local function _explosion_cfg()
+    return config.hack_explosion_move_seconds or 0.1,
+           config.hack_explosion_margin_seconds or 0.15
+end
+
+local function _cell_at(state, x, y)
+    local row = state.cells[y + 1]
+    return row and row[x + 1] or nil
+end
+
+-- Would a cursor on (x, y) from t0 to t1 seconds from now be hit?
+local function _deadly(state, x, y, t0, t1)
+    local c = _cell_at(state, x, y)
+    local d = c and c.danger
+    if d == nil then return false end
+    local _, margin = _explosion_cfg()
+    return t1 + margin > d.explodes_in and t0 < d.ends_in + margin
+end
+
+-- A neighbour the cursor can step onto and come straight back from: walkable,
+-- not a hazard, not pulsing, and either unvisited or the cell it came from
+-- (a retrace). Retracing is preferred; it frees that cell. nil if none.
+local function _dodge_dir(state)
+    local cx, cy = state.cursor.x, state.cursor.y
+    local visited = {}
+    for _, p in ipairs(state.trail or {}) do visited[p.x .. "," .. p.y] = true end
+    local best = nil
+    for _, d in ipairs(DIR_ORDER) do
+        local dd = DIR_DELTAS[d]
+        local nx, ny = cx + dd.x, cy + dd.y
+        local c = (nx >= 0 and ny >= 0 and nx < state.width and ny < state.height)
+            and _cell_at(state, nx, ny) or nil
+        if c ~= nil and c.danger == nil and not c.in_block and not c.is_erase
+            and not c.is_blocked and not _is_wall_type(c.type) then
+            local retrace = state.came_from ~= nil
+                and state.came_from.x == nx and state.came_from.y == ny
+            if retrace then return d end
+            if not visited[nx .. "," .. ny] and best == nil then best = d end
+        end
+    end
+    return best
+end
+
+-- "go" | "hold" | "dodge", dir. `queue` is the plan's remaining moves.
+local function _explosion_gate(state, queue)
+    if config.hack_explosion_guard == false then return "go" end
+    if state == nil or state.explosions == nil or state.cursor == nil
+        or (state.explosions.live or 0) == 0 then
+        return "go"
+    end
+    local T = _explosion_cfg()
+    local cx, cy = state.cursor.x, state.cursor.y
+    -- Only the cells ahead decide "go": if they are safe, moving on is also
+    -- the fastest way off a current cell that is about to go off.
+    local run_ok = true
+    local clear_at = 0                    -- when the blocking cells are done
+    local px, py = cx, cy
+    for i, d in ipairs(queue) do
+        local dd = DIR_DELTAS[d]
+        if dd == nil then break end
+        px, py = px + dd.x, py + dd.y
+        local c = _cell_at(state, px, py)
+        local arrive = i * T
+        local on_goal = state.goal ~= nil and px == state.goal.x and py == state.goal.y
+        -- The goal completes the hack on arrival; any other cell is held
+        -- until the next move lands.
+        local leave = on_goal and arrive or (i + 1) * T
+        if _deadly(state, px, py, arrive, leave) then
+            run_ok = false
+            clear_at = math.max(clear_at, c.danger.ends_in)
+        end
+        if c == nil or c.danger == nil or on_goal then break end   -- reached safety
+    end
+    if run_ok then return "go" end
+    -- Holding is safe unless the current cell goes off before the way clears.
+    local _, margin = _explosion_cfg()
+    if not _deadly(state, cx, cy, 0, clear_at + margin + T) then return "hold" end
+    local dir = _dodge_dir(state)
+    if dir ~= nil then return "dodge", dir end
+    return "hold"
+end
+
+-- Called by tick_plan whenever the record has no plan to run.
+local function _guard_idle(rec)
+    if config.hack_explosion_guard == false then return end
+    rec.idle_tick = (rec.idle_tick or 0) + 1
+    if rec.idle_tick % IDLE_GUARD_INTERVAL ~= 0 then return end
+    if (rec.idle_cooldown or 0) > 0 then rec.idle_cooldown = rec.idle_cooldown - 1; return end
+    -- Cheap pre-check: only an enemy with something pulsing needs get_state.
+    local danger = modifiers.read_danger(rec.inst)
+    local live = danger ~= nil and #danger.units > 0
+    if not live and rec.dodge_back == nil then return end
+    if M.is_game_paused() or not M.is_interactive() or M.is_unit_moving() then return end
+    local state = M.get_state()
+    if state == nil or state.cursor == nil then return end
+    local T = _explosion_cfg()
+    local cx, cy = state.cursor.x, state.cursor.y
+
+    -- Standing on a pulsing cell: step aside.
+    if _deadly(state, cx, cy, 0, 10) then
+        local dir = _dodge_dir(state)
+        if dir == nil then return end
+        local ok, msg = M.move_via_next_position(dir)
+        log.info("tick_plan: cursor on an exploding row; stepping " .. dir
+              .. " out of it (" .. tostring(msg) .. ")")
+        if ok then
+            -- A second dodge chains its way back onto the first.
+            rec.dodge_back = rec.dodge_back or {}
+            table.insert(rec.dodge_back, 1, OPPOSITE[dir])
+            rec.idle_cooldown = 2
+        end
+        return
+    end
+
+    -- Aside, and the cell we left is clear for the trip back: return.
+    if rec.dodge_back ~= nil and #rec.dodge_back > 0 then
+        local back = rec.dodge_back[1]
+        local dd = DIR_DELTAS[back]
+        if not _deadly(state, cx + dd.x, cy + dd.y, 0, 2 * T) then
+            local ok, msg = M.move_via_next_position(back)
+            log.info("tick_plan: row cleared; stepping " .. back .. " back ("
+                  .. tostring(msg) .. ")")
+            table.remove(rec.dodge_back, 1)
+            if #rec.dodge_back == 0 then rec.dodge_back = nil end
+            if not ok then rec.dodge_back = nil end
+            rec.idle_cooldown = 2
+        end
+    end
+end
+
 -- Per-frame tick. Wire into pragmata_main.lua's re.on_frame loop. Dispatches
 -- the CURRENTLY-aimed puzzle's queue only; other puzzles' queues stay parked.
 function M.tick_plan()
@@ -2252,8 +2767,20 @@ function M.tick_plan()
         return
     end
 
-    if rec.plan == nil then return end
+    if rec.plan == nil then
+        _guard_idle(rec)
+        return
+    end
     local plan = rec.plan
+
+    -- The cursor stepped aside from an exploding row while this plan was
+    -- being written: walk back first, so the plan starts where it was planned.
+    if rec.dodge_back ~= nil then
+        for i = #rec.dodge_back, 1, -1 do table.insert(plan.queue, 1, rec.dodge_back[i]) end
+        log.info("tick_plan: returning to the planned start before the plan ("
+              .. table.concat(rec.dodge_back, ",") .. ")")
+        rec.dodge_back = nil
+    end
 
     -- Game paused: freeze dispatch entirely. A paused cursor never moves, so
     -- dispatching a move would accomplish nothing AND make the next post-move
@@ -2264,7 +2791,20 @@ function M.tick_plan()
 
     -- Not interactive (player dropped aim, post-hack cooldown)? Keep the
     -- queue PARKED — do not drop it. It resumes when the player re-aims.
-    if not M.is_interactive() then return end
+    -- Except a plan whose last move went into the goal and whose puzzle has
+    -- already flipped to success: the completion claim below would never run
+    -- (the puzzle is no longer interactive), so the peer's tool result was
+    -- never sent -- the final boss's last stage, 2026-10-08.
+    if not M.is_interactive() then
+        if #plan.queue == 0 and plan.dispatched_into_goal
+            and read_bool(rec.inst, "_SuccessTrigger", false) then
+            rec.plan = nil
+            rec.forced_struct = nil
+            _resolve_pending(rec, true, "Reached the goal — the hack is complete.")
+            _push_plan_event({ kind = "succeeded" })
+        end
+        return
+    end
 
     -- Finished dispatching: decide the outcome. Wait out the cooldown and the
     -- final cell transition, then give the goal-arrival success trigger a grace
@@ -2278,8 +2818,59 @@ function M.tick_plan()
         -- the puzzle afterward, which would otherwise read as "fell short" once
         -- the cursor snaps back to start). Claim the win deterministically.
         if _try_claim_completion(rec, plan) then return end
+        -- Did the LAST move land? The mid-queue check below only ever looks at
+        -- the move before the one it dispatches, so a final move into a wall
+        -- used to be reported as "ran all moves without reaching the goal" --
+        -- and, the cursor not having moved, nothing was ever forced again (the
+        -- final boss's timed maze ran out that way). Same handling as mid-queue:
+        -- a stun puts the move back, anything else goes to the settle machine,
+        -- which classifies it and re-forces.
+        if plan.expected_pos ~= nil and not plan.last_checked then
+            local unit = _resolve_unit()
+            local c = unit and _read_cursor_pos(unit) or nil
+            if c ~= nil then
+                plan.last_checked = true
+                if c.x == plan.expected_pos.x and c.y == plan.expected_pos.y then
+                    plan.confirmed = (plan.confirmed or 0) + 1
+                else
+                    local now = _clock()
+                    local stun = plan.stun_seen_at ~= nil and now ~= nil
+                        and now - plan.stun_seen_at < STUN_GRACE_SECONDS
+                    local stayed = plan.prev_pos ~= nil
+                        and c.x == plan.prev_pos.x and c.y == plan.prev_pos.y
+                    if stayed and stun and plan.last_dir ~= nil
+                        and (plan.stun_retries or 0) < STUN_MAX_RETRIES then
+                        plan.stun_retries = (plan.stun_retries or 0) + 1
+                        plan.last_checked = nil
+                        plan.expected_pos = nil
+                        table.insert(plan.queue, 1, plan.last_dir)
+                        return
+                    end
+                    log.warn(string.format(
+                        "tick_plan: last move left the cursor at (%d,%d), not (%d,%d); entering settle",
+                        c.x, c.y, plan.expected_pos.x, plan.expected_pos.y))
+                    rec.fail_settle = {
+                        waited    = 0,
+                        confirmed = plan.confirmed or 0,
+                        total     = plan.total,
+                        prev_pos  = plan.prev_pos,
+                    }
+                    rec.plan = nil
+                    _push_plan_event({ kind = "settling" })
+                    return
+                end
+            end
+        end
         plan.drain_grace = plan.drain_grace or DRAIN_GRACE_FRAMES
-        if plan.drain_grace > 0 then plan.drain_grace = plan.drain_grace - 1; return end
+        if plan.drain_grace > 0 then
+            plan.drain_grace = plan.drain_grace - 1
+            -- The plan ran out short of the goal and the cursor is parked
+            -- until the next plan: the same exposure as having no plan, and
+            -- the case that failed in testing (a row went off while the peer
+            -- was replanning). The last move's landing was checked above.
+            _guard_idle(rec)
+            return
+        end
         -- Grace elapsed without a success trigger. If the cursor is actually ON
         -- the goal, the hack is just completing slowly — claim the win (the
         -- success trigger then no-ops). Otherwise the plan ran out short of the
@@ -2293,6 +2884,15 @@ function M.tick_plan()
             _resolve_pending(rec, false, string.format(
                 "Ran all %d planned move(s) without reaching the goal%s.", plan.total,
                 dcur and string.format(" (cursor now at %d,%d)", dcur.x, dcur.y) or ""))
+            -- Ask again even if the cursor ended where it was forced from:
+            -- needs_force alone would see an unchanged puzzle and wait forever.
+            -- Capped, so a peer that keeps answering with nothing can't loop.
+            if (plan.confirmed or 0) > 0 then
+                rec.short_plans = 0         -- it got somewhere; not a stall
+            else
+                rec.short_plans = (rec.short_plans or 0) + 1
+            end
+            if rec.short_plans <= 3 then rec.forced_struct = nil end
         end
         rec.plan = nil
         return
@@ -2302,6 +2902,21 @@ function M.tick_plan()
 
     -- Cursor is mid-cell-transition — let it settle before the next move.
     if M.is_unit_moving() then return end
+
+    -- Corruption stun (or any other engine move block): hold, don't dispatch.
+    -- A move written now would be dropped and then read as a wall.
+    local block_flag = modifiers.read_move_block(get_instance())
+    if block_flag ~= nil and block_flag ~= 0 then
+        plan.stun_hold = (plan.stun_hold or 0) + 1
+        plan.stun_seen_at = _clock()
+        if plan.stun_hold < STUN_HOLD_MAX_FRAMES then return end
+        if plan.stun_hold == STUN_HOLD_MAX_FRAMES then
+            log.warn("tick_plan: move block held " .. STUN_HOLD_MAX_FRAMES
+                  .. " frames (flag=" .. tostring(block_flag) .. "); dispatching anyway")
+        end
+    else
+        plan.stun_hold = 0
+    end
 
     -- Read the grid + cursor once for the checks below (completion, structural
     -- validation, landing verification). get_state runs at dispatch rate (~7Hz)
@@ -2328,7 +2943,8 @@ function M.tick_plan()
         rec.plan = nil
         rec.forced_struct = nil
         _resolve_pending(rec, false,
-            "The grid changed mid-plan (a sticky bomb shifted it).")
+            "The grid changed mid-plan (a sticky bomb shifted it, or a red block "
+         .. "came or went).")
         _push_plan_event("grid_changed")
         return
     end
@@ -2344,8 +2960,26 @@ function M.tick_plan()
     -- dispatching now. Checked after the cooldown/isMove gates so the cursor has
     -- settled from the *previous* transition (just not from an error-node reset).
     if plan.expected_pos ~= nil and cur ~= nil then
+        local stayed = plan.prev_pos ~= nil
+            and cur.x == plan.prev_pos.x and cur.y == plan.prev_pos.y
+        local now = _clock()
+        local stun = plan.stun_seen_at ~= nil and now ~= nil
+            and now - plan.stun_seen_at < STUN_GRACE_SECONDS
         if cur.x == plan.expected_pos.x and cur.y == plan.expected_pos.y then
             plan.confirmed = (plan.confirmed or 0) + 1
+            plan.stun_retries = 0
+            -- Checked once: a tick that holds instead of dispatching (an
+            -- exploding row) must not count the same landing again.
+            plan.expected_pos = nil
+        elseif stayed and stun and plan.last_dir ~= nil
+            and (plan.stun_retries or 0) < STUN_MAX_RETRIES then
+            -- The move was eaten by a corruption stun, not stopped by a wall:
+            -- the cursor never left its cell. Put the move back and try again.
+            plan.stun_retries = (plan.stun_retries or 0) + 1
+            table.insert(plan.queue, 1, plan.last_dir)
+            plan.expected_pos = nil
+            log.info("tick_plan: move " .. plan.last_dir .. " dropped by a stun; retrying")
+            return
         else
             log.warn(string.format(
                 "tick_plan: cursor at (%d,%d) but expected (%d,%d); entering "
@@ -2376,8 +3010,53 @@ function M.tick_plan()
               .. tostring(#plan.queue) .. " moves)")
     end
 
+    -- Safety net for red blocks: set_plan refuses plans that enter one, and a
+    -- block appearing changes the structure (caught above), so this fires only
+    -- if both missed. Stopping short beats failing the hack.
+    if config.hack_block_refuse_plan ~= false
+        and _first_block_step(state, { plan.queue[1] }) ~= nil then
+        log.warn("tick_plan: next move enters a red block (id=" .. rec.id .. "); stopping")
+        rec.plan = nil
+        rec.forced_struct = nil
+        _resolve_pending(rec, false, string.format(
+            "Stopped after %d move(s): the next one would enter a red block, which "
+         .. "fails the hack.", plan.confirmed or 0))
+        _push_plan_event("grid_changed")
+        return
+    end
+
+    -- Exploding rows: wait on a safe cell, or step aside, rather than be on a
+    -- row when it goes off (see _explosion_gate).
+    local verdict, dodge = _explosion_gate(state, plan.queue)
+    if verdict == "go" then
+        plan.explosion_hold_since = nil
+    else
+        local now = _clock() or 0
+        plan.explosion_hold_since = plan.explosion_hold_since or now
+        if now - plan.explosion_hold_since > EXPLOSION_HOLD_MAX_SECONDS then
+            log.warn("tick_plan: held for an exploding row over "
+                  .. EXPLOSION_HOLD_MAX_SECONDS .. "s; moving on anyway")
+            plan.explosion_hold_since = nil
+        elseif verdict == "dodge" then
+            table.insert(plan.queue, 1, OPPOSITE[dodge])
+            table.insert(plan.queue, 1, dodge)
+            plan.total = plan.total + 2
+            log.info("tick_plan: cursor's row is about to explode; stepping "
+                  .. dodge .. " and back")
+        else
+            if not plan.explosion_holding then
+                log.info("tick_plan: holding for an exploding row (id=" .. rec.id .. ")")
+            end
+            plan.explosion_holding = true
+            plan.cooldown = 2
+            return
+        end
+    end
+    plan.explosion_holding = nil
+
     plan.prev_pos = cur   -- cursor right before this dispatch
     local dir = table.remove(plan.queue, 1)
+    plan.last_dir = dir
     local ok, msg, tx, ty = M.move_via_next_position(dir)
     plan.last_msg = string.format("move %s: %s",
                                   dir, tostring(msg or (ok and "ok" or "error")))
@@ -2512,6 +3191,190 @@ end
 
 -- Dump the raw cells we read from _ActualGrid plus the array shape, for
 -- diagnostic purposes.
+-- How the puzzle on screen is (or isn't) being found. Written for the final
+-- boss's last, cutscene-driven hack (2026-10-08), which the mod never saw:
+-- no start edge, no force. Lookup goes HackingManager.LastHackingTarget ->
+-- a tracked instance whose _TargetPuzzleUnit is that unit, so this lists both
+-- ends: the manager's targets, and every tracked instance that is on screen
+-- (_GuiHandle) or bound to one of those targets.
+function M.debug_targeting()
+    if not ensure_init() then return { error = "binding not initialized" } end
+    local mgr = _get_hacking_manager()
+    local function f(obj, name)
+        if obj == nil then return nil end
+        local ok, v = pcall(function() return obj:get_field(name) end)
+        if ok then return v end
+        return nil
+    end
+    local function tname(obj)
+        if obj == nil then return nil end
+        local ok, n = pcall(function() return obj:get_type_definition():get_full_name() end)
+        return ok and n or "<dead>"
+    end
+    local last = f(mgr, "<LastHackingTarget>k__BackingField")
+    local default = f(mgr, "_DefaultHackingTarget")
+    local out = {
+        manager            = mgr ~= nil,
+        is_targeted        = f(mgr, "<IsTargetedEnemy>k__BackingField"),
+        last_target        = tname(last),
+        last_target_puzzle = tname(f(last, "_MyPuzzle")),
+        default_target     = tname(default),
+        default_puzzle     = tname(f(default, "_MyPuzzle")),
+        matched_id         = M.matched_puzzle_id(),
+        current_id         = M.current_puzzle_id(),
+        tracked_total      = #_known_instances,
+        tracked            = {},
+    }
+    for _, rec in ipairs(_known_instances) do
+        local target = f(rec.inst, "_TargetPuzzleUnit")
+        local gui = f(rec.inst, "_GuiHandle") ~= nil
+        local is_last = last ~= nil and target == last
+        local is_default = default ~= nil and target == default
+        if gui or is_last or is_default then
+            out.tracked[#out.tracked + 1] = string.format(
+                "id=%d %s gui=%s state=%s last=%s default=%s success=%s failed=%s target=%s",
+                rec.id, tostring(tname(rec.inst)), tostring(gui),
+                tostring(f(rec.inst, "_State")), tostring(is_last), tostring(is_default),
+                tostring(f(rec.inst, "_SuccessTrigger")), tostring(f(rec.inst, "_FailedTrigger")),
+                tostring(tname(target)))
+        end
+    end
+    return out
+end
+
+
+-- Everything the enemy-modifier work needs to confirm in game, in one table
+-- (Hacking Debug -> Modifiers, F5). Engine coordinates throughout, uncompacted.
+--   type          runtime PuzzleSnake subclass
+--   blocks / corruption / explosions   the raw puzzle_snake_modifiers reads
+--   bits          per ObstacleReason bit: count and cell list; plus stun and
+--                 dead-filament cells
+--   rect_check    do the block rectangles cover exactly the block-bit cells?
+--                 Counted with EndPoint inclusive and exclusive, since which
+--                 one the engine means is not known yet.
+-- Every plain (bool / number) instance field of `obj`, walking up the type
+-- chain, as "Name=value" strings. For spotting which flag marks a phase the
+-- named reads miss (the final boss's grid-shrinking sequence).
+local function _plain_fields(obj)
+    local out = {}
+    if obj == nil then return out end
+    local ok_t, t = pcall(function() return obj:get_type_definition() end)
+    local guard = 0
+    while ok_t and t ~= nil and guard < 8 do
+        guard = guard + 1
+        local fields = {}
+        pcall(function() fields = t:get_fields() end)
+        for _, fd in ipairs(fields or {}) do
+            local ok_s, is_static = pcall(function() return fd:is_static() end)
+            if ok_s and not is_static then
+                local ok_n, name = pcall(function() return fd:get_name() end)
+                if ok_n and type(name) == "string" then
+                    local ok_v, v = pcall(function() return obj:get_field(name) end)
+                    if ok_v and (type(v) == "boolean" or type(v) == "number") then
+                        out[#out + 1] = name .. "=" .. tostring(v)
+                    end
+                end
+            end
+        end
+        local ok_p, parent = pcall(function() return t:get_parent_type() end)
+        if not ok_p then break end
+        t = parent
+    end
+    table.sort(out)
+    return out
+end
+
+function M.debug_modifiers()
+    if not ensure_init() then return { error = "binding not initialized" } end
+    local inst = get_instance()
+    if inst == nil then return { error = "no PuzzleSnake matched to the aim" } end
+    local function f(obj, name)
+        if obj == nil then return nil end
+        local ok, v = pcall(function() return obj:get_field(name) end)
+        if ok then return v end
+        return nil
+    end
+    local processing = f(inst, "_ProcessingChangeGridRequest")
+    local block_timer = f(inst, "_GridChangingBlockInputTimer")
+    local out = {
+        type        = modifiers.type_name(inst),
+        active      = M.is_active(),
+        interactive = M.is_interactive(),
+        finale_hold = M.finale_hold_reason() or "none",
+        puzzle_fields = _plain_fields(inst),
+        change_queue_size = f(f(inst, "_ChangeGridRequests"), "_size"),
+        processing_change = processing and _plain_fields(processing) or "nil",
+        block_input_timer = block_timer and _plain_fields(block_timer) or "nil",
+        unit_fields = _plain_fields(f(inst, "_CurrentUnit")),
+        blocks      = modifiers.read_blocks(inst, true),
+        corruption  = modifiers.read_corruption(inst, true),
+        explosions  = modifiers.read_explosions(inst),
+        bits        = {},
+        stun_cells  = {},
+        dead_filament_cells = {},
+    }
+    local bit_names = { [1] = "ObstacleGrid", [2] = "DeadFilament", [4] = "Ch16092",
+                        [8] = "Ch14100", [16] = "AllPassed" }
+    for value, name in pairs(bit_names) do
+        out.bits[name] = { bit = value, cells = {} }
+    end
+    local block_bit_cells = {}
+    for_each_cell(inst, function(cell_obj)
+        local c = read_cell(cell_obj)
+        if c == nil then return end
+        local xy = c.x .. "," .. c.y
+        for value, name in pairs(bit_names) do
+            if has_bit(c.obstacle_reasons, value) then
+                table.insert(out.bits[name].cells, xy)
+            end
+        end
+        if c.stun_reasons ~= nil and c.stun_reasons ~= 0 then
+            table.insert(out.stun_cells, xy .. "=" .. c.stun_reasons)
+        end
+        if c.dead_filament then
+            table.insert(out.dead_filament_cells, xy .. "=" .. tostring(c.dead_filament_type))
+        end
+        if c.block_bit then block_bit_cells[xy] = true end
+    end)
+    for _, entry in pairs(out.bits) do
+        table.sort(entry.cells)
+        entry.count = #entry.cells
+    end
+
+    local b = out.blocks
+    if b ~= nil and not b.no_geometry then
+        local function covered(exclusive)
+            local set, n = {}, 0
+            for _, r in ipairs(b.rects) do
+                -- A misread rectangle must not turn into a runaway loop.
+                local area = (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1)
+                if r.active and area > 0 and area <= 4096 then
+                    local x1 = exclusive and r.x1 - 1 or r.x1
+                    local y1 = exclusive and r.y1 - 1 or r.y1
+                    for x = r.x0, x1 do
+                        for y = r.y0, y1 do
+                            local k = x .. "," .. y
+                            if not set[k] then set[k] = true; n = n + 1 end
+                        end
+                    end
+                end
+            end
+            local bits_outside, rect_without_bit = 0, 0
+            for k in pairs(block_bit_cells) do
+                if not set[k] then bits_outside = bits_outside + 1 end
+            end
+            for k in pairs(set) do
+                if not block_bit_cells[k] then rect_without_bit = rect_without_bit + 1 end
+            end
+            return { covered = n, bit_cells_outside = bits_outside,
+                     rect_cells_without_bit = rect_without_bit }
+        end
+        out.rect_check = { inclusive = covered(false), exclusive = covered(true) }
+    end
+    return out
+end
+
+
 function M.debug_dump_cells()
     if not ensure_init() then return { shape = "no init", cells = {} } end
     local inst = get_instance()
@@ -2696,5 +3559,65 @@ function M.render_state()
     return rendered
 end
 
+
+-- ---------------------------------------------------------------------------
+-- Final boss: the scripted stages (see M.finale_hold_reason)
+-- ---------------------------------------------------------------------------
+-- The finale is five fixed grids, the same every run, recognised by
+-- snake_render.layout_fingerprint (walls, error nodes, size and goal -- what
+-- the peer is shown). Recorded from the forces of 2026-10-08 (three runs).
+-- An earlier attempt fingerprinted the engine's raw cell array; that array is
+-- larger than the playable grid, so the size never matched and the hold never
+-- fired.
+local FINALE_STAGES = {
+    ["9x9|4,4|####....#/#..###.##/##.....#./##.#####./##.#...../##.###.##/#....#..#/#.##.##.#/####....#"] = 1,
+    ["7x9|3,8|###.###/......./#####.#/......./#.#####/......./###.###/......./###.###"] = 2,
+    ["9x9|4,6|#########/##..#..##/####..###/###...###/###.#.###/###...###/###..####/##..#..##/#########"] = 3,
+    ["7x7|6,6|.#####d/.#...##/.#.#.../.#.#.#./...#.#./##...#./d#####."] = 4,
+    ["7x7|3,6|d#d.##./d#..#.#/#d.##.d/#....#d/d###.d./#d#...#/d##.#d#"] = 5,
+}
+local FINALE_LAST_STAGE = 5
+local FINALE_RECHECK_SECONDS = 1.0
+
+-- Which finale stage puzzle `rec` is showing (1..5), or nil. Re-read at most
+-- once a second per puzzle; get_state is the same read a force makes.
+local function _finale_stage(rec)
+    local now = _clock()
+    if rec.finale_checked_at ~= nil and now ~= nil
+        and now - rec.finale_checked_at < FINALE_RECHECK_SECONDS then
+        return rec.finale_stage
+    end
+    rec.finale_checked_at = now
+    local fp = _render_mod.layout_fingerprint(M.get_state())
+    local stage = fp and FINALE_STAGES[fp] or nil
+    if stage ~= rec.finale_stage then
+        log.info("puzzle_snake: finale stage " .. tostring(stage)
+              .. (stage and " recognised" or " left"))
+        rec.finale_stage = stage
+        rec.finale_since = (stage == FINALE_LAST_STAGE) and (now or 0) or nil
+    end
+    return stage
+end
+
+_finale_hold = function()
+    local hold = tonumber(config.hack_finale_hold_seconds) or 0
+    if hold <= 0 then return nil end
+    local rec = _get_current_record()
+    if rec == nil then return nil end
+    if _finale_stage(rec) ~= FINALE_LAST_STAGE or rec.finale_since == nil then return nil end
+    local now = _clock()
+    if now == nil or now - rec.finale_since >= hold then return nil end
+    return "final-stage opening sequence"
+end
+
+-- The observer asks this before each force: false keeps the grid in the
+-- peer's context (no ephemeral_context). The finale's stages repeat exactly on
+-- every attempt, so what the peer learned on one is worth keeping.
+function M.force_ephemeral(id)
+    if config.hack_finale_keep_context == false then return true end
+    local rec = _get_current_record()
+    if rec == nil or rec.id ~= id then return true end
+    return _finale_stage(rec) == nil
+end
 
 return M

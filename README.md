@@ -19,9 +19,33 @@ context updates (dialogue, gauge state, scene transitions, combat state).
 | `pragmata_ping` | none | Sanity check; returns `pong`. |
 | `pragmata_scan` | none | Diana scans the environment. |
 | `pragmata_scan_results` | none | Re-read the last scan. Read-only, costs nothing. |
+| `pragmata_health` | none | HP, repair kits carried, HP per kit. Read-only. |
+| `pragmata_weapons` | none | Weapons owned / equipped, level, ammo. Read-only. |
+| `pragmata_mods` | none | Equipped mods and hacking mods, and what each does. Read-only. |
+| `pragmata_upgrades` | none | Firmware and Unit Printer upgrade levels. Read-only. |
+| `pragmata_inventory` | none | Currency, collectibles and materials held. Read-only. |
+| `pragmata_location` | none | Current area and what is left to collect there. Read-only. |
+| `pragmata_firmware_list` / `_info` | none / `names` | Firmware Updater units, levels, costs, stat changes. Only while that menu is open. Read-only. |
+| `pragmata_printer_list` / `_info` | none / `names` | Every Unit Printer unit on every tab: printed or not, level, cost, description. Only while that menu is open. Read-only. |
+| `pragmata_mod_terminal_list` / `_info` | none / `names` | The train terminal's mod menu: capacity, equipped mods, owned mods, what each does. Only while that menu is open. Read-only. |
+| `pragmata_stamps` | none | The Stamp Club board on screen: which cells are stamped, what each gives, lines and bonuses, Cabin Coins, other boards. Only while the Stamp Club tab is open. Read-only. |
+| `pragmata_library_list` / `_info` | none / `names` | The Data Library: entries found per category, and their full text. Only in the Shelter. Read-only. |
+| `pragmata_archive_list` / `_info` | none / `names` | The pause menu's Archive: documents found per category, and their full text. Anywhere. Read-only. |
+| `pragmata_bot_database_list` / `_info` | none / `names` | Bot Database figures collected, with size and description. Only in the Shelter. Read-only. |
+| `pragmata_simulations_list` / `_info` | none / `names` | Training Simulations available and cleared; description, time limit, rules, rewards. Only in the Shelter. Read-only. |
+| `pragmata_earth_memories_list` / `_info` | none / `names` | Earth Memories (the Rem Replicators) by group: owned, placed in the Shelter, description. Only in the Shelter. Read-only. |
+| `pragmata_sectors_list` / `_info` | none / `names` | The tram's sectors: completion per sector and location, and each collectible kind found / present. Only while the sector selection is open. Read-only. |
 | `pragmata_auto_hack` | none | Auto-hacks the locked-on target (needs the Auto-Hack upgrade). |
 | `pragmata_overdrive` | none | Fires Overdrive (needs 100 gauge points). |
 | `pragmata_hack_plan` | `moves` | Plans a path through the active hacking grid. Auto-forced on grid-start. |
+| `pragmata_hack_rotate` | `rotations` | Solves a circuit hack — turn pieces until each connects to the centre. Auto-forced. |
+| `pragmata_hack_sequence` | `buttons` or `order` | Solves a sequence hack — each lettered button read off a picture of the puzzle, or the directions from a list, depending on the sequence group. Auto-forced. |
+| `pragmata_hack_slide` | `moves` | Solves a pipe hack — slide tiles to complete the run. Auto-forced. Off by default. |
+| `pragmata_hack_path` | `rotations` | Solves a path hack — turn columns to open a route. Auto-forced. Off by default. |
+
+The last five are the hacking minigames. **Only one is ever offered at a time** —
+the force names exactly the action matching the puzzle on screen, so Neuro never
+has to work out which kind it is looking at.
 
 **Diana's three abilities take no arguments.** There is nothing to choose: Scan
 is a single input command, Overdrive is a single driver call, and the engine's
@@ -41,6 +65,31 @@ pragmata_overdrive  -> true   "the game started Overdrive (canDeathblow cleared)
 pragmata_auto_hack  -> false  "no valid hack target (nothing is locked on)"
 ```
 
+### Actions come and go
+
+Neuro is only told about actions that make sense right now:
+
+- When a scripted scene stops on the Overdrive button prompt, Neuro is asked
+  to use `pragmata_overdrive`, which presses the prompt for the player so the
+  scene carries on. A scene that wants the filament-cleaning button gets
+  `pragmata_purify` instead, offered only then. The player can still press
+  either one themselves. After the first boss's scene (Solar Power Plant) the
+  mod fires the normal Overdrive that finishes the boss by itself, 2 s after
+  the cutscene ends.
+- In the Shelter, Scan / Auto-Hack / Overdrive and the hacking actions are
+  withdrawn (`hide_abilities_in_shelter`, `hide_hacking_in_shelter`), unless
+  there is something to hack there (the opening tutorial), and the
+  Data Library, Bot Database, Training Simulations and Earth Memories actions
+  appear.
+- A menu's actions appear while it is open: Firmware Updater, Unit Printer,
+  the train terminal's mod menu and sector selection, and the Cabin's Stamp
+  Club tab.
+- The Archive's actions are always there.
+
+Things not found yet are only counted, never named. Each change is an
+`actions/unregister` plus a full `actions/register`. See
+[ACTIONS.md](ACTIONS.md#action-availability).
+
 ### Context emitted to Neuro
 
 All sent as `context` messages with `silent: true`:
@@ -53,12 +102,21 @@ All sent as `context` messages with `silent: true`:
 - `Overdrive is ready.` · `Auto-Hack upgrade is now available.`
 - `Diana scanned: …` result summaries
 - `Hacking grid started.` · `Hack succeeded.` · `Hack failed.`
-- `Hugh and Diana entered a new area.` · `Checkpoint reached.`
-- `Combat started.` · `Combat ended.`
+- `Hugh and Diana entered a new area.` — with the area's name, its map
+  completion % and what is left to collect there, while the area summary is on
+- `Hugh is down to 22% HP (88/400) with 1 repair kit left.` on falling past
+  50% / 25%
+- `Weapon equipped: <name>.` / `Weapon unequipped: <name>.`
+- `Hacking mod equipped: <name>.` / `Hacking mod unequipped: <name>.`
+- In the Shelter only: `New Data Library entry: …`, `New Bot Database figure: …`,
+  `New Training Simulation available: …`, `New Earth Memory: …`,
+  `Earth Memory placed in the Shelter: …`
+- `Checkpoint reached.` · `Combat started.` · `Combat ended.`
 - Optional in-combat ability hints (autonomy nudges, off by default)
 
-Scene, area and checkpoint **names** are never sent — only opaque hashes are
-used internally for transition detection.
+Internal scene and checkpoint **codes** are never sent — only opaque hashes are
+used internally for transition detection. The map area's player-facing name is
+the one name that is.
 
 See [ACTIONS.md](ACTIONS.md) for schemas, every result and refusal message, the
 grid render format, and the full context surface.
@@ -215,6 +273,22 @@ inline and re-read each game launch. Edit it in the **deployed** mod directory
 - `scan_pickup_checks` (default `true`) — read each marker's own item and
   interaction state, which is what answers "is that pickup still there".
 
+**Game state**
+
+- `state_push_area_summary` (default `true`) — on entering a new map area, send
+  its name, completion % and what is left to collect. Replaces the bare
+  "entered a new area" line while it works.
+- `state_push_low_health` / `state_low_health_thresholds` (`true` /
+  `{ 0.5, 0.25 }`) — report HP and repair kits left when HP falls past a
+  threshold. Downward crossings only.
+- `state_push_new_weapon` (default `true`) — announce a newly collected weapon.
+- `catalog_push_library` / `catalog_push_bot_database` /
+  `catalog_push_simulations` / `catalog_push_earth_memories` (all `true`) —
+  announce a new entry in that catalog. Only ever sent while in the Shelter.
+- `state_repair_kit_item` (default `nil`) — the repair kit's internal item name.
+  Left `nil`, the kit is found by its English name; on another language set it
+  from the Inventory section of the *Pragmata State Debug* panel.
+
 **Other**
 
 - `display_name` (default `"Neuro"`) — name shown in the on-screen hacking
@@ -227,13 +301,17 @@ inline and re-read each game launch. Edit it in the **deployed** mod directory
 
 ## Hacking integration
 
-The hacking minigame (the `app.PuzzleSnake` cursor-routing puzzle) is the most
-fully-integrated subsystem:
+The hacking minigames are the most fully-integrated subsystem. There are five of
+them: the cursor-routing grid that appears on enemies, and four used on
+environmental interactables — switches, doors, elevators. They share an entry
+point, controls and outcome, and the mod drives all of them through one loop.
 
-1. The mod observes `_StartTrg` on the active `PuzzleSnake` instance and, the
-   moment a grid appears, sends an `actions/force` with the rendered grid as the
-   `state` field and `pragmata_hack_plan` as the only allowed action. Only one
-   force may be outstanding, so replies are never ambiguous.
+The enemy grid works like this:
+
+1. The mod observes the active puzzle's start edge and, the moment a grid
+   appears, sends an `actions/force` with the rendered grid as the `state` field
+   and `pragmata_hack_plan` as the only allowed action. Only one force may be
+   outstanding — across all five kinds — so replies are never ambiguous.
 2. Neuro returns a list of cardinal moves. The render highlights **bonus
    nodes** — cells that do more damage and make the hack last longer — and asks
    Neuro to route through as many as possible en route to the goal. A longer
@@ -250,6 +328,38 @@ fully-integrated subsystem:
 While Neuro drives a hack the mod draws a HUD-styled **"`<display_name>` is
 hacking"** banner (planning → executing move N/M → COMPLETE/FAILED), so it's
 clear Neuro and not the player is moving the cursor.
+
+### The environmental hacks
+
+The other four are read and played the same way, differing only in what the
+render says and what the reply looks like: rotate pieces to reach a centre,
+press directions in order, slide tiles, or turn columns. Each gets its own
+action, because the mechanics have nothing in common and one shared schema would
+have been a union of unrelated fields.
+
+Two things are worth calling out:
+
+- **Neuro never times anything.** One of the sequence puzzles has a rotating
+  needle that a press must land inside — a window a few frames wide, which is
+  unreachable across a websocket round trip. Neuro supplies the order and the
+  mod fires each press on a frame the engine says would count. There is no time
+  pressure on the reply.
+- **Input goes through the game's own command layer.** The mod answers the
+  engine's "is PuzzleUp triggered" query for a few frames, exactly the way Scan
+  works. It writes no controller and creates no OS-visible device, and because
+  the engine runs its own input chain the puzzle completes for real.
+
+`pragmata_hack_slide` and `pragmata_hack_path` cover two families that have not
+yet been seen in a live capture, so their readers are written from the type dump
+and are **off by default** (`mod_config.puzzle_kinds`). With them off those
+puzzles are still detected and narrated, just not offered to Neuro.
+
+### Outcomes are never missed
+
+Hack outcomes are watched from two places: the puzzle Diana is aimed at, and the
+player's own status flags, which carry success/fail regardless of where she is
+aiming. The second catches a hack finishing after the player has already turned
+away — which used to mean the outcome was never reported at all.
 
 Full schemas, the glyph table, and integration notes are in
 [ACTIONS.md](ACTIONS.md#pragmata_hack_plan).
@@ -299,6 +409,9 @@ resolves.
   but have never appeared in an observed grid; `OneWay` renders as a generic
   `?`.
 - **Mission/objective state** is not yet bound.
+- **Two puzzle families are unverified.** The pipe and path hacks
+  (`pragmata_hack_slide`, `pragmata_hack_path`) are written from the type dump
+  and have never been exercised against a real one; they ship disabled.
 
 ## License
 

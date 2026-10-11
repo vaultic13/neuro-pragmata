@@ -223,6 +223,18 @@ end
 local function send_force(binding, active, id)
     if not config.hacking_auto_force then return end
 
+    -- The peer must hold the action before a force may name it. In the
+    -- Shelter-sector tutorial the hacking actions are announced only once a
+    -- target is in front of the player, and action_gates re-polls every few
+    -- frames, so sync now; if it is still not held, try again next frame
+    -- (nothing below has run, so the slot stays free).
+    local dispatcher = package.loaded["pragmata.dispatcher"]
+    if dispatcher ~= nil and dispatcher.is_announced ~= nil
+        and not dispatcher.is_announced(binding.action_name) then
+        dispatcher.sync()
+        if not dispatcher.is_announced(binding.action_name) then return end
+    end
+
     local rendered
     -- The id is passed so the render and the force-time snapshot below are
     -- provably of the same puzzle. Families that take no argument ignore it.
@@ -254,7 +266,10 @@ local function send_force(binding, active, id)
         -- hack's group); a plain string everywhere else.
         query = type(binding.force_query) == "function" and binding.force_query()
             or binding.force_query,
-        ephemeral_context = true,
+        -- A family can ask for the grid to stay in the peer's context (the
+        -- final boss's fixed stages); everything else stays ephemeral.
+        ephemeral_context = not (binding.force_ephemeral ~= nil
+            and binding.force_ephemeral(id) == false),
         action_names = { binding.action_name },
     }
     -- A nil here leaves the key absent, so an unset or malformed setting sends
@@ -495,6 +510,15 @@ local function _reconcile(binding, active, cur_id)
     end
 
     if binding == nil or cur_id == nil then return end
+    -- A family can say why the puzzle on screen cannot be played at all -- the
+    -- enemy grid sealed by red blocks fails the instant it starts, so it may
+    -- never be interactive long enough to reach force_blocked below. The
+    -- binding returns the message once per puzzle per reason; it is said
+    -- out loud (not silent) because the peer has to pass it on to the player.
+    if binding.blocked_notice ~= nil then
+        local notice = binding.blocked_notice(cur_id)
+        if type(notice) == "string" then emit.narrative(notice, { silent = false }) end
+    end
     if not binding.is_interactive() then return end
     if registry.is_jamming() then return end        -- jammer suppresses hacking entirely
     if registry.is_game_paused() then return end    -- don't force while the game is paused
@@ -516,6 +540,10 @@ local function _reconcile(binding, active, cur_id)
     end
     if _inflight_id == cur_id then return end        -- already waiting on this puzzle's plan
     if _inflight_id ~= nil then return end           -- busy on another puzzle
+    -- One force outstanding across the whole mod: a scene's Overdrive prompt
+    -- (cutscene_prompt_observer.lua) may hold the slot.
+    local scene_obs = package.loaded["pragmata.cutscene_prompt_observer"]
+    if scene_obs ~= nil and scene_obs.inflight() ~= nil then return end
     if binding.needs_force(cur_id) then
         send_force(binding, active, cur_id)
     end

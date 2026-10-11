@@ -392,6 +392,16 @@ local function message_text(text_message_data)
     return text
 end
 
+-- Public: the localised string inside an app.TextMessageData, or nil. Every
+-- binding that gets a TextMessageData back from the engine (weapon names, area
+-- names, ...) reads it through here so the <REF ...> placeholder rejection
+-- above applies to all of them, not just to item names.
+function M.text(text_message_data)
+    if text_message_data == nil then return nil end
+    display_init()
+    return message_text(text_message_data)
+end
+
 -- Localised, player-facing name for an objectIDHash ("Upgrade Module"), or nil
 -- when the id isn't something the game ever shows in a menu (most world props).
 -- CONFIDENCE: medium -- the lookup chain is verified in the dump, but the
@@ -425,6 +435,29 @@ function M.display_name(hash)
     end
     _display.cache[hash] = text or false
     return text
+end
+
+-- The header of an item's info page (GUIItemData._UIPageData._Header), or nil.
+-- Several distinct items share one display name ("Training Data" x6); where
+-- the game gives them apart at all, it is on this page. Returned only when it
+-- differs from the display name, so callers can treat non-nil as "a longer,
+-- distinguishing name exists".
+local _detail_cache = {}
+function M.item_detail(hash)
+    if hash == nil then return nil end
+    local cached = _detail_cache[hash]
+    if cached ~= nil then return cached or nil end
+    display_init()
+    local manager = safe(function() return sdk.get_managed_singleton("app.GuiDataManager") end)
+    if manager == nil or _display.m_get_item_data == nil then return nil end
+    local item = safe(function() return _display.m_get_item_data:call(manager, hash) end)
+    local page = item and safe(function() return item:get_field("_UIPageData") end) or nil
+    local header = page and message_text(safe(function()
+        return page:get_field("<Header>k__BackingField")
+    end)) or nil
+    if header ~= nil and header == M.display_name(hash) then header = nil end
+    _detail_cache[hash] = header or false
+    return header
 end
 
 -- ---------------------------------------------------------------------------

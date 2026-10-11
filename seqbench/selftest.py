@@ -1,6 +1,6 @@
 """Offline checks for seqbench. No API, no game.
 
-    py -3 selftest.py            everything, including a loopback run (~20 s)
+    py -3 selftest.py            everything, including the loopback runs (~40 s)
     py -3 selftest.py --no-e2e   the pure checks only
 """
 from __future__ import annotations
@@ -15,11 +15,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import grid_gen  # noqa: E402
+import grid_puzzles  # noqa: E402
+import grid_scoring  # noqa: E402
+import grid_sim  # noqa: E402
+import grid_texts as gt  # noqa: E402
 import puzzles  # noqa: E402
 import scoring  # noqa: E402
 import sequence_texts as texts  # noqa: E402
 import variants  # noqa: E402
-from mod_mimic import ModMimic, RunPlan  # noqa: E402
+from mod_mimic import GridRunPlan, ModMimic, RunPlan  # noqa: E402
 from stub_peer import StubThread, decode_buttons, decode_state  # noqa: E402
 
 _failures: list[str] = []
@@ -382,6 +387,195 @@ def test_e2e() -> None:
         stub.stop()
 
 
+# ---------------------------------------------------------------------------
+# Enemy hacking grid (pragmata_hack_plan)
+# ---------------------------------------------------------------------------
+
+def _grid(rows: list[str], cursor=(0, 0), goal=None, **kw) -> gt.GridPuzzle:
+    cells = [r.split() for r in rows]
+    h, w = len(cells), len(cells[0])
+    goal = goal or next((x, y) for y in range(h) for x in range(w) if cells[y][x] == "G")
+    return gt.GridPuzzle(w, h, cells, cursor, goal, cursor, **kw)
+
+
+def test_grid_corpus() -> None:
+    print("grid: the port against every recorded force")
+    entries = grid_puzzles.corpus()
+    check("corpus present (py -3 grid_corpus_build.py)", len(entries) > 0, str(grid_puzzles.CORPUS))
+    bad = []
+    for e in entries:
+        p = gt.parse_state(e["state"])
+        want = e["state"].replace(gt.OLD_ROUTING_RULE, gt.ROUTING_RULE) if e.get("reworded") else e["state"]
+        if gt.render(p) != want:
+            bad.append(e["id"])
+    check(f"render(parse(state)) == state for {len(entries)} forces", not bad, ", ".join(bad[:8]))
+    stages = sorted({e["finale_stage"] for e in entries if e.get("finale_stage")})
+    check("all five finale stages recorded", stages == [1, 2, 3, 4, 5], str(stages))
+    chain = grid_puzzles.finale_chain()
+    check("finale chain: five fresh stages, context kept",
+          [i.finale_stage for i in chain] == [1, 2, 3, 4, 5]
+          and all(not i.ephemeral and not i.puzzle.trail for i in chain))
+    unsolvable = [e["id"] for e in entries if grid_sim.shortest_path(gt.parse_state(e["state"])) is None]
+    check("the solvable flag matches the solver, and nearly every grid is solvable",
+          unsolvable == [e["id"] for e in entries if not e["solvable"]] and len(unsolvable) <= 3, str(unsolvable))
+    check("unsolvable grids are never benched",
+          not any(not e["solvable"] for c in grid_puzzles.CATEGORIES for e in grid_puzzles.recorded(c)))
+    for e in entries:
+        if any(t in e["categories"] for t in ("resume",)) and "ARROWS" in e["state"]:
+            p = gt.parse_state(e["state"])
+            check("arrow trail is ordered start -> cursor", p.trail[0] == p.start and
+                  abs(p.trail[-1][0] - p.cursor[0]) + abs(p.trail[-1][1] - p.cursor[1]) == 1, e["id"])
+            break
+
+
+def test_grid_gen() -> None:
+    print("grid: generated puzzles")
+    bad = []
+    for cat in grid_gen.GENERATED:
+        for seed in range(25):
+            for p in grid_gen.build(cat, 2, seed):
+                s = gt.render(p)
+                if gt.render(gt.parse_state(s)) != s or grid_sim.shortest_path(p) is None:
+                    bad.append(f"{cat}:{seed}")
+    check("every category: solvable and parses back", not bad, ", ".join(bad[:5]))
+    check("same seed, same puzzles",
+          [gt.render(p) for p in grid_gen.build("big", 3, 4)] == [gt.render(p) for p in grid_gen.build("big", 3, 4)])
+    corrupt = [p for s in range(20) for p in grid_gen.build("corrupt", 2, s)]
+    check("corrupt grids stay within the mod's 30-cell gate",
+          all(p.corrupted and p.width * p.height <= 30 for p in corrupt))
+    blocks = [p for s in range(20) for p in grid_gen.build("blocks", 2, s)]
+    check("blocks: 1-3 up, never the top-left one (it goes first)",
+          all(1 <= p.blocks[0] <= 3 and p.cells[0][1] != "R" for p in blocks))
+    shapes = {(p.width != p.height) for s in range(10) for p in grid_gen.build("nonsquare", 2, s)}
+    check("nonsquare grids are not square", shapes == {True})
+    items = grid_puzzles.build_set(["plain", "big", "finale"], 4, "both", 1)
+    by_cat = {c: [i for i in items if i.category == c] for c in ("plain", "big", "finale")}
+    check("set: 4 plain (2 recorded + 2 generated), 4 big (generated), 5 finale",
+          [i.source for i in by_cat["plain"]] == ["recorded"] * 2 + ["generated"] * 2
+          and len(by_cat["big"]) == 4 and all(i.source == "generated" for i in by_cat["big"])
+          and len(by_cat["finale"]) == 5, str({c: [i.source for i in v] for c, v in by_cat.items()}))
+
+
+def test_grid_sim() -> None:
+    print("grid: playing a plan")
+    p = _grid(["S . # .",
+               ". c . .",
+               "d . O G"])
+    play = grid_sim.play
+    r = play(p, ["down", "down", "right", "right", "right"])
+    check("reset on d", r.outcome == "reset" and r.message == gt.MSG_RESET and r.after.cursor == (0, 0)
+          and not r.after.trail, r.message)
+    r = play(p, ["right", "right"])
+    check("wall after 1 move", r.outcome == "wall" and r.message == gt.MSG_WALL.format(n=1)
+          and r.after.cursor == (1, 0), r.message)
+    r = play(p, ["up"])
+    check("off the grid", r.outcome == "off_grid" and r.message == gt.MSG_OFF_GRID)
+    r = play(p, ["down", "right", "down", "right", "right", "left"])
+    check("solved on G, the rest unsent; corrupted cell stuns", r.outcome == "solved" and r.stuns == 1
+          and r.landed == 5 and r.message == gt.MSG_SOLVED, f"{r.outcome} {r.landed} {r.stuns}")
+    check("blue collected on the way", grid_sim.blues_on(p, r.after.trail + [r.after.cursor]) == 1)
+    r = play(p, ["right", "left", "down"])
+    check("retrace back onto the cell it came from", r.outcome == "short" and r.after.cursor == (0, 1)
+          and r.after.trail == [(0, 0)], f"{r.after.cursor} {r.after.trail}")
+    r = play(p, ["right", "down", "left", "up"])
+    check("a visited cell other than the last is a wall", r.outcome == "wall"
+          and r.message == gt.MSG_WALL.format(n=3), r.message)
+    check("short plan", play(p, ["right"]).message == gt.MSG_SHORT.format(n=1, x=1, y=0))
+
+    q = _grid(["S . R",
+               ". . R",
+               "G # #"], blocks=(1, 4, "bottom-right"))
+    r = play(q, ["right", "right", "down"])
+    check("red block: plan refused whole", r.outcome == "refused" and r.after.cursor == (0, 0)
+          and r.message == gt.MSG_RED_REFUSED.format(i=2, x=2, y=0), r.message)
+    r = play(q, ["down", "right", "right", "right"])
+    check("red block: dead reckoning through a wall, as the mod does", r.outcome == "refused", r.message)
+    r = play(q, ["right", "right"], refuse_red=False)
+    check("red block, refusal off: the hack fails", r.outcome == "failed" and r.over and r.message == gt.MSG_FAILED)
+    check("shortest route avoids R / # / d", grid_sim.shortest_path(q) == ["down", "down"])
+    check("best route counts blues", grid_sim.best_route(p) == (1, 5), str(grid_sim.best_route(p)))
+
+    rated = [(True, 1, 2.0, False, "very good"), (True, 1, 3.5, False, "good"), (True, 2, 1.0, False, "risky"),
+             (False, 3, 1.0, False, "fail"), (False, 1, None, True, "timeout"), (True, 1, 1.0, True, "timeout")]
+    for solved, forces, t, timed_out, want in rated:
+        check(f"grid rating {solved} {forces} {t} {timed_out} -> {want}",
+              grid_scoring.rate(solved, forces, t, timed_out) == want)
+
+
+def _grid_bench(port: int, cats, timeout: float = 90.0, **kw):
+    events: queue.Queue = queue.Queue()
+    mimic = ModMimic(events)
+    mimic.connect(f"ws://127.0.0.1:{port}")
+    deadline = time.time() + 5
+    while not mimic.connected and time.time() < deadline:
+        time.sleep(0.02)
+    trials, finished = [], None
+    with tempfile.TemporaryDirectory() as tmp:
+        plan = GridRunPlan(versions=[grid_puzzles.version("mod")], categories=list(cats),
+                           gap_s=0.0, settle_s=0.02, out_root=Path(tmp), **kw)
+        mimic.start_run(plan)
+        deadline = time.time() + timeout
+        while finished is None and time.time() < deadline:
+            try:
+                ev = events.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if ev.kind == "trial":
+                trials.append(ev.data)
+            elif ev.kind == "run_finished":
+                finished = ev.data
+                finished["files"] = sorted(p.name for p in Path(ev.data["out_dir"]).iterdir())
+        mimic.disconnect()
+        time.sleep(0.2)
+    return trials, finished
+
+
+def test_grid_e2e() -> None:
+    print("grid: loopback run against the stub peer")
+    stub = StubThread("correct").start()
+    try:
+        trials, fin = _grid_bench(stub.port, grid_puzzles.CATEGORIES, per_category=2, warmup=True)
+        scored = [t for t in trials if not t["warmup"]]
+        check("7 categories x 2 + 5 finale stages + 1 warm-up", len(trials) == 20 and len(scored) == 19,
+              str(len(trials)))
+        check("correct: every episode solved first try",
+              all(t["solved"] and t["forces_used"] == 1 for t in scored),
+              str([(t["puzzle"], t["outcome"], t["forces"][-1].get("message")) for t in scored
+                   if not t["solved"] or t["forces_used"] != 1][:3]))
+        check("finale forces keep the context", all(not t["ephemeral"] for t in scored if t["finale_stage"])
+              and all(t["ephemeral"] for t in scored if not t["finale_stage"]))
+        check("grid run files written", fin and fin["files"] == ["run.json", "summary.csv", "trials.jsonl",
+                                                                 "versions.json"], str(fin))
+        rows = grid_scoring.summarize(trials)
+        check("summary: one row per category", sorted(r["category"] for r in rows) == sorted(grid_puzzles.CATEGORIES))
+        res = [r for r in stub.peer.results if r["message"] == gt.MSG_SOLVED]
+        check("the peer was told each hack completed", len(res) == 20, str(len(res)))
+
+        stub.peer.mode = "redblock"
+        trials, _ = _grid_bench(stub.port, ["blocks"], per_category=3, warmup=False)
+        check("redblock: refused, then solved on the re-force",
+              all(t["refusals"] == 1 and t["solved"] and t["forces_used"] == 2 and t["rating"] == "risky"
+                  for t in trials), str([(t["refusals"], t["outcome"], t["forces_used"]) for t in trials]))
+        stub.peer._seen_grids.clear()
+        trials, _ = _grid_bench(stub.port, ["blocks"], per_category=3, warmup=False, refuse_red=False)
+        check("redblock, refusal off: the hack fails", all(t["outcome"] == "failed" and t["forces_used"] == 1
+                                                         for t in trials), str([t["outcome"] for t in trials]))
+
+        stub.peer.mode = "wrong"
+        trials, _ = _grid_bench(stub.port, ["plain"], per_category=4, warmup=False, max_forces=2)
+        check("wrong: no first-try solves", not any(t["solved"] and t["forces_used"] == 1 for t in trials),
+              str([(t["outcome"], t["forces_used"]) for t in trials]))
+
+        stub.peer.mode = "slow:0.6"
+        trials, _ = _grid_bench(stub.port, ["finale"], warmup=False, finale_budget_s=0.5)
+        check("finale over its budget: timeout, told the hack failed",
+              len(trials) == 5 and all(t["outcome"] == "over_budget" and t["rating"] == "timeout"
+                                       and t["forces"][-1]["message"] == gt.MSG_FAILED for t in trials),
+              str([(t["outcome"], t["clock_s"]) for t in trials]))
+    finally:
+        stub.stop()
+
+
 def main() -> int:
     test_renders()
     test_mod_port_unchanged()
@@ -392,8 +586,12 @@ def main() -> int:
     test_expand()
     test_groups()
     test_puzzles()
+    test_grid_corpus()
+    test_grid_gen()
+    test_grid_sim()
     if "--no-e2e" not in sys.argv:
         test_e2e()
+        test_grid_e2e()
     print()
     if _failures:
         print(f"{len(_failures)} FAILED: " + ", ".join(_failures))

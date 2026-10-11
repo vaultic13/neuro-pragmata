@@ -42,6 +42,16 @@ require("pragmata.ability_state")
 -- World state emitters. Scene transitions, checkpoint reaches, combat start/end.
 require("pragmata.world_state")
 
+-- Game-state reporting: the formatter behind the six read-only state actions
+-- below, and the observer that pushes area / low-health / new-weapon context
+-- (each switchable in mod_config). Required here, at boot, because that is the
+-- only time `require` resolves.
+local game_state = require("pragmata.game_state")
+require("pragmata.game_state_observer")
+-- Which actions are available where (e.g. no abilities in the Shelter). Polls
+-- place and open menus and re-announces the action list when it changes.
+local gates = require("pragmata.action_gates")
+
 -- Autonomy nudges. No-op unless mod_config.autonomy_nudges is true; emits
 -- in-combat ability hints on the transient lane while enabled.
 require("pragmata.autonomy")
@@ -77,6 +87,11 @@ require("pragmata.hacking_overlay")
 -- the binding function the AI peer's action calls, so a working key proves the
 -- peer's route rather than a parallel one.
 require("pragmata.abilities_debug")
+
+-- Game-state debug panel (ImGui). Renders under "Pragmata State Debug"; shows
+-- the raw binding state and the exact peer text for each state action, with
+-- F9 snapshotting all of them into a history.
+require("pragmata.state_debug")
 
 log.info("booting")
 
@@ -114,7 +129,13 @@ end
 local hacking_bind = load_binding("pragmata.bindings.hacking")
 local scan_bind = load_binding("pragmata.bindings.scan")
 local overdrive_bind = load_binding("pragmata.bindings.overdrive")
+-- Scene prompts that wait for the Overdrive button. Loaded before
+-- ability_actions so its pcall'd require is a cache hit (boot is the only
+-- time `require` resolves).
+load_binding("pragmata.bindings.cutscene_prompt")
 local ability_actions = load_binding("pragmata.ability_actions")
+-- Offers those prompts to the peer as an actions/force for pragmata_overdrive.
+load_binding("pragmata.cutscene_prompt_observer")
 
 -- The other puzzle families, loaded here rather than on first sighting because
 -- boot is the only time `require` resolves at all: REFramework's module search
@@ -126,6 +147,7 @@ pcall(puzzle_registry.preload)
 dispatcher.register("pragmata_scan", {
     description = "Have Diana scan the environment through the game's native Scan input path. Highlights nearby objectives, paths, and (with the Object Scan upgrade) pickups like REM disks, Upgrade Modules, Mods, and Pure Lunum.",
     schema = { type = "object" },
+    available = gates.abilities_available,
     handler = function(_args, ctx)
         if not scan_bind then return false, "scan binding not loaded" end
         if not ability_actions then return false, "ability actions not loaded" end
@@ -156,6 +178,86 @@ dispatcher.register("pragmata_scan_results", {
     end,
 })
 
+-- --------------------------------------------------------------------
+-- Game state (read-only)
+-- --------------------------------------------------------------------
+-- Six small questions the peer can ask about the player, each answered
+-- synchronously from live game data. They change nothing in the game, so
+-- asking is always safe and costs nothing but the reply. game_state.lua does
+-- the formatting and turns a missing binding or an unreadable value into a
+-- stated reason rather than an empty success.
+
+dispatcher.register("pragmata_health", {
+    description = "Report Hugh's health: current and maximum HP, how many repair kits are carried out of how many can be carried, and roughly how much HP one kit restores (upgrades change this; once a kit has been used the figure is the measured one). Read-only.",
+    schema = { type = "object" },
+    handler = function(_args) return game_state.describe_health() end,
+})
+
+dispatcher.register("pragmata_weapons", {
+    description = "Report the weapons owned: which are equipped (and which is the main weapon), each one's upgrade level as 'Lv current/max', and remaining ammo as 'ammo current/max' where the game tracks it. Read-only.",
+    schema = { type = "object" },
+    handler = function(_args) return game_state.describe_weapons() end,
+})
+
+dispatcher.register("pragmata_mods", {
+    description = "Report the equipped mods and hacking mods: slots used, each one's level and what it does, and for hacking mods how many uses are left. Also names the equipped hacking style. Mods owned but not equipped are not listed (the train terminal's mod menu lists them). Read-only.",
+    schema = { type = "object" },
+    handler = function(_args) return game_state.describe_mods() end,
+})
+
+dispatcher.register("pragmata_upgrades", {
+    description = "Report upgrade progress: Firmware upgrades (suit, main weapon and hacking) with their levels, and the Unit Printer levels of each weapon and ability, all as 'Lv current/max'. Read-only.",
+    schema = { type = "object" },
+    handler = function(_args) return game_state.describe_upgrades() end,
+})
+
+dispatcher.register("pragmata_inventory", {
+    description = "Report everything held with a quantity: currency, collectibles, crafting materials and consumables, grouped by the game's own item category and named as the game names them. Read-only.",
+    schema = { type = "object" },
+    handler = function(_args) return game_state.describe_inventory() end,
+})
+
+dispatcher.register("pragmata_location", {
+    description = "Report the map area Hugh and Diana are in, the map screen's completion percentage for it, and what is still left to collect there (grouped, e.g. '2x Upgrade Components'). For where those things are, use pragmata_scan. Read-only.",
+    schema = { type = "object" },
+    handler = function(_args) return game_state.describe_location() end,
+})
+
+-- Shelter upgrade menus (Firmware Updater, Unit Printer, train mod menu): a
+-- list / info pair each, shown only while that menu is open. The module
+-- registers them itself so their gates and the printer's tab cache stay
+-- together.
+local shelter_menus_bind = load_binding("pragmata.bindings.shelter_menus")
+local shelter_menu_actions = load_binding("pragmata.shelter_menu_actions")
+if shelter_menu_actions ~= nil then
+    shelter_menu_actions.register(dispatcher, gates, shelter_menus_bind)
+end
+
+-- Stamp Club (the Cabin hub's shop tab): one read-only board report, shown
+-- only while that tab is selected.
+local stamp_club_bind = load_binding("pragmata.bindings.stamp_club")
+local stamp_actions = load_binding("pragmata.stamp_actions")
+if stamp_actions ~= nil then
+    stamp_actions.register(dispatcher, gates, stamp_club_bind)
+end
+
+-- Shelter catalogs (Data Library, Bot Database, Training Simulations): a
+-- list / info pair each, shown anywhere in the Shelter, plus the Shelter-only
+-- "new entry" pushes.
+local catalogs_bind = load_binding("pragmata.bindings.catalogs")
+local catalog_actions = load_binding("pragmata.catalog_actions")
+if catalog_actions ~= nil then
+    catalog_actions.register(dispatcher, gates, catalogs_bind)
+end
+
+-- Train sector selection: a list / info pair, shown only while that screen
+-- is open (State Debug F11 also dumps its data).
+local sectors_bind = load_binding("pragmata.bindings.sectors")
+local sector_actions = load_binding("pragmata.sector_actions")
+if sector_actions ~= nil then
+    sector_actions.register(dispatcher, gates, sectors_bind)
+end
+
 dispatcher.register("pragmata_auto_hack", {
     description = "Have Diana auto-hack the target she is currently locked on to. Consumes part of the hacking gauge to bypass the manual hacking minigame. Requires the Auto-Hack upgrade (unlocked mid-game from the Unit Printer). Takes no arguments: the engine's start call has no target parameter, so the lock-on decides the target. Success means the game entered Auto-Hack, not merely that preconditions passed.",
     -- No target selector. startAutoHack() takes no parameters; the target_id
@@ -163,6 +265,7 @@ dispatcher.register("pragmata_auto_hack", {
     -- sent one got no choice of target AND skipped the "is anything locked on"
     -- refusal.
     schema = { type = "object" },
+    available = gates.abilities_available,
     handler = function(_args, ctx)
         if not hacking_bind then return false, "hacking binding not loaded" end
         if not ability_actions then return false, "ability actions not loaded" end
@@ -171,12 +274,26 @@ dispatcher.register("pragmata_auto_hack", {
 })
 
 dispatcher.register("pragmata_overdrive", {
-    description = "Fire Diana's Overdrive. Requires a charged gauge and confirms only after the game actually starts the ability and spends the gauge.",
+    description = "Fire Diana's Overdrive. Requires a charged gauge and confirms only after the game actually starts the ability and spends the gauge. When a scene has stopped on the Overdrive button prompt, this presses that prompt for the player instead, and confirms once the scene continues.",
     schema = { type = "object" },
+    available = gates.overdrive_available,
     handler = function(_args, ctx)
         if not overdrive_bind then return false, "overdrive binding not loaded" end
         if not ability_actions then return false, "ability actions not loaded" end
         return ability_actions.overdrive(ctx)
+    end,
+})
+
+-- The filament-cleaning button, as a scripted scene asks for it (the
+-- Filament Remover scene). Announced only while that prompt is up; the scene
+-- prompt observer forces it then.
+dispatcher.register("pragmata_purify", {
+    description = "Clean the filament: press the filament-cleaning button a scene is waiting for, so the scene carries on. Only available while such a scene prompt is up; confirms once the scene continues.",
+    schema = { type = "object" },
+    available = gates.purify_available,
+    handler = function(_args, ctx)
+        if not ability_actions then return false, "ability actions not loaded" end
+        return ability_actions.purify(ctx)
     end,
 })
 
@@ -263,6 +380,7 @@ dispatcher.register("pragmata_hack_plan", {
         required = hack_plan_required,
         properties = hack_plan_properties,
     },
+    available = gates.hacking_available,
     handler = function(args, ctx)
         local moves = args.moves or {}
         local count = #moves
@@ -333,6 +451,7 @@ local function register_puzzle_action(name, kind, payload_key, description, sche
     dispatcher.register(name, {
         description = description,
         schema = schema,
+        available = gates.hacking_available,
         handler = function(args, ctx)
             local observer = package.loaded["pragmata.hacking_observer"]
             if not (observer and observer.on_plan_received) then
@@ -475,13 +594,10 @@ re.on_frame(function()
     if not started then
         if mailbox.ensure_ready() then
             mailbox.send({ command = "startup", game = "Pragmata" })
-            mailbox.send({
-                command = "actions/register",
-                game = "Pragmata",
-                data = { actions = dispatcher.action_list() },
-            })
+            -- Only the actions available now; action_gates re-announces as
+            -- the player moves in and out of places that change the set.
+            dispatcher.announce_all()
             log.info("sent startup + actions/register")
-            dispatcher.announced = true
             started = true
         else
             -- Throttle warning so we don't spam the log every frame

@@ -41,9 +41,39 @@ autorun/
     abilities_debug.lua      ImGui panel + the F6/F7/F8 manual triggers
     hacking_debug.lua        ImGui panel + the only remaining file dump
     puzzle_debug.lua         ImGui panel: sequence-hack group switch, peer view
+    game_state.lua           the six read-only state actions (health, weapons,
+                             mods, upgrades, inventory, location)
+    game_state_observer.lua  area / low-HP / equip context pushes
+    action_gates.lua         which actions are offered now (Shelter, open menus)
+    shelter_menu_actions.lua Firmware Updater, Unit Printer, train mod menu
+    stamp_actions.lua        the Stamp Club board
+    catalog_actions.lua      Data Library, Archive, Bot Database, Training
+                             Simulations, Earth Memories + Shelter-only pushes
+    sector_actions.lua       the tram's sector selection
+    state_debug.lua          ImGui panel for all of the above (F9 / F10 / F11)
     bindings/                everything that names real game types
-    util/                    log, emit, json, snake_render, puzzle_render
+    util/                    log, emit, json, snake_render, puzzle_render,
+                             name_match
 ```
+
+## Shelter and menu actions
+
+Read-only actions about the player and the game's menus, each answering from
+live game data. Their wire format and examples are in `ACTIONS.md`.
+
+- **Gating.** An action can carry an `available` predicate; `action_gates`
+  polls about five times a second and the dispatcher re-announces the set when
+  it changes. In the Shelter the abilities and hacking actions go away and the
+  catalog actions appear; a menu's actions exist only while its screen is open
+  (`mod_config.menu_gui` maps menus to screen codes).
+- **Menus read their own screen** (Firmware Updater, Unit Printer, train mod
+  menu, Stamp Club, tram sector selection), so values match what is shown. The
+  printer rebuilds the tabs not on screen from the same data.
+- **Catalogs read game data** (Data Library, Archive, Bot Database, Training
+  Simulations, Earth Memories), so they answer anywhere in the Shelter; the
+  Archive anywhere at all. A gain is pushed as silent context only while in
+  the Shelter.
+- **`pragmata_mods`** reports only equipped mods, each with what it does.
 
 `bindings/` is the only place internal type and method names appear. Its public
 functions return neutral values, so the rest of the mod reads without spoilers.
@@ -91,6 +121,56 @@ with its full presentation. `requestScan(bool)` is resolved and *hooked* but
 never called — the hook is how `request_progressed()` learns the engine got
 there. Calling it directly works but skips the action-driver chain that draws
 the scan. Requests are debounced 8 frames locally.
+
+**Scene prompts** (`bindings/cutscene_prompt.lua`, `cutscene_prompt_observer.lua`).
+Some scripted scenes stop on the Overdrive button icon. The scene is run by
+`app.EventActionDeathBlowUnlock_PLWrapperd` (subclasses: the Ch14500 boss and
+the Filament Remover). A hook on its `update()` finds the live ones.
+
+The 2026-10-09 trace of a manual press (boss scene) showed the sequence
+`Wait → AddGauge → icon.requestOpen → WaitGaugeFullEffect`. The scene waits
+there, and a press runs the action's `onSpecialMove()`, which closes the icon.
+The next frame the state is `StartedDeathBlow`. `tryDeathblow()` is not
+involved, and no command reader is asked for the press: injecting SpecialMove
++ FinishBlow on all three readers did nothing.
+
+So the prompt counts as up while the action is in `WaitGaugeFullEffect` or
+`WaitStartDeathBlowButton` and the icon is open. The icon state is latched
+from hooks on `FinishBlowGuiMediator.requestOpen` / `requestClose`. The
+observer forces `pragmata_overdrive`, and while a prompt is up
+`ability_actions` routes that action to `cutscene_prompt.press()`. A press
+counts as confirmed when the scene leaves the waiting state.
+
+**Confirmed end to end on 2026-10-10.** The prompt was detected and the force
+sent. Neuro's `pragmata_overdrive` pressed it and the scene continued, with the
+result `"pressed the scene's Overdrive prompt; the scene continued
+(StartedDeathBlow)"`. `press()` therefore calls the action's own
+`onSpecialMove()`, and that is its only route. The command-injection and
+`tryDeathblow` routes, the extra command readers they needed and the F3 press
+trace were removed on 2026-10-11 once all three scene kinds worked; recover them
+from git history if a patch changes how a scene reads the press.
+
+The Filament Remover scene, traced on 2026-10-11, behaves the same way: in
+`WaitGaugeFullEffect`, a press runs `onSpecialMove()`, which runs
+`onStartDeathBlow()` → `startDeathBlow()`, and the state goes to
+`StartedDeathBlow`. It asks for the filament-cleaning button, so it is offered
+as its own action, `pragmata_purify`
+(`cutscene_prompt_buttons.filament = "purify"`). That action is announced only
+while its prompt is up, and the observer syncs the action set before forcing
+it.
+
+**First boss (Solar Power Plant).** Pressing that scene's prompt ends the
+cutscene, but the boss still has to be finished with a normal Overdrive.
+Delaying the press did not help (that setting was removed).
+Instead, `cutscene_prompt_followup_overdrive` (2 s there) makes the observer
+do the following after the prompt clears:
+1. wait until the scene action stops updating (`cutscene_prompt.scene_running()`);
+2. wait 2 s;
+3. call `overdrive.trigger()`, the same call as F8, retrying every 0.5 s for up
+   to 10 s until the game confirms Overdrive started.
+
+Confirmed in game on 2026-10-11. The log line "prompt N up" names each
+prompt's sector, which is what that setting is keyed on.
 
 **Overdrive** was the hard one, and two entry/exit captures settled it:
 
@@ -341,7 +421,9 @@ whether to enable it is the one live design question in the transport.
 
 ## In-game controls
 
-Three ImGui panels under the REFramework menu (**Insert**).
+Four ImGui panels under the REFramework menu (**Insert**); the fourth,
+**Pragmata State Debug**, covers the state and menu actions and is described
+in `CLAUDE.md`.
 
 **Pragmata Abilities Debug** carries the manual triggers. The hotkeys and the
 button row share one `TRIGGERS` table, so they cannot drift:
@@ -351,6 +433,7 @@ button row share one `TRIGGERS` table, so they cannot drift:
 | **F6** | `Scan (F6)` | `scan.scan_input()` |
 | **F7** | `Auto-Hack (F7)` | `hacking.auto_hack()` |
 | **F8** | `Overdrive (F8)` | `overdrive.trigger()` |
+| **F4** | `Press scene prompt (F4)` | `cutscene_prompt.press()` |
 
 Each calls **the same binding function the peer's action calls**, so a working
 key proves the peer's route and a failure is a real failure rather than a broken
@@ -369,8 +452,9 @@ readouts, the confirmation state machine, the scan inventory tree, the
 and the located-only cut at work.
 
 **Pragmata Hacking Debug** shows grid state, a synthetic-grid button, and a
-"Dump cells to log" button — the only thing in the mod that still writes a file
-of its own (`pragmata_mailbox/hacking_dump.log`), and only on demand.
+"Dump cells to log" button, which writes `pragmata_mailbox/hacking_dump.log` on
+demand. The only other file the mod writes is State Debug's F11
+`catalog_dump.log`.
 
 **Pragmata Puzzle Debug** is deliberately small. Its top section switches the
 sequence hack's group (`mod_config.puzzle_sequence_group`) for the session: one
@@ -429,6 +513,12 @@ Until it is set, document capture is idle.
   above both -- force, peer plan, dispatch, real outcome -- which needs the
   sidecar running; the last test session had none, and all eighteen forces
   expired on the watchdog. `UPGRADE_ENV_PUZZLES.md` lists what is left.
+- **Not seen in game yet** (the test save had everything done): the catalog
+  "new entry" pushes firing; an owned but unplaced Earth Memory reading as not
+  placed; a tram station not reached yet being counted rather than listed; a
+  one-page Library / Archive entry no longer repeating its text as `[page 1]`.
+- **Train hub, weapon selection and elevator screens** (ui0071 / ui5112 /
+  ui5113) have no actions; State Debug -> Menu object (F10) dumps them.
 
 ## Recovering the discovery rigs
 

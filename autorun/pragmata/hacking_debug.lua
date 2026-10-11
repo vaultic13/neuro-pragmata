@@ -31,6 +31,7 @@ local mailbox = require("pragmata.bridge_mailbox")
 local snake = require("pragmata.bindings.puzzle_snake")
 local observer = require("pragmata.hacking_observer")
 local render = require("pragmata.util.snake_render")
+local registry = require("pragmata.bindings.puzzle_registry")
 
 local DUMP_PATH = "pragmata_mailbox/hacking_dump.log"
 
@@ -101,7 +102,7 @@ local function send_test_force()
         data = {
             message = "DEBUG TEST GRID (synthetic):\n" .. rendered,
             silent = true,
-            lane = "transient",
+            -- lane = "transient", -- strict bridge schema rejects this field
         },
     })
     log.info("hacking_debug: context send returned " .. tostring(ok_ctx))
@@ -128,8 +129,131 @@ local function send_test_force()
 end
 
 
+-- ---------------------------------------------------------------------------
+-- Enemy modifiers (HACK_MODIFIERS_WORK.md): F5 snapshot + history
+-- ---------------------------------------------------------------------------
+-- Red blocks, corruption and boss explosions are only on screen mid-fight, so
+-- the readout is a hotkey with a history rather than a button: each press
+-- flattens snake.debug_modifiers() into lines, keeps the last few here, and
+-- appends them to the dump file for reading back later.
+local config = require("pragmata.mod_config")
+local MOD_HISTORY_MAX = 4
+local _mod_history = {}       -- newest first: { time, lines }
+local _mod_key_was = false
+
+local function flatten(value, indent, out, depth)
+    if type(value) ~= "table" then
+        out[#out + 1] = indent .. tostring(value)
+        return
+    end
+    if depth > 6 then out[#out + 1] = indent .. "{...}" return end
+    local keys = {}
+    for k in pairs(value) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b)
+        if type(a) == type(b) and (type(a) == "number" or type(a) == "string") then return a < b end
+        return tostring(a) < tostring(b)
+    end)
+    -- A list of plain values (cell coordinates) reads best on one line.
+    local scalar_list = #keys > 0 and #keys == #value
+    for _, v in ipairs(value) do
+        if type(v) == "table" then scalar_list = false break end
+    end
+    if scalar_list then
+        local parts = {}
+        for _, v in ipairs(value) do parts[#parts + 1] = tostring(v) end
+        out[#out + 1] = indent .. "[" .. table.concat(parts, " ") .. "]"
+        return
+    end
+    for _, k in ipairs(keys) do
+        local v = value[k]
+        if type(v) == "table" then
+            out[#out + 1] = indent .. tostring(k) .. ":"
+            flatten(v, indent .. "  ", out, depth + 1)
+        else
+            out[#out + 1] = indent .. tostring(k) .. " = " .. tostring(v)
+        end
+    end
+end
+
+-- os.date can be missing from a sandboxed os table; fall back to os.time.
+local function stamp(fmt)
+    local ok, v = pcall(os.date, fmt)
+    if ok and type(v) == "string" then return v end
+    return tostring(os.time and os.time() or "?")
+end
+
+local function snapshot_modifiers()
+    local ok, data = pcall(snake.debug_modifiers)
+    local lines = {}
+    -- Which puzzle the mod thinks is on screen, and every live one the engine
+    -- has: the final boss's last hack was never picked up, and this is the
+    -- view that shows why.
+    local ok_t, targeting = pcall(snake.debug_targeting)
+    local active = registry.active_raw()
+    local live = {}
+    for _, p in ipairs(registry.enumerate_live()) do
+        if p.playing then
+            live[#live + 1] = tostring(p.type_name) .. " (" .. tostring(p.kind) .. ")"
+        end
+    end
+    flatten({
+        targeting = ok_t and targeting or ("raised: " .. tostring(targeting)),
+        registry_active = active and (tostring(active.type_name) .. " (" .. tostring(active.kind) .. ")") or "none",
+        registry_live_playing = live,
+    }, "", lines, 0)
+    if not ok then
+        lines[#lines + 1] = "debug_modifiers raised: " .. tostring(data)
+    else
+        flatten(data, "", lines, 0)
+        -- The grid as the peer would see it, so the snapshot shows both sides.
+        local ok_r, rendered = pcall(snake.render_state)
+        if ok_r and type(rendered) == "string" then
+            lines[#lines + 1] = "--- peer render ---"
+            for line in rendered:gmatch("[^\n]+") do lines[#lines + 1] = line end
+        end
+    end
+    table.insert(_mod_history, 1, { time = stamp("%H:%M:%S"), lines = lines })
+    while #_mod_history > MOD_HISTORY_MAX do table.remove(_mod_history) end
+    append_dump("=== modifiers @ " .. stamp("%Y-%m-%d %H:%M:%S") .. " ===\n"
+        .. table.concat(lines, "\n") .. "\n\n")
+    log.info("hacking_debug: modifier snapshot taken (" .. #lines .. " lines)")
+end
+
+re.on_frame(function()
+    local key = config.hack_modifier_snapshot_key
+    if type(key) ~= "number" then return end
+    local ok, down = pcall(function() return reframework:is_key_down(key) end)
+    down = ok and down == true
+    if down and not _mod_key_was then
+        -- Logged before the work so a press that then fails still shows up.
+        log.info("hacking_debug: modifier snapshot key pressed")
+        local ok_s, err = pcall(snapshot_modifiers)
+        if not ok_s then log.error("hacking_debug: modifier snapshot failed: " .. tostring(err)) end
+    end
+    _mod_key_was = down
+end)
+
+
 re.on_draw_ui(function()
     if not imgui.tree_node("Pragmata Hacking Debug") then return end
+
+    if imgui.tree_node("Enemy modifiers (snapshot key, default F5)") then
+        if imgui.button("Snapshot now") then
+            local ok_s, err = pcall(snapshot_modifiers)
+            if not ok_s then log.error("hacking_debug: modifier snapshot failed: " .. tostring(err)) end
+        end
+        if #_mod_history == 0 then
+            imgui.text("(no snapshot yet - aim at an enemy's hacking grid and press the key)")
+        end
+        for i, snap in ipairs(_mod_history) do
+            if imgui.tree_node(string.format("#%d  %s  (%d lines)##mod%d",
+                    i, snap.time, #snap.lines, i)) then
+                for _, line in ipairs(snap.lines) do imgui.text(line) end
+                imgui.tree_pop()
+            end
+        end
+        imgui.tree_pop()
+    end
 
     local s = snake.debug_status()
     local r = s.init_report

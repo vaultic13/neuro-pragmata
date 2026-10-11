@@ -278,6 +278,14 @@ function M.get_current_id()
     return fold_hash_set(nums)
 end
 
+-- The raw, sorted current-chunk hashes, or nil when the manager is
+-- unreachable. For bindings that need to look a chunk up in another catalog
+-- (bindings/area_progress.lua maps them to map areas); callers outside
+-- bindings/ should stay on the opaque get_current_id().
+function M.get_current_hashes()
+    return gather_current_hashes()
+end
+
 -- Returns true if a non-empty pending destination chunk set exists AND
 -- it differs from the current set — i.e. an area transition is in flight.
 -- Returns false otherwise (steady state, no pending transition, or

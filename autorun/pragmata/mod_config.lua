@@ -56,6 +56,79 @@ M.hacking_render_adjacency = false
 -- to favor reaction speed.
 M.hacking_require_reasoning = false
 
+-- Enemy modifiers on the hacking grid (HACK_MODIFIERS_WORK.md tracks them).
+--
+-- Red blocks: some enemies cover their grid with large red rectangles that
+-- fail the hack on contact, removed one at a time by shooting the enemy's
+-- antennas. With all of them up there is no way through, so the mod tells the
+-- peer to have them shot instead of asking for a plan. Turn this off to always
+-- send the grid (the R cells are still drawn and still refused in a plan).
+M.hack_block_gate = true
+
+-- With some (not all) red blocks up: what to do with a plan from the peer that
+-- walks into an R cell. true = refuse it before any move is made and send the
+-- grid again at once (the tool result names the step and cell). false = run
+-- it anyway, so the hack fails on the block like a player's would and the peer
+-- learns from the failure.
+M.hack_block_refuse_plan = true
+
+-- Corruption: a corrupted enemy's grid has cells that stun the cursor for a
+-- moment (c). On a large grid that makes the hack hopeless, so above
+-- hack_corruption_max_cells cells (width x height) the mod tells the peer to
+-- have the corruption purified instead of asking for a plan. Smaller grids are
+-- sent with the c cells drawn, and the move executor waits out each stun.
+M.hack_corruption_gate = true
+M.hack_corruption_max_cells = 30
+-- Some enemies' corrupted cells come and go (sector 5's), so a large grid
+-- seen corrupted stays refused for this many seconds after the last time a
+-- corrupted cell was on it; a momentarily clean look is not "purified".
+M.hack_corruption_hold_seconds = 3
+-- Sectors where large corrupted grids are sent anyway (the c cells drawn, the
+-- executor waiting out each stun). Experimental Pragmatics is where the
+-- corrupted enemies appear BEFORE the scene that unlocks purification, so the
+-- player cannot do what the gate asks. Each entry is a sector name as the map
+-- shows it (English here; the name follows the game's language) or a sector
+-- hash -- State Debug -> Location shows it, and a hash works in every language.
+M.hack_corruption_gate_skip_sectors = {
+    "Experimental Pragmatics",
+}
+
+-- The final boss's last stage opens with a scripted sequence in which the grid
+-- shrinks a few times. The puzzle reads as playable all the way through, and
+-- solving it before the sequence ends cuts the scene off and locks the game.
+-- On that one grid (recognised by its fixed layout) the mod waits this many
+-- seconds after the grid appears before asking for a plan or moving. Measured
+-- at ~14 s (grid at 16:29:20, sequence over ~16:29:34); raise it if the scene
+-- still gets cut. 0 = no wait.
+M.hack_finale_hold_seconds = 16
+
+-- The finale's five hacking stages are the same fixed grids on every attempt.
+-- true = send them without ephemeral_context, so the peer keeps each grid (and
+-- what happened on it) in its context and can do better on a retry. Every
+-- other hack stays ephemeral.
+M.hack_finale_keep_context = true
+
+-- Exploding rows (the boss that blows up whole rows of its grid; a cursor on
+-- one when it goes off fails the hack). On: the pulsing cells are drawn '!'
+-- for the peer, and the mod times the moves -- crossing a pulsing row only if
+-- the cursor will be off it in time, otherwise waiting on a safe cell, and
+-- stepping aside (then back) if the cursor is standing on one. Off = moves
+-- run at full speed regardless, as before.
+M.hack_explosion_guard = true
+
+-- How long one move takes, for that timing (seconds). Measured ~0.075-0.1 s.
+-- Raise it if moves still get caught; it only makes the waits longer.
+M.hack_explosion_move_seconds = 0.1
+
+-- Extra safety on both sides of an explosion (seconds).
+M.hack_explosion_margin_seconds = 0.15
+
+-- Key that snapshots every enemy-modifier reading (red blocks, corruption,
+-- boss explosions, per-cell bits) to the Hacking Debug panel and to
+-- data/pragmata_mailbox/hacking_dump.log. A key, not a button, because you
+-- are mid-fight when you need it. Windows virtual-key code; 0x74 = F5.
+M.hack_modifier_snapshot_key = 0x74
+
 -- ----------------------------------------------------------------
 -- Other hacking puzzles (switches, doors, elevators)
 -- ----------------------------------------------------------------
@@ -280,6 +353,58 @@ M.puzzle_force_priority = {
 }
 
 -- ----------------------------------------------------------------
+-- Scene prompts (the Overdrive button in scripted scenes)
+-- ----------------------------------------------------------------
+-- Some scenes stop on one centred button icon and wait for Overdrive. The mod
+-- offers that to the peer (an actions/force for pragmata_overdrive) and, when
+-- the peer uses it, presses the prompt as the player would. The player can
+-- always press it themselves.
+
+-- Master switch: off = scene prompts are not watched and pragmata_overdrive is
+-- combat Overdrive only.
+M.cutscene_prompt_enabled = true
+
+-- Force the peer when a prompt comes up. Off = it is only told, out loud, and
+-- may call pragmata_overdrive on its own.
+M.cutscene_prompt_auto_force = true
+
+-- Priority of that force: "Low", "Medium", "High" or "Critical" (anything
+-- else sends none). The scene is frozen until it is answered.
+M.cutscene_prompt_force_priority = "High"
+
+-- Which button each kind of scene waits for, and so which action the peer is
+-- asked to use: "overdrive" -> pragmata_overdrive, "purify" ->
+-- pragmata_purify (the filament-cleaning button). nil = not offered. All three
+-- are pressed the same way (the scene's onSpecialMove); the Filament Remover
+-- scene was traced on 2026-10-11 and behaves like the boss scene.
+M.cutscene_prompt_buttons = {
+    unlock   = "overdrive",   -- Overdrive unlock / tutorial scenes
+    boss     = "overdrive",   -- boss finisher scene
+    filament = "purify",      -- Filament Remover scene (first use of the button)
+}
+
+-- Frames a press may take before it is reported as failed.
+M.cutscene_prompt_confirm_frames = 150
+
+-- Sectors whose Overdrive scene has to be followed by a NORMAL Overdrive:
+-- pressing the prompt ends the cutscene, and the boss is then finished by
+-- using Overdrive (the gauge is left full for it). Once the scene action has
+-- finished, the mod waits this many seconds and fires Overdrive the way F8
+-- does, retrying for up to 10 s while the game is not ready.
+M.cutscene_prompt_followup_overdrive = {
+    ["Solar Power Plant"] = 2,   -- the first boss (2026-10-11)
+}
+
+-- Seconds after which the mod presses the prompt itself when the peer has not
+-- answered. nil = never; the scene waits for the peer or the player.
+M.cutscene_prompt_fallback_seconds = nil
+
+-- Abilities Debug hotkey: press the waiting prompt (the same function the
+-- peer's action calls). The prompt is pressed by calling the scene action's
+-- own onSpecialMove(), the step a real press runs (2026-10-09 capture).
+M.cutscene_prompt_press_key = 0x73   -- F4
+
+-- ----------------------------------------------------------------
 -- Scan reporting
 -- ----------------------------------------------------------------
 -- How much detail a scan result sends to the AI.
@@ -416,6 +541,95 @@ M.scan_report_max_groups = 8
 -- Append "(filtered N of M)" to the AI-facing scan line. Diagnostic; normally
 -- the counts belong in the debug panel and log, not in the narrative.
 M.scan_report_diagnostics = false
+
+-- ----------------------------------------------------------------
+-- Game-state reporting
+-- ----------------------------------------------------------------
+-- The read-only actions (pragmata_weapons / _health / _mods / _upgrades /
+-- _inventory / _location) are always registered. The switches below control
+-- the three things the mod says WITHOUT being asked, all as silent context.
+
+-- On entering a new map area: its name, the map screen's completion
+-- percentage, and what is still left to collect there. While this is on and
+-- working it replaces the bare "entered a new area" line.
+M.state_push_area_summary = true
+
+-- When HP falls below one of the fractions below (downward crossings only),
+-- say so along with the repair kits left. Healing above a threshold re-arms it.
+M.state_push_low_health = true
+M.state_low_health_thresholds = { 0.5, 0.25 }
+
+-- When the set of equipped weapons changes (a field pickup equips the new
+-- weapon): "Weapon equipped: <name>." / "Weapon unequipped: <name>." Ammo is
+-- not compared. A save load (more than two changes at once) is not announced.
+M.state_push_new_weapon = true
+
+-- The same for hacking mods (Freeze, Multishot, ...): "Hacking mod equipped:
+-- <name>." / "Hacking mod unequipped: <name>." Remaining uses are not compared.
+M.state_push_hacking_mods = true
+
+-- Shelter catalogs: when an entry is added to one, a silent line such as "New
+-- Data Library entry: 'Title' in Category." -- only while in the Shelter
+-- (outside it the mod notes the entry without pushing). Read a few times a
+-- minute; a jump of more than 6 at once is taken as a save load and skipped.
+M.catalog_push_library = true          -- Data Library entries found
+M.catalog_push_bot_database = true     -- Bot Database figures collected
+M.catalog_push_simulations = true      -- Training Simulations unlocked
+M.catalog_push_earth_memories = true   -- Earth Memories owned / placed
+
+-- Which held item is the repair kit, by its app.ObjectIDs field name (e.g.
+-- "It00010"). Left nil, the mod uses the held item whose localised name
+-- contains "repair", which only works on an English install. If the health
+-- report never shows a kit count, open Pragmata State Debug -> Inventory,
+-- find the kit's internal name there and put it here.
+M.state_repair_kit_item = nil
+
+-- ----------------------------------------------------------------
+-- Action availability (action_gates.lua)
+-- ----------------------------------------------------------------
+-- Some actions only make sense in some places. The mod shows the peer only
+-- the actions that are available right now and re-announces the list as the
+-- player moves; a call that races a change is refused with the reason.
+
+-- The Shelter sector's stage hash, as Pragmata State Debug -> Location shows
+-- it under stage_records. It is the game's own data id, not a name, so it
+-- works on every language install.
+M.shelter_sector_hash = 1557490666
+
+-- Hide Scan, Auto-Hack and Overdrive while in the Shelter, where they do
+-- nothing. The F6/F7/F8 debug keys are not affected.
+M.hide_abilities_in_shelter = true
+
+-- Hide the hacking answer actions (pragmata_hack_plan for enemies and grids,
+-- and the other puzzle families' actions) while in the Shelter.
+M.hide_hacking_in_shelter = true
+
+-- Which game screen code (Pragmata State Debug -> Open menus) is which menu:
+-- a code, or a rule (see replicator). The Shelter-menu actions are shown
+-- while their screen is open. Confirmed in
+-- game 2026-09-29 unless marked otherwise. ui0400 / ui0501 / ui0502 / ui2010
+-- are open behind every one of them and identify none.
+M.menu_gui = {
+    firmware      = "ui5120",  -- Firmware Updater (with ui2130 / ui2131 / ui2160)
+    printer       = "ui5100",  -- Unit Printer
+    mod_terminal  = "ui5111",  -- train terminal: mod selection
+    -- The Cabin hub ui5136 holds both as tabs; { code, tab } picks the
+    -- selected tab (bindings/cabin_hub.lua). Confirmed in game 2026-10-06.
+    stamps        = { code = "ui5136", tab = "stamps" },
+    simulations   = { code = "ui5136", tab = "simulations" },
+    library       = "ui5140",  -- Data Library
+    bot_database  = "ui5145",  -- BotDatabase
+    -- Rem Replicators: the plain HUD is ui0501 ui0502 ui2120 ui2121 ui2160;
+    -- the Replicators add only ui0400, which every other menu opens too. So:
+    -- ui0400 + ui2120 open, and no other menu screen ("^ui5" is a Lua pattern
+    -- matching every ui5xxx code; ui0071 comes with the train/Cabin menus).
+    replicator    = { all = { "ui0400", "ui2120" }, none = { "^ui5", "ui0071" } },
+    -- Train terminal screens, measured 2026-10-01. Only the sector selection
+    -- has actions (pragmata_sectors_list / _info).
+    train_weapons = "ui5112",  -- weapon selection
+    train_elevator = "ui5113", -- elevator
+    train_sector  = "ui5141",  -- sector selection
+}
 
 -- ----------------------------------------------------------------
 -- Collectible-document (abandoned) "Archive" capture

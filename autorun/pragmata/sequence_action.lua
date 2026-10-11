@@ -22,7 +22,6 @@
 local log = require("pragmata.util.log")
 local config = require("pragmata.mod_config")
 local dispatcher = require("pragmata.dispatcher")
-local mailbox = require("pragmata.bridge_mailbox")
 local render = require("pragmata.util.puzzle_render")
 
 local M = {}
@@ -75,24 +74,9 @@ function M.set_group(value)
         return true, "group " .. group.number .. " set (the sequence action is not registered)"
     end
 
-    if dispatcher.announced then
-        mailbox.send({
-            command = "actions/unregister",
-            game = "Pragmata",
-            data = { action_names = { M.ACTION_NAME } },
-        })
-        -- The WHOLE action list, not just the one that changed. Neuro-SDK
-        -- ignores a register for a name it already has, so the others are
-        -- no-ops there -- but a peer that reads each actions/register as the
-        -- complete catalogue (apitest does) otherwise forgets every other
-        -- action. The 2026-09-16 session lost pragmata_hack_rotate's schema
-        -- that way after a group switch, and every circuit answer came back {}.
-        mailbox.send({
-            command = "actions/register",
-            game = "Pragmata",
-            data = { actions = dispatcher.action_list() },
-        })
-    end
+    -- Unregister the one action, then register the full list (the reason the
+    -- whole list goes out is in dispatcher.reannounce).
+    dispatcher.reannounce({ M.ACTION_NAME })
     log.info("sequence_action: switched to group " .. group.number .. " (" .. group.id .. ")"
         .. (dispatcher.announced and ", re-registered with the peer" or ""))
     return true, "switched to group " .. group.number .. " (" .. group.id .. ")"

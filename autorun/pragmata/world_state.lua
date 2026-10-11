@@ -2,7 +2,9 @@
 --
 -- Polls bindings each frame and emits narrative context updates on
 -- transitions:
---   - Scene/area change   -> "Hugh and Diana entered a new area."
+--   - Scene/area change   -> "Hugh and Diana entered a new area." (skipped
+--                            while game_state_observer's named area summary
+--                            is on and working)
 --   - Checkpoint change   -> "Checkpoint reached."
 --   - Combat start/end    -> "Combat started." / "Combat ended."
 --
@@ -49,6 +51,14 @@ re.on_frame(function()
     if scene ~= nil then
         local id = safe_call(scene.get_current_id)
         scene_track(id, function(now)
+            -- When the game-state observer is announcing area changes (with
+            -- the area's name and what is left there), this bare line would
+            -- only duplicate it -- and a chunk change fires far more often
+            -- than a map-area change does.
+            local observer = package.loaded["pragmata.game_state_observer"]
+            if observer and observer.covers_area_changes and observer.covers_area_changes() then
+                return
+            end
             if now ~= nil then
                 emit.narrative("Hugh and Diana entered a new area.")
             end
