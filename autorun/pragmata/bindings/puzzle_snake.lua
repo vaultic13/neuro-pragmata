@@ -2121,7 +2121,7 @@ local STUN_MAX_RETRIES = 3
 local _plan_events = {}
 local function _push_plan_event(e) _plan_events[#_plan_events + 1] = e end
 
--- Resolve a puzzle's DEFERRED action result exactly once. pragmata_hack_plan
+-- Resolve a puzzle's DEFERRED action result exactly once. pragmata_enemy_hack_plan
 -- defers its action/result (sends nothing immediately) so the tool result the AI
 -- sees reflects what the plan ACTUALLY did — reached the goal, hit an error node
 -- and reset, stopped at a wall, or fell short — instead of a blind "plan applied".
@@ -2409,9 +2409,24 @@ function M.set_plan(id, moves, resolve)
     _resolve_pending(rec, false, "superseded by a newer plan")
     rec.pending_resolve = resolve   -- nil for manual/debug queues (no deferral)
 
-    local queue = {}
-    for _, d in ipairs(moves) do
-        if DIR_DELTAS[d] ~= nil then queue[#queue + 1] = d end
+    -- Every entry must be a direction. A bad one is refused with the whole
+    -- plan rather than skipped: skipping shifts every later move off the
+    -- route the peer traced.
+    local queue, bad = {}, {}
+    for i, d in ipairs(moves) do
+        if DIR_DELTAS[d] ~= nil then
+            queue[#queue + 1] = d
+        else
+            bad[#bad + 1] = string.format("move %d (%s)", i, tostring(d))
+        end
+    end
+    if #bad > 0 or #queue == 0 then
+        rec.forced_struct = nil     -- ask again about this same grid
+        _resolve_pending(rec, false, (#bad > 0
+            and ("Plan refused: " .. table.concat(bad, ", ") .. " is not a direction. ")
+            or "Plan refused: it has no moves. ")
+            .. "Each move must be one of up, down, left, right. None of the moves were made.")
+        return 0, false
     end
 
     -- Validate against the structure we forced against. If we have no
@@ -3521,8 +3536,8 @@ end
 -- interface is a thin naming layer over functions that already existed.
 
 M.kind = "snake"
-M.action_name = "pragmata_hack_plan"
-M.force_query = "Hacking grid is live. Call pragmata_hack_plan with your "
+M.action_name = "pragmata_enemy_hack_plan"
+M.force_query = "Hacking grid is live. Call pragmata_enemy_hack_plan with your "
              .. "moves from @ to G (see the grid)."
 
 -- Neutral lifecycle booleans. The observer edge-tracks these, so it no longer

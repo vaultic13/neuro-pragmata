@@ -73,6 +73,41 @@ local INFLIGHT_WATCHDOG_FRAMES = 1200   -- ~20s at 60fps
 local _ever_replied = false
 local _dead_bridge_warned = false
 
+-- How long the in-flight slot may wait for a reply before the watchdog frees
+-- it. The full window after a fresh force; the shorter retry wait after a
+-- failing result that expects the server's automatic retry.
+local _inflight_limit = INFLIGHT_WATCHDOG_FRAMES
+
+-- ---------------------------------------------------------------------------
+-- Server retries instead of re-forcing
+-- ---------------------------------------------------------------------------
+-- A `success: false` result to a forced action is retried by the Neuro server
+-- on its own, at once, with our failure message in front of the peer. That is
+-- faster than a fresh actions/force, and sending one as well would put two
+-- asks in flight. So a failure on a hack that is still live (plan refused,
+-- reset to the start, stopped short, grid changed) is HELD until the puzzle
+-- has settled enough to be described -- the moment the mod would otherwise
+-- re-force -- and then goes out with the current board in its message. The
+-- force slot stays taken so nothing else asks meanwhile; the retry's reply
+-- arrives through on_plan_received like any other.
+--
+-- The mod forces afresh only when that cannot work: retries used up
+-- (mod_config.force_retry_limit), the result already answered by the
+-- dispatcher's deadline, no reply within force_retry_wait_seconds, or the
+-- puzzle never settling within force_retry_settle_seconds.
+local _retry_count = 0     -- failures the current force has collected
+local _held = nil          -- { id, kind, resolve, message, since, seq }
+local _plan_seq = 0        -- each reply's sequence number; a stale wrapper defers to the newest
+local _terminal = false    -- true while a hack-ending failure resolves (nothing to retry)
+
+local function _retry_limit()
+    return tonumber(config.force_retry_limit) or 3
+end
+
+local function _seconds_frames(key, default)
+    return math.floor((tonumber(config[key]) or default) * 60)
+end
+
 -- A pending explicit (re)start. The start edge fires 1-2 frames before the
 -- puzzle id is readable, so we set this flag and apply it in reconciliation once
 -- the current id resolves: it drops that puzzle's force snapshot so the puzzle
@@ -217,6 +252,13 @@ local function force_priority(kind)
 end
 
 
+-- The family's one-line force query. A function where the wording can change
+-- at runtime (the sequence hack's group); a plain string everywhere else.
+local function _force_query(binding)
+    if type(binding.force_query) == "function" then return binding.force_query() end
+    return binding.force_query
+end
+
 -- Per Neuro-SDK protocol, sending an actions/force prompts the AI peer to pick
 -- exactly one of the listed actions. The state field carries the family's own
 -- render -- the peer reads it to plan.
@@ -250,22 +292,30 @@ local function send_force(binding, active, id)
                 .. tostring(r):sub(1, 200) .. ")"
     end
 
+    -- With mod_config.action_descriptions = "short" the action's description
+    -- is a sentence or two and its rules ride on the force instead.
+    if dispatcher ~= nil and dispatcher.rules ~= nil then
+        local rules = dispatcher.rules(binding.action_name)
+        if type(rules) == "string" and rules ~= "" then
+            rendered = "## Rules\n" .. rules .. "\n\n## Puzzle\n" .. rendered
+        end
+    end
+
     -- Snapshot the structure we're planning against BEFORE marking the slot
     -- busy, so the reply and continuous validation compare to it.
     binding.snapshot_force_target(id)
     _inflight_id = id
     _inflight_kind = active.kind
     _inflight_since = 0
+    _inflight_limit = INFLIGHT_WATCHDOG_FRAMES
+    _retry_count = 0
 
     local data = {
         -- Keep the query a one-liner: all the rules, the legend and any bonus
         -- list live in `state` (the render), so repeating them here is just
         -- bloat that dilutes the signal.
         state = rendered,
-        -- A function where the wording can change at runtime (the sequence
-        -- hack's group); a plain string everywhere else.
-        query = type(binding.force_query) == "function" and binding.force_query()
-            or binding.force_query,
+        query = _force_query(binding),
         -- A family can ask for the grid to stay in the peer's context (the
         -- final boss's fixed stages); everything else stays ephemeral.
         ephemeral_context = not (binding.force_ephemeral ~= nil
@@ -293,9 +343,22 @@ end
 -- mismatch, not a plan. Parks the payload on that puzzle's record; it dispatches
 -- when the player is/becomes aimed at it (validity is re-checked at dispatch
 -- time). Returns (applied, info) where info is the `parked` bool on success or a
--- reason string on discard.
-function M.on_plan_received(kind, payload, resolve)
+-- reason string on discard. `ctx` is the dispatcher's action context; with it,
+-- a failure can be held for the server's retry (see "Server retries" above).
+--
+-- applied == true also covers a plan the puzzle refused whose failure is held
+-- here: the result is still to come, so the caller must keep deferring.
+function M.on_plan_received(kind, payload, resolve, ctx)
     _ever_replied = true
+    -- Any reply ends the wait for a retry; whatever it brings starts afresh.
+    if _held ~= nil then
+        -- A reply cannot normally arrive while a failure is held (the peer has
+        -- not seen it yet). If one does, the held result must still be
+        -- answered, as a success so the server does not retry it as well.
+        local h = _held
+        _held = nil
+        pcall(h.resolve, true, h.message)
+    end
     local id = _inflight_id
     local in_kind = _inflight_kind
     _inflight_id = nil
@@ -324,16 +387,95 @@ function M.on_plan_received(kind, payload, resolve)
 
     -- `resolve` is the dispatcher's deferred-result callback. Parking it on the
     -- puzzle lets the binding report the plan's true outcome as the tool result.
-    local queued, parked = binding.set_plan(id, payload or {}, resolve)
+    -- The binding gets a wrapper: success and hack-ending failures pass
+    -- straight through; a failure on a live hack is held for the retry.
+    _plan_seq = _plan_seq + 1
+    local seq = _plan_seq
+    local function wrapped(success, message)
+        if resolve == nil then return nil end
+        if success then _retry_count = 0 end
+        local can_retry = not success and not _terminal and seq == _plan_seq
+            and (ctx == nil or ctx.pending == nil or ctx.pending())
+            and _retry_count < _retry_limit()
+        if not can_retry then return resolve(success, message) end
+        _held = { id = id, kind = in_kind, resolve = resolve, message = message or "",
+                  since = _frame, seq = seq }
+        log.info("hacking_observer: holding the failure for puzzle " .. tostring(id)
+              .. " until it can be described (retry " .. tostring(_retry_count + 1) .. ")")
+        return nil
+    end
+
+    local queued, parked = binding.set_plan(id, payload or {}, wrapped)
     log.info("hacking_observer: applied plan to " .. tostring(in_kind) .. " puzzle "
           .. tostring(id) .. " (" .. tostring(queued) .. " steps, parked="
           .. tostring(parked) .. ")")
     if queued == 0 then
-        -- The binding refused the plan and has already resolved the peer's tool
-        -- call with the reason, so there is nothing left to wait on.
+        -- The binding refused the plan. Its reason is either held here for the
+        -- retry (the result is still to come) or already sent.
+        if _held ~= nil and _held.seq == seq then return true, false end
         return false, "plan rejected by the puzzle"
     end
     return true, parked
+end
+
+-- Send a held failure once its puzzle can be described again, or give up on
+-- the retry when it cannot. Runs every poll, whatever the player aims at.
+local function _held_ready(h, binding, cur_id)
+    if binding == nil or cur_id ~= h.id then return false end
+    if registry.binding_for(h.kind) ~= binding then return false end
+    if not binding.is_interactive() then return false end
+    if registry.is_jamming() or registry.is_game_paused() then return false end
+    if binding.has_plan(h.id) then return false end
+    if binding.force_blocked ~= nil and binding.force_blocked(h.id) then return false end
+    -- The binding's own "ask again now" answer: it clears its snapshot after a
+    -- failure that wants a re-ask, and waits out a reset or a settling move.
+    return binding.needs_force(h.id)
+end
+
+local NO_RETRY = " The hack is not waiting for a new plan right now, so there is "
+              .. "nothing to retry; you will be asked again when it is."
+
+local function _service_held(binding, cur_id)
+    local h = _held
+    if h == nil then return end
+    local owner = registry.binding_for(h.kind)
+    local live = owner and owner.live_puzzle_ids() or {}
+
+    if live[h.id] and _held_ready(h, binding, cur_id) then
+        _held = nil
+        local ok, rendered = pcall(owner.render_state, h.id)
+        if not ok or type(rendered) ~= "string" or rendered == "" then
+            pcall(h.resolve, true, h.message .. NO_RETRY)
+            return
+        end
+        -- The retry replays the original force's state; this board replaces it.
+        owner.snapshot_force_target(h.id)
+        _inflight_id = h.id
+        _inflight_kind = h.kind
+        _inflight_since = 0
+        _inflight_limit = _seconds_frames("force_retry_wait_seconds", 10)
+        _retry_count = _retry_count + 1
+        local okr, where = pcall(h.resolve, false, h.message
+            .. "\n\nThe board is now (this replaces the earlier one):\n" .. rendered
+            .. "\n\n" .. tostring(_force_query(owner) or ""))
+        if not okr or where ~= "result" then
+            -- No result reached the server, so no retry will come: ask afresh.
+            _inflight_id = nil
+            _inflight_kind = nil
+            _inflight_since = 0
+            owner.clear_force_snapshot(h.id)
+        end
+        log.info("hacking_observer: sent the held failure for puzzle " .. tostring(h.id)
+              .. " with the current board (" .. tostring(where) .. ")")
+        return
+    end
+
+    if not live[h.id] or (_frame - h.since) > _seconds_frames("force_retry_settle_seconds", 4) then
+        _held = nil
+        log.info("hacking_observer: puzzle " .. tostring(h.id)
+              .. " did not settle for a retry; answering without a board")
+        pcall(h.resolve, true, h.message .. NO_RETRY)
+    end
 end
 
 
@@ -431,7 +573,11 @@ end
 local function on_failed()
     log.info("hacking_observer: hack failed")
     _last_outcome_frame = _frame
-    local plan_driven = _end_hack(false, "The hack failed.")
+    -- The hack is over: nothing for a server retry to fix.
+    _terminal = true
+    local ok, plan_driven = pcall(_end_hack, false, "The hack failed.")
+    _terminal = false
+    plan_driven = ok and plan_driven
     _set_flash("failed")
     if not plan_driven then
         emit.narrative("Hack failed.")
@@ -510,6 +656,8 @@ local function _reconcile(binding, active, cur_id)
     end
 
     if binding == nil or cur_id == nil then return end
+    -- A failure is waiting to go out as the re-ask; no force alongside it.
+    if _held ~= nil then return end
     -- A family can say why the puzzle on screen cannot be played at all -- the
     -- enemy grid sealed by red blocks fails the instant it starts, so it may
     -- never be interactive long enough to reach force_blocked below. The
@@ -649,9 +797,14 @@ re.on_frame(function()
             _inflight_id = nil
             _inflight_kind = nil
             _inflight_since = 0
-        elseif _inflight_since > INFLIGHT_WATCHDOG_FRAMES then
+        elseif _inflight_since > _inflight_limit then
             log.warn("hacking_observer: in-flight force watchdog fired (no reply in "
-                  .. tostring(INFLIGHT_WATCHDOG_FRAMES) .. " frames); releasing slot")
+                  .. tostring(_inflight_limit) .. " frames); releasing slot")
+            -- A retry that never came: let the next force start the count again.
+            if _inflight_limit ~= INFLIGHT_WATCHDOG_FRAMES then
+                local owner_b = registry.binding_for(_inflight_kind)
+                if owner_b ~= nil then pcall(owner_b.clear_force_snapshot, _inflight_id) end
+            end
             if not _ever_replied and not _dead_bridge_warned then
                 _dead_bridge_warned = true
                 log.warn("hacking_observer: no reply has EVER come back from the bridge. "
@@ -665,8 +818,25 @@ re.on_frame(function()
         end
     end
 
+    pcall(_service_held, binding, cur_id)
     _reconcile(binding, active, cur_id)
 end)
+
+-- A new connection knows nothing of the old one's force or held failure.
+do
+    local dispatcher = require("pragmata.dispatcher")
+    dispatcher.on_reregister(function()
+        if _inflight_id ~= nil then
+            local owner = registry.binding_for(_inflight_kind)
+            if owner ~= nil then pcall(owner.clear_force_snapshot, _inflight_id) end
+        end
+        _inflight_id = nil
+        _inflight_kind = nil
+        _inflight_since = 0
+        _held = nil
+        _retry_count = 0
+    end)
+end
 
 
 function M.debug_hit_counts()

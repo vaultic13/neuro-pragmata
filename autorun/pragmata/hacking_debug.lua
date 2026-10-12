@@ -115,7 +115,7 @@ local function send_test_force()
             query = "DEBUG TEST: plan a path through the synthetic grid above. "
                  .. "This is a manual test from the hacking debug panel.",
             ephemeral_context = true,
-            action_names = { "pragmata_hack_plan" },
+            action_names = { "pragmata_enemy_hack_plan" },
         },
     })
     log.info("hacking_debug: force send returned " .. tostring(ok_force))

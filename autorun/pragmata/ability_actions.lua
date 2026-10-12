@@ -35,18 +35,86 @@ local function defer(name, ctx, begin, poll, timeout_frames)
     return ctx.defer()
 end
 
+-- ---------------------------------------------------------------------------
+-- Scan (pragmata_scan)
+-- ---------------------------------------------------------------------------
+-- One action for scanning and for re-reading the last scan: scan_memory
+-- decides which, by the time since the last scan. A new
+-- scan resolves with what it found, not with "scan started", so the peer needs
+-- no second call; ability_state then leaves that scan's results out of the
+-- context stream (peer_scan_active) rather than reporting them twice.
+
+local scan_memory = require("pragmata.scan_memory")
+
+-- After the engine confirms the scan: results are read no earlier than
+-- SETTLE frames later (the list fills as the scan expands), reported once they
+-- have held still for STABLE frames or the scan has ended, and at the latest
+-- after LIMIT frames with whatever is there.
+local SCAN_CONFIRM_FRAMES = 120
+local SCAN_RESULT_SETTLE = 45
+local SCAN_RESULT_STABLE = 30
+local SCAN_RESULT_LIMIT = 180
+
+-- True while a peer scan waits for its results; ability_state stays quiet
+-- about them meanwhile, since they go back as the tool result.
+M.peer_scan_active = false
+
+local function results_text(readable)
+    return readable.text .. ((readable.stale and " (the game marks this list as possibly out of date)") or "")
+end
+
+local function cached_reply(readable, info)
+    local age = info and info.age or 0
+    return string.format("No new scan (a new scan runs once the last is %d s old). "
+        .. "Cached scan from %d s ago; the distances are from where it was made: %s.",
+        scan_memory.min_seconds(), age, results_text(readable))
+end
+
 function M.scan(ctx)
-    local serial = nil
+    local choice, info = scan_memory.decide()
+    if choice == "cached" then
+        local readable = scan.describe_results()
+        if readable ~= nil and readable.total_count > 0 then
+            return true, cached_reply(readable, info)
+        end
+        -- Nothing held to answer from: scan after all.
+    end
+
+    local serial, started_at = nil, nil
+    local progressed_at, last_fp, stable_since = nil, nil, nil
     return defer("scan", ctx, function()
         local ok, message = scan.scan_input()
         serial = scan.last_request_serial()
+        started_at = _frame
+        -- Only with a deferred result to carry them; F6 (no ctx) narrates.
+        if ok and ctx ~= nil then M.peer_scan_active = true end
         return ok, message
     end, function()
-        if serial ~= nil and scan.request_progressed(serial) then
-            return true, "scan started (request-specific progression observed)"
+        if progressed_at == nil then
+            if serial ~= nil and scan.request_progressed(serial) then
+                progressed_at = _frame
+                scan_memory.note_scan()
+            elseif _frame - started_at >= SCAN_CONFIRM_FRAMES then
+                -- The same window as before the merge: no scan within ~2 s.
+                return false, "scan did not produce its expected game-state transition"
+            end
+            return nil
+        end
+        local waited = _frame - progressed_at
+        if waited < SCAN_RESULT_SETTLE then return nil end
+        local readable = scan.describe_results()
+        local fp = readable and readable.fingerprint or nil
+        if fp ~= last_fp then last_fp, stable_since = fp, _frame end
+        local settled = fp ~= nil
+            and (_frame - stable_since >= SCAN_RESULT_STABLE or not scan.is_scanning())
+        if settled or waited >= SCAN_RESULT_LIMIT then
+            if readable ~= nil and readable.total_count > 0 then
+                return true, "Scan done. Diana found: " .. results_text(readable) .. "."
+            end
+            return true, "Scan done. Nothing the scan can place was found nearby."
         end
         return nil
-    end, 120)
+    end, SCAN_CONFIRM_FRAMES + SCAN_RESULT_LIMIT)
 end
 
 function M.auto_hack(ctx)
@@ -145,10 +213,12 @@ re.on_frame(function()
         local ok, success, message = pcall(pending.poll)
         if ok and success ~= nil then
             _pending[name] = nil
+            if name == "scan" then M.peer_scan_active = false end
             pending.resolve(success, message)
         elseif _frame >= pending.deadline then
             _pending[name] = nil
             if name == "overdrive" then pcall(overdrive.cancel_pending) end
+            if name == "scan" then M.peer_scan_active = false end
             pending.resolve(false, name .. " did not produce its expected game-state transition")
         end
     end

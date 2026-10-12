@@ -7,6 +7,50 @@
 local M = {}
 
 -- ----------------------------------------------------------------
+-- Action results and registration (BEST_PRACTICES.md)
+-- ----------------------------------------------------------------
+-- The Neuro server treats an action with no result after ~20 seconds as
+-- failed and discards whatever arrives later. A deferred result (a hack plan
+-- that is still running, one parked on a target the player looked away from)
+-- that has not resolved within this many seconds is answered "accepted, still
+-- running"; its real outcome then follows as a context message instead.
+M.deferred_result_max_seconds = 12
+
+-- How many failing results one hacking force may collect before the mod stops
+-- relying on the server's automatic retry and sends a fresh actions/force of
+-- its own. A failure while the hack is still live (plan refused, hack reset,
+-- stopped short) is answered with the CURRENT board in the message, and the
+-- server's retry is the re-ask -- faster than a new force. Keep this at or
+-- below the server's own retry limit.
+M.force_retry_limit = 3
+
+-- After a failing result that expects a server retry, how long to wait for the
+-- retry's reply before giving up on it and forcing afresh (seconds).
+M.force_retry_wait_seconds = 10
+
+-- How long a failing hack result may wait for the puzzle to settle (the reset
+-- animation, a circuit re-measure) so the board it carries is the real one
+-- (seconds). Past this the failure goes out without a board and the mod
+-- re-forces normally once the puzzle can be described.
+M.force_retry_settle_seconds = 4
+
+-- "full": the long, rule-heavy descriptions the hacking and scan actions have
+-- always had. "short": one or two sentences per action, as BEST_PRACTICES.md
+-- recommends, with the rules moved into each force's `state` text instead.
+-- The hacks are hard; leave this on "full" unless sim/ or apitest shows
+-- "short" solves as well.
+M.action_descriptions = "full"
+
+-- pragmata_scan scans again only when the last scan (the peer's or the
+-- player's) is at least this many seconds old. Otherwise it answers from the
+-- results already held, and says they are cached.
+M.scan_cache_seconds = 7
+
+-- Register developer-only actions (pragmata_ping). They do nothing in the game,
+-- so the peer is better off not seeing them.
+M.debug_actions = false
+
+-- ----------------------------------------------------------------
 -- Autonomy nudges
 -- ----------------------------------------------------------------
 -- When true, the mod emits a transient hint to the AI during combat
@@ -48,7 +92,7 @@ M.hacking_render_legend = true
 -- off to test whether the grid + legend alone are enough.
 M.hacking_render_adjacency = false
 
--- Whether the `pragmata_hack_plan` action requires a `reasoning` string
+-- Whether the `pragmata_enemy_hack_plan` action requires a `reasoning` string
 -- alongside `moves`. When true, the peer must emit a step-by-step trace
 -- before the moves, which improves grid-solving accuracy but adds
 -- noticeable generation latency. When false, the schema only requires
@@ -545,8 +589,8 @@ M.scan_report_diagnostics = false
 -- ----------------------------------------------------------------
 -- Game-state reporting
 -- ----------------------------------------------------------------
--- The read-only actions (pragmata_weapons / _health / _mods / _upgrades /
--- _inventory / _location) are always registered. The switches below control
+-- The read-only action (pragmata_status) is
+-- always registered. The switches below control
 -- the three things the mod says WITHOUT being asked, all as silent context.
 
 -- On entering a new map area: its name, the map screen's completion
@@ -600,7 +644,7 @@ M.shelter_sector_hash = 1557490666
 -- nothing. The F6/F7/F8 debug keys are not affected.
 M.hide_abilities_in_shelter = true
 
--- Hide the hacking answer actions (pragmata_hack_plan for enemies and grids,
+-- Hide the hacking answer actions (pragmata_enemy_hack_plan for enemies and grids,
 -- and the other puzzle families' actions) while in the Shelter.
 M.hide_hacking_in_shelter = true
 
@@ -625,7 +669,7 @@ M.menu_gui = {
     -- matching every ui5xxx code; ui0071 comes with the train/Cabin menus).
     replicator    = { all = { "ui0400", "ui2120" }, none = { "^ui5", "ui0071" } },
     -- Train terminal screens, measured 2026-10-01. Only the sector selection
-    -- has actions (pragmata_sectors_list / _info).
+    -- is readable (pragmata_menu_list / _info, menu "sectors").
     train_weapons = "ui5112",  -- weapon selection
     train_elevator = "ui5113", -- elevator
     train_sector  = "ui5141",  -- sector selection

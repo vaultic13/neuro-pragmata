@@ -2,7 +2,6 @@
 --
 -- Polls Diana's ability bindings each frame and emits context updates to
 -- the AI when interesting transitions happen:
---   - Hacking gauge crossing thresholds upward       (transient)
 --   - Overdrive readiness edge true/false             (narrative)
 --   - Auto-Hack upgrade unlock edge                   (narrative)
 --   - Scan results when a new ping set arrives        (narrative)
@@ -27,13 +26,16 @@ end
 local hacking   = safe_require("pragmata.bindings.hacking")
 local overdrive = safe_require("pragmata.bindings.overdrive")
 local scan      = safe_require("pragmata.bindings.scan")
+-- Loaded here, at boot, because this is the first module to need it.
+local scan_memory = require("pragmata.scan_memory")
 
 -- --------------------------------------------------------------------
 -- Trackers
 -- --------------------------------------------------------------------
 
-local GAUGE_THRESHOLDS = { 0.25, 0.5, 0.75, 1.0 }
-local gauge_track             = emit.threshold(GAUGE_THRESHOLDS)
+-- The gauge's 25 / 50 / 75 % steps used to go out as context too. They were
+-- dropped (BEST_PRACTICES.md: occasional meaningful messages, not a stream):
+-- "Overdrive is ready." is the one that changes what the peer can do.
 local overdrive_cost_track    = emit.edge()
 local autohack_unlock_track   = emit.edge()
 local scanning_track          = emit.edge()
@@ -114,15 +116,6 @@ re.on_frame(function()
     if (_frame % POLL_INTERVAL) ~= 0 then return end
 
     if overdrive ~= nil then
-        local frac = safe_call(overdrive.gauge_fraction)
-        gauge_track(frac, function(bucket, threshold, prev_bucket)
-            -- Only emit on upward crossings; the readiness edge below covers
-            -- the drop after Overdrive fires.
-            if bucket > prev_bucket then
-                emit.transient(string.format("Hacking gauge: %d%%", math.floor(threshold * 100)))
-            end
-        end)
-
         -- Readiness now comes from the engine's own status flags rather than
         -- from a gauge threshold alone (see bindings/overdrive.lua:readiness).
         local ready = safe_call(overdrive.is_ready)
@@ -149,6 +142,9 @@ re.on_frame(function()
             if now then
                 _scan_emit_window = SCAN_EMIT_WINDOW_POLLS
                 reset_scan_records()
+                -- Any scan, the player's own included, resets pragmata_scan's
+                -- "scan again or answer from cache" clock.
+                scan_memory.note_scan()
             end
         end)
 
@@ -163,11 +159,18 @@ re.on_frame(function()
             reset_scan_records()
         end
 
+        -- While a scan the peer asked for is waiting for its results, they go
+        -- back as its tool result (ability_actions); narrating them as well
+        -- would say everything twice. They are still recorded, so the same
+        -- list is not narrated after the result has gone out either.
+        local actions = package.loaded["pragmata.ability_actions"]
+        local quiet = actions ~= nil and actions.peer_scan_active == true
+
         if _scan_emit_window > 0 then
             _scan_emit_window = _scan_emit_window - 1
             local readable = safe_call(scan.describe_results)
             if type(readable) == "table" and readable.text and readable.fingerprint then
-                if scan_record_key(readable.fingerprint) then
+                if scan_record_key(readable.fingerprint) and not quiet then
                     emit.narrative("Diana scanned: " .. readable.text .. ".")
                 end
             else

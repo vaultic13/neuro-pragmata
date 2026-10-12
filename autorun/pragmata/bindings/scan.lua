@@ -1378,8 +1378,8 @@ local function build_inventory()
     end)
 
     -- Staleness is reported, never acted on. Dropping stale results would make
-    -- pragmata_scan_results return "nothing" seconds after every scan, which
-    -- destroys the point of that action.
+    -- pragmata_scan's cached reply say "nothing" seconds after every scan, which
+    -- destroys the point of the cache.
     local stale = nil
     if _state.m_get_scan_display_timer ~= nil then
         local timer = safe(function() return _state.m_get_scan_display_timer:call(mgr) end)

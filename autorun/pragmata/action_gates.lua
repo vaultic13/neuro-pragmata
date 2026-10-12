@@ -147,7 +147,7 @@ function M.purify_available()
     return false, "only while a scene waits for the filament-cleaning button"
 end
 
--- The hacking answers: pragmata_hack_plan (enemies and grid puzzles) and the
+-- The hacking answers: pragmata_enemy_hack_plan (enemies and grid puzzles) and the
 -- other puzzle families' actions.
 -- Something hackable is in front of the player right now. The game's opening
 -- tutorial runs in the Shelter sector yet has enemies to hack (2026-10-11), so

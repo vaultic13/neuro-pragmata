@@ -245,7 +245,7 @@ def main() -> int:
     parser.add_argument("--verbose", action="store_true",
                         help="Print each trial's grid and result")
     parser.add_argument("--plan-only", action="store_true",
-                        help="Register only pragmata_hack_plan (omits the route "
+                        help="Register only pragmata_enemy_hack_plan (omits the route "
                              "fallback). Forces the peer to actually plan moves.")
     parser.add_argument("--inter-trial-context", action="store_true",
                         help="Between trials, send a filler context message "

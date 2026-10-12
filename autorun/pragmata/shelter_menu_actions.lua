@@ -1,10 +1,11 @@
 -- Peer actions for the Shelter upgrade menus: Firmware Updater, Unit Printer
 -- and the train terminal's mod menu.
 --
--- Each menu gets a pair, visible only while that menu is on screen
+-- Each menu is one value of pragmata_menu_list / pragmata_menu_info
+-- (menu_actions.lua), readable only while that menu is on screen
 -- (action_gates.menu_open):
---   pragmata_<menu>_list   every entry, one line each
---   pragmata_<menu>_info   full detail for up to 8 named entries
+--   list   every entry, one line each
+--   info   full detail for up to 8 named entries
 --
 -- Formatting only: every read goes through bindings/shelter_menus.lua, which
 -- hands back plain tables. Names in an info call are matched
@@ -275,50 +276,24 @@ end
 -- Registration (called once from pragmata_main.lua at startup)
 -- ---------------------------------------------------------------------------
 
-local names_schema = name_match.schema
-
 local function unavailable() return false, "the Shelter menu reader failed to load" end
 
-function M.register(dispatcher, gates, binding)
+function M.register(menu_actions, gates, binding)
     menus = binding
     local function wrap(fn) return function(args) if menus == nil then return unavailable() end return fn(args) end end
 
-    dispatcher.register("pragmata_firmware_list", {
-        description = "List what the open Firmware Updater offers: each unit with its level as 'Lv current/max' and what the next level costs (with how many of each material is held). Only available while the Firmware Updater is open. Read-only.",
-        schema = { type = "object" },
-        available = gates.menu_open("firmware"),
-        handler = wrap(firmware_list),
-    })
-    dispatcher.register("pragmata_firmware_info", {
-        description = "Details for up to 8 Firmware Updater units by name: level, the next level's cost, how far it can be upgraded for now, and how its stats change at the next level. Only available while the Firmware Updater is open. Read-only.",
-        schema = names_schema("Firmware Updater units"),
-        available = gates.menu_open("firmware"),
-        handler = wrap(firmware_info),
-    })
-    dispatcher.register("pragmata_printer_list", {
-        description = "List everything in the open Unit Printer, every tab (weapons, attachments, abilities, hacking nodes): each unit with whether it is printed, its level as 'Lv current/max', and the cost of printing or of the next level (with how many of each material is held). Only available while the Unit Printer is open. Read-only.",
-        schema = { type = "object" },
-        available = gates.menu_open("printer"),
-        handler = wrap(printer_list),
-    })
-    dispatcher.register("pragmata_printer_info", {
-        description = "Details for up to 8 Unit Printer units by name: state, level and cost; the unit selected on screen also comes with its description. Only available while the Unit Printer is open. Read-only.",
-        schema = names_schema("Unit Printer units"),
-        available = gates.menu_open("printer"),
-        handler = wrap(printer_info),
-    })
-    dispatcher.register("pragmata_mod_terminal_list", {
-        description = "List the mods in the open mod menu at the train terminal: capacity used and total, which mods are equipped (with slot and capacity cost) and which are owned but not equipped. Only available while that menu is open. Read-only.",
-        schema = { type = "object" },
-        available = gates.menu_open("mod_terminal"),
-        handler = wrap(mod_terminal_list),
-    })
-    dispatcher.register("pragmata_mod_terminal_info", {
-        description = "Details for up to 8 mods by name from the open mod menu at the train terminal: capacity cost, whether equipped, and what the mod does. Only available while that menu is open. Read-only.",
-        schema = names_schema("mods"),
-        available = gates.menu_open("mod_terminal"),
-        handler = wrap(mod_terminal_info),
-    })
+    menu_actions.add({ key = "firmware", label = "the Firmware Updater",
+                       about = "units, levels, next-level costs",
+                       list = wrap(firmware_list), info = wrap(firmware_info),
+                       gate = gates.menu_open("firmware") })
+    menu_actions.add({ key = "printer", label = "the Unit Printer",
+                       about = "every tab: printed or not, levels, costs",
+                       list = wrap(printer_list), info = wrap(printer_info),
+                       gate = gates.menu_open("printer") })
+    menu_actions.add({ key = "mod_terminal", label = "the train terminal's mod menu",
+                       about = "capacity, equipped and owned mods",
+                       list = wrap(mod_terminal_list), info = wrap(mod_terminal_info),
+                       gate = gates.menu_open("mod_terminal") })
 
     -- Keep the printer's per-tab cache: read the tab a few times a second
     -- while the printer is open, and the full tab when it changes.

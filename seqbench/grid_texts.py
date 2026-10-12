@@ -1,4 +1,4 @@
-"""The mod's enemy hacking-grid wording (pragmata_hack_plan), for the grid bench.
+"""The mod's enemy hacking-grid wording (pragmata_enemy_hack_plan), for the grid bench.
 
 A Python port of autorun/pragmata/util/snake_render.lua as of 2026-10-08, at
 glyph level: a puzzle here is a grid of glyphs (what the peer sees), not the
@@ -15,7 +15,7 @@ the port is proven byte for byte against what the mod sent. As with
 sequence_texts.py, nothing here is imported from autorun/: if the mod's render
 changes, port the change on purpose and re-run the selftest.
 
-Also here: the force query, the pragmata_hack_plan registration and the mod's
+Also here: the force query, the pragmata_enemy_hack_plan registration and the mod's
 tool-result strings (bindings/puzzle_snake.lua, hacking_observer.lua).
 """
 from __future__ import annotations
@@ -24,9 +24,9 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
-ACTION_NAME = "pragmata_hack_plan"
+ACTION_NAME = "pragmata_enemy_hack_plan"
 PRIORITY = "high"
-FORCE_QUERY = ("Hacking grid is live. Call pragmata_hack_plan with your moves from @ to G "
+FORCE_QUERY = ("Hacking grid is live. Call pragmata_enemy_hack_plan with your moves from @ to G "
                "(see the grid).")
 
 DIRECTIONS = ("up", "down", "left", "right")

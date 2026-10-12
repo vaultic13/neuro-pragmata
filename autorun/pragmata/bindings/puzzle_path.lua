@@ -28,8 +28,8 @@ local render = require("pragmata.util.puzzle_render")
 local M = {}
 
 M.kind = "path"
-M.action_name = "pragmata_hack_path"
-M.force_query = "A path hack is live. Call pragmata_hack_path to turn pieces "
+M.action_name = "pragmata_enviro_hack_path"
+M.force_query = "A path hack is live. Call pragmata_enviro_hack_path to turn pieces "
              .. "until a path runs across the board."
 
 local P = plan_lib.new({ kind = "path" })
@@ -279,7 +279,7 @@ function M.set_plan(id, rotations, resolve)
 
     local state = read_state(rec)
     if state == nil then
-        P.resolve(rec, false, "The board could not be read; nothing was rotated.")
+        P.refuse(rec, resolve, "The board could not be read; nothing was rotated.")
         return 0, false
     end
 
@@ -315,7 +315,7 @@ function M.set_plan(id, rotations, resolve)
     end
 
     if rejected ~= nil then
-        P.resolve(rec, false, "Nothing was rotated: " .. rejected .. ".")
+        P.refuse(rec, resolve, "Nothing was rotated: " .. rejected .. ".")
         return 0, false
     end
 

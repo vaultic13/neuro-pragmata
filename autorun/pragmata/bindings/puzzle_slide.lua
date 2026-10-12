@@ -21,8 +21,8 @@ local render = require("pragmata.util.puzzle_render")
 local M = {}
 
 M.kind = "slide"
-M.action_name = "pragmata_hack_slide"
-M.force_query = "A pipe hack is live. Call pragmata_hack_slide with the "
+M.action_name = "pragmata_enviro_hack_slide"
+M.force_query = "A pipe hack is live. Call pragmata_enviro_hack_slide with the "
              .. "directions the empty space should travel."
 
 local P = plan_lib.new({ kind = "slide" })
@@ -288,14 +288,26 @@ function M.consume_plan_events() return P.consume_events() end
 
 function M.set_plan(id, moves, resolve)
     local rec = store.by_id(id)
-    if rec == nil then return 0, false end
-
-    local steps = {}
-    for _, d in ipairs(moves or {}) do
-        if input.is_direction(d) then steps[#steps + 1] = d end
+    if rec == nil then
+        if resolve ~= nil then pcall(resolve, true, "Nothing was done: that hack is no longer there.") end
+        return 0, false
     end
-    if #steps == 0 then
-        P.resolve(rec, false, "The plan contained no usable directions; nothing was slid.")
+
+    -- A bad entry refuses the whole plan: skipping it would shift every later
+    -- slide off what the peer worked out.
+    local steps, bad = {}, {}
+    for i, d in ipairs(moves or {}) do
+        if input.is_direction(d) then
+            steps[#steps + 1] = d
+        else
+            bad[#bad + 1] = string.format("move %d (%s)", i, tostring(d))
+        end
+    end
+    if #bad > 0 or #steps == 0 then
+        P.refuse(rec, resolve, (#bad > 0
+            and ("Nothing was slid: " .. table.concat(bad, ", ") .. " is not a direction. ")
+            or "Nothing was slid: the plan has no moves. ")
+            .. "Each move must be one of up, down, left, right.")
         return 0, false
     end
 

@@ -88,6 +88,20 @@ function M.new(opts)
         return true
     end
 
+    -- Refuse an answer before it is parked. The refusal must reach THIS
+    -- call's `resolve`: rec.pending_resolve still belongs to the previous plan
+    -- (usually nil, already answered), so P.resolve would drop it. The
+    -- snapshot is cleared because the peer is asked about this board again,
+    -- through the server's retry of this failure (hacking_observer).
+    function P.refuse(rec, resolve, message)
+        if rec ~= nil then rec.forced_sig = nil end
+        if resolve ~= nil then
+            pcall(resolve, false, message or "")
+            return true
+        end
+        return P.resolve(rec, false, message)
+    end
+
     function P.discard(rec)
         if rec == nil then return end
         rec.plan = nil

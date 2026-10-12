@@ -7,7 +7,7 @@ as of 2026-09-15, except that the drawings now put a space between characters
 
     util/puzzle_render.lua     button_cross, button_arms, button_example_lines,
                                M.buttons (the force's `state`)
-    pragmata_main.lua          pragmata_hack_sequence description and schema
+    pragmata_main.lua          pragmata_enviro_hack_sequence description and schema
     bindings/puzzle_buttons.lua  M.force_query
 
 Since 2026-09-16 it runs the other way too: the mod's five sequence groups
@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-ACTION_NAME = "pragmata_hack_sequence"
+ACTION_NAME = "pragmata_enviro_hack_sequence"
 # mod_config.puzzle_force_priority.buttons = "Low", sent lowercased.
 PRIORITY = "low"
 DIRECTIONS = ("up", "down", "left", "right")
@@ -372,16 +372,16 @@ def force_query(cfg: dict) -> str:
     form = letter_form(cfg)
     if form:
         return ("A sequence hack is live. Read each lettered button off the drawing in the "
-                f"state and call pragmata_hack_sequence with {_FORM_WHAT[form]} for every letter.")
+                f"state and call pragmata_enviro_hack_sequence with {_FORM_WHAT[form]} for every letter.")
     if is_cross(cfg):
         return ("A sequence hack is live. Read the directions off the drawing in the "
-                "state and call pragmata_hack_sequence with them in order.")
+                "state and call pragmata_enviro_hack_sequence with them in order.")
     if not (uses_shuffle(cfg) or uses_compass(cfg)):
-        return ("A sequence hack is live. Call pragmata_hack_sequence with the "
+        return ("A sequence hack is live. Call pragmata_enviro_hack_sequence with the "
                 "directions in the order shown.")
     how = "sorted by their numbers" if uses_shuffle(cfg) else "in the order shown"
     words = ", translated from compass points to up/down/left/right" if uses_compass(cfg) else ""
-    return f"A sequence hack is live. Call pragmata_hack_sequence with the directions {how}{words}."
+    return f"A sequence hack is live. Call pragmata_enviro_hack_sequence with the directions {how}{words}."
 
 
 def description(cfg: dict) -> str:

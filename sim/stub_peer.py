@@ -215,7 +215,7 @@ async def _handle_connection(ws, strategy: str, rng: random.Random):
             grid = grid or last_grid
             if grid is None:
                 logger.warning("force received but no grid (state or context) — sending empty plan")
-                await _send_action(ws, "pragmata_hack_plan", {"moves": []})
+                await _send_action(ws, "pragmata_enemy_hack_plan", {"moves": []})
                 continue
 
             if strategy == "optimal":
@@ -228,7 +228,7 @@ async def _handle_connection(ws, strategy: str, rng: random.Random):
                 moves = _plan_optimal(grid)
 
             logger.info(f"-> action plan ({len(moves)} moves): {[m.value for m in moves]}")
-            await _send_action(ws, "pragmata_hack_plan",
+            await _send_action(ws, "pragmata_enemy_hack_plan",
                                {"moves": [m.value for m in moves]})
 
         elif cmd == "action/result":

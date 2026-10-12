@@ -1,7 +1,8 @@
 -- ImGui debug panel for the game-state actions.
 --
 -- Renders under "Pragmata State Debug" in the REFramework menu (Insert). For
--- each of the six read-only actions it shows:
+-- each read-only state section (pragmata_status's five parts, and the
+-- upgrades text, which no action returns any more) it shows:
 --   - the binding's debug_status() (which singletons / methods resolved),
 --   - the raw state table the binding returned,
 --   - the exact text the peer would receive from the action.
@@ -25,7 +26,7 @@
 --     with whether the peer currently holds it.
 --   - Shelter menus: the raw tables the Firmware / Printer / mod-menu readers
 --     return and the list text the peer would get, while the menu is open.
---   - Stamp Club: the text pragmata_stamps would give, and per cell the three
+--   - Stamp Club: the text pragmata_menu_list stamps would give, and per cell the three
 --     "stamped" readings side by side, while that tab is open.
 --   - Catalogs: the Data Library / Bot Database / Training list texts, each
 --     catalog's data read against its open screen (and the state bits the
@@ -77,6 +78,7 @@ local SECTIONS = {
     { title = "Health",    binding = "vitals",    read = "read",          describe = "describe_health" },
     { title = "Weapons",   binding = "loadout",   read = "read",          describe = "describe_weapons" },
     { title = "Mods",      binding = "perks",     read = "read_mods",     describe = "describe_mods" },
+    { title = "Hacking mods", binding = "perks",  read = "read_mods",     describe = "describe_hacking_mods" },
     { title = "Upgrades",  binding = "perks",     read = "read_upgrades", describe = "describe_upgrades" },
     { title = "Inventory", binding = "inventory", read = "read",          describe = "describe_inventory" },
     { title = "Location",  binding = "area",      read = "read",          describe = "describe_location" },
@@ -212,7 +214,7 @@ function M.write_catalog_dump()
     -- info reply.
     local sector_acts = package.loaded["pragmata.sector_actions"]
     if sector_acts and sector_acts.debug_text and gates.menu_is_open("train_sector") then
-        out[#out + 1] = "----- pragmata_sectors_list (peer text)"
+        out[#out + 1] = "----- pragmata_menu_list sectors (peer text)"
         out[#out + 1] = sector_acts.debug_text()
     end
 

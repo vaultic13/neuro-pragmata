@@ -14,7 +14,7 @@ A run, per version:
     optional unscored warm-up force
     one actions/force per puzzle -> wait for `action` -> judge -> action/result
 
-A grid run (GridRunPlan, pragmata_hack_plan) plays episodes instead: each
+A grid run (GridRunPlan, pragmata_enemy_hack_plan) plays episodes instead: each
 puzzle is forced, the reply is played on it (grid_sim), the mod's result is sent
 back, and while the hack is neither solved nor over the puzzle is forced again
 from where the cursor ended -- as the mod re-forces -- up to `max_forces`. The

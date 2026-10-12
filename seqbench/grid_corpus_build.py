@@ -2,7 +2,7 @@
 
     py -3 grid_corpus_build.py [path/to/lua_to_bridge.jsonl ...]
 
-Reads every pragmata_hack_plan actions/force the mod wrote (default: the live
+Reads every pragmata_enemy_hack_plan actions/force the mod wrote (default: the live
 mailbox, ../data/pragmata_mailbox/lua_to_bridge.jsonl), keeps each distinct
 state once, tags it with its categories and writes grid_corpus.json next to
 this file. The bench reads only the snapshot, never the mailbox, so a run is

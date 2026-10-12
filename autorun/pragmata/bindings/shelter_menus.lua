@@ -504,6 +504,42 @@ local function rebuild(c, rm, cand)
     return e
 end
 
+-- What a Unit Printer unit does, by its id or, failing that, its name -- for
+-- pragmata_status's equipped-weapon lines, read anywhere (no menu open).
+-- Built from the same game data the printer's off-screen tabs are rebuilt
+-- from (candidates above), once per session after it first reads non-empty:
+-- the text is static. By name too, because a printer unit's id can differ
+-- from the id the weapon itself is known by (GridInfo.ObjectId vs the
+-- ReinforceData id). Nil when neither answers.
+local _unit_desc = nil      -- { by_id = {}, by_name = {} }
+
+local function unit_desc_table()
+    if _unit_desc ~= nil then return _unit_desc end
+    printer_init()
+    local gdm = r.singleton("app.GuiDataManager")
+    if gdm == nil then return nil end
+    local by_id, by_name, n = {}, {}, 0
+    for _, cand in ipairs((candidates(gdm))) do
+        local src = cand.rd or cand.item
+        local desc = (reinforce_text(src)) or (cand.item and (reinforce_text(cand.item)))
+        if desc ~= nil and desc ~= "" then
+            by_id[cand.id] = desc
+            local name = source_name(src) or (cand.item and source_name(cand.item))
+            if name ~= nil then by_name[name] = desc end
+            n = n + 1
+        end
+    end
+    if n == 0 then return nil end   -- data not loaded yet: try again later
+    _unit_desc = { by_id = by_id, by_name = by_name }
+    return _unit_desc
+end
+
+function M.unit_description(id, name)
+    local ok, t = pcall(unit_desc_table)
+    if not ok or t == nil then return nil end
+    return (id ~= nil and t.by_id[id]) or (name ~= nil and t.by_name[name]) or nil
+end
+
 -- { tab = <visible tab>, tabs = {{ tab, entries, from_data }} }: the visible
 -- tab read from the grid, every other tab rebuilt from game data.
 function M.printer_all()

@@ -1,9 +1,11 @@
 -- Peer-facing descriptions of the player's state.
 --
--- One describe_*() per read-only action (pragmata_weapons, pragmata_health,
--- pragmata_mods, pragmata_upgrades, pragmata_inventory, pragmata_location).
--- Each returns (ok, text) exactly like an action handler, so pragmata_main
--- can return it straight through.
+-- The read-only state action, pragmata_status: describe_status joins
+-- describe_health / _location / _weapons / _mods / _inventory. Each
+-- describe_*() returns (ok, text) exactly like an action handler; the parts
+-- stay separate functions for the State Debug panel. describe_upgrades no
+-- longer backs an action (the Shelter's printer and updater menus show the
+-- same) and is kept for that panel only.
 --
 -- This module only formats: every engine read happens in bindings/, which
 -- hand back plain tables. A binding that failed to load, or a read that came
@@ -32,6 +34,8 @@ M.loadout   = load_binding("pragmata.bindings.loadout")
 M.perks     = load_binding("pragmata.bindings.perks")
 M.inventory = load_binding("pragmata.bindings.inventory")
 M.area      = load_binding("pragmata.bindings.area_progress")
+-- Only for what an equipped weapon does (the Unit Printer's unit text).
+M.menus     = load_binding("pragmata.bindings.shelter_menus")
 
 -- Set by game_state_observer: { heal = <hp gained>, hp_max = <max at the time> }
 M.observed_kit_heal = nil
@@ -112,6 +116,12 @@ end
 -- Weapons
 -- ---------------------------------------------------------------------------
 
+-- Description text as one line: markup tags out, the game's hard line breaks
+-- and runs of spaces folded.
+local function one_line(text)
+    return (tostring(text):gsub("<[^>]*>", ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", ""))
+end
+
 local function weapon_line(w)
     local bits = { w.name }
     local tags = {}
@@ -130,21 +140,34 @@ local function weapon_line(w)
     return join(bits, " ")
 end
 
+-- What a weapon does, from the Unit Printer's unit text. Nil when the
+-- printer data does not name it (the line then goes without).
+local function weapon_description(w)
+    if M.menus == nil or M.menus.unit_description == nil then return nil end
+    local ok, text = pcall(M.menus.unit_description, w.id, w.name)
+    if ok and type(text) == "string" and text ~= "" then return one_line(text) end
+    return nil
+end
+
+-- Equipped weapons only, one per line with what each does, like the mods.
+-- Weapons owned but not equipped are left out on purpose: they cannot be
+-- used until equipped, and the train terminal's weapon menu is where that
+-- happens.
 function M.describe_weapons()
     if M.loadout == nil then return false, "weapon binding not loaded" end
     local l = read(M.loadout, "read")
     if l == nil then return true, "Weapons " .. NOT_IN_GAME .. "." end
-    if #l.weapons == 0 then return true, "No weapons are owned yet." end
-
-    local equipped, other = {}, {}
+    local lines = {}
     for _, w in ipairs(l.weapons) do
-        if w.equipped or w.main then equipped[#equipped + 1] = weapon_line(w)
-        else other[#other + 1] = weapon_line(w) end
+        if w.equipped or w.main then
+            local s = "- " .. weapon_line(w)
+            local desc = weapon_description(w)
+            if desc ~= nil then s = s .. ": " .. desc end
+            lines[#lines + 1] = s
+        end
     end
-    local parts = {}
-    if #equipped > 0 then parts[#parts + 1] = "Equipped: " .. join(equipped, "; ") .. "." end
-    if #other > 0 then parts[#parts + 1] = "Also owned: " .. join(other, "; ") .. "." end
-    return true, join(parts, " ")
+    if #lines == 0 then return true, "none equipped." end
+    return true, "equipped:\n" .. join(lines, "\n")
 end
 
 -- ---------------------------------------------------------------------------
@@ -165,14 +188,8 @@ local function perk_line(e)
     return s
 end
 
--- Description text as one line: markup tags out, the game's hard line breaks
--- and runs of spaces folded.
-local function one_line(text)
-    return (tostring(text):gsub("<[^>]*>", ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", ""))
-end
-
 -- Equipped mods only, one per line with what each does. Mods owned but not
--- equipped are left out on purpose: pragmata_mod_terminal_list covers them
+-- equipped are left out on purpose: pragmata_menu_list mod_terminal covers them
 -- at the train terminal, where they can be equipped.
 local function perk_group(title, g)
     local head = title .. " equipped"
@@ -190,11 +207,20 @@ local function perk_group(title, g)
     return join(lines, "\n")
 end
 
+-- The equipped mods (combat), and separately the hacking mods: pragmata_status
+-- can be asked for either on its own.
 function M.describe_mods()
     if M.perks == nil then return false, "mods binding not loaded" end
     local m = read(M.perks, "read_mods")
     if m == nil then return true, "Mods " .. NOT_IN_GAME .. "." end
-    local parts = { perk_group("Mods", m.mods), perk_group("Hacking mods", m.hacking_mods) }
+    return true, perk_group("Mods", m.mods)
+end
+
+function M.describe_hacking_mods()
+    if M.perks == nil then return false, "mods binding not loaded" end
+    local m = read(M.perks, "read_mods")
+    if m == nil then return true, "Hacking mods " .. NOT_IN_GAME .. "." end
+    local parts = { perk_group("Hacking mods", m.hacking_mods) }
 
     -- The equipped hacking style changes what the grid's bonus nodes do, so it
     -- belongs with the hacking mods. Read through the snake binding, which
@@ -307,10 +333,9 @@ function M.describe_inventory()
     end
     local rest = total - listed
     if rest > 0 then parts[#parts + 1] = string.format("(+%d more items)", rest) end
-    if unnamed > 0 then
-        parts[#parts + 1] = string.format("(+%d item(s) the game gives no name for)", unnamed)
-    end
-    if #parts == 0 then return true, "Only unnamed items are held." end
+    -- Items the game gives no name for are left out entirely: the peer can
+    -- do nothing with a count of things it cannot name.
+    if #parts == 0 then return true, "Nothing is held." end
     return true, "Held: " .. join(parts, " ")
 end
 
@@ -360,6 +385,91 @@ function M.describe_location()
     local a = read(M.area, "read")
     if a == nil then return true, "Location " .. NOT_IN_GAME .. "." end
     return true, M.location_text(a)
+end
+
+-- ---------------------------------------------------------------------------
+-- Status (pragmata_status)
+-- ---------------------------------------------------------------------------
+-- Health, location, weapons, equipped mods and inventory in one reply. They
+-- used to be five actions the peer had to call one after another to answer
+-- "how are we doing" (BEST_PRACTICES.md: avoid near-identical actions). One section that
+-- cannot be read says so on its own line and the others still answer; the
+-- reply fails only when none of them can be read at all.
+
+-- `key` is the value of pragmata_status's optional `category` argument.
+local STATUS_SECTIONS = {
+    { key = "health",       label = "Health",       fn = "describe_health" },
+    { key = "location",     label = "Location",     fn = "describe_location" },
+    { key = "weapons",      label = "Weapons",      fn = "describe_weapons" },
+    { key = "mods",         label = "Mods",         fn = "describe_mods" },
+    { key = "hacking_mods", label = "Hacking mods", fn = "describe_hacking_mods" },
+    { key = "inventory",    label = "Inventory",    fn = "describe_inventory" },
+}
+
+-- The category values, in order, for the action's schema enum.
+function M.status_categories()
+    local out = {}
+    for _, s in ipairs(STATUS_SECTIONS) do out[#out + 1] = s.key end
+    return out
+end
+
+-- The sections `category` asks for, in the order asked, or nil + the first
+-- value that names none.
+--
+-- The schema offers one enum value, but a peer may send several anyway: a
+-- list (["health", "weapons"]) or one comma-separated string. Both are
+-- answered, deliberately without being advertised -- the schema stays a single
+-- enum. "hacking mods" (space or dash) is taken as hacking_mods; "" or "all"
+-- anywhere means everything.
+local function wanted_sections(category)
+    local values = {}
+    if type(category) == "table" then
+        for _, v in ipairs(category) do values[#values + 1] = v end
+    elseif category ~= nil then
+        for v in tostring(category):gmatch("[^,]+") do values[#values + 1] = v end
+    end
+    local out, seen = {}, {}
+    for _, v in ipairs(values) do
+        local want = (tostring(v):lower():gsub("^%s+", ""):gsub("%s+$", ""):gsub("[%s%-]+", "_"))
+        if want == "" or want == "all" then return STATUS_SECTIONS end
+        local found = nil
+        for _, s in ipairs(STATUS_SECTIONS) do
+            if s.key == want then found = s end
+        end
+        if found == nil then return nil, v end
+        if not seen[found.key] then
+            seen[found.key] = true
+            out[#out + 1] = found
+        end
+    end
+    if #out == 0 then return STATUS_SECTIONS end
+    return out
+end
+
+-- Every section, or only the ones `category` names (see wanted_sections).
+-- An unknown category is refused with the valid ones.
+function M.describe_status(category)
+    local sections, bad = wanted_sections(category)
+    if sections == nil then
+        return false, "Unknown category '" .. tostring(bad) .. "'. Use one of: "
+            .. join(M.status_categories()) .. ", or leave it out for all of them."
+    end
+
+    local lines, answered = {}, 0
+    for _, s in ipairs(sections) do
+        local ok, success, text = pcall(M[s.fn])
+        if ok and success then
+            answered = answered + 1
+            lines[#lines + 1] = s.label .. ": " .. tostring(text)
+        else
+            lines[#lines + 1] = s.label .. ": could not be read ("
+                .. tostring(ok and text or success) .. ")."
+        end
+    end
+    if answered == 0 then
+        return false, "Nothing could be read right now:\n" .. join(lines, "\n")
+    end
+    return true, join(lines, "\n")
 end
 
 return M

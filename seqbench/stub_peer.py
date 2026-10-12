@@ -11,7 +11,7 @@ answers according to --mode:
     redblock    grid only: the first time a grid is seen, walk into a red block
                 (then answer right on the re-force); elsewhere as correct
 
-Hacking grids (pragmata_hack_plan) are answered with a shortest safe route
+Hacking grids (pragmata_enemy_hack_plan) are answered with a shortest safe route
 read off the state text (grid_texts.parse_state), clean of corrupted cells when
 possible; `wrong` turns its first move a quarter, `random` is random moves.
 
@@ -144,7 +144,7 @@ class StubPeer:
         self._seen_grids: set[str] = set()
 
     def _grid_args(self, state: str) -> dict:
-        """pragmata_hack_plan: a BFS route read off the state text alone."""
+        """pragmata_enemy_hack_plan: a BFS route read off the state text alone."""
         try:
             p = grid_texts.parse_state(state)
         except grid_texts.ParseError:
@@ -166,7 +166,7 @@ class StubPeer:
         return {"moves": route}
 
     def _answer_args(self, force: dict) -> dict:
-        name = (force.get("action_names") or ["pragmata_hack_sequence"])[0]
+        name = (force.get("action_names") or ["pragmata_enviro_hack_sequence"])[0]
         if name == grid_texts.ACTION_NAME:
             return self._grid_args(force.get("state", ""))
         buttons = sorted(decode_buttons(force.get("state", "")), key=lambda b: -b[0])
@@ -212,7 +212,7 @@ class StubPeer:
     async def _answer(self, ws, force: dict) -> None:
         args = self._answer_args(force)
         await asyncio.sleep(self._delay())
-        name = (force.get("action_names") or ["pragmata_hack_sequence"])[0]
+        name = (force.get("action_names") or ["pragmata_enviro_hack_sequence"])[0]
         await ws.send(json.dumps({"command": "action", "data": {
             "id": str(uuid.uuid4()), "name": name, "data": json.dumps(args)}}))
 

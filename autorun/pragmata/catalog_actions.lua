@@ -1,15 +1,13 @@
 -- Peer actions and pushes for the catalogs: the Data Library, the Archive, the Bot Database, the Training Simulations and
 -- the Earth Memories.
 --
---   pragmata_library_list        found entries' titles, by category
---   pragmata_library_info        full text of up to 8 entries
---   pragmata_bot_database_list   collected figures, and how many are left
---   pragmata_bot_database_info   a figure's size and description
---   pragmata_simulations_list    available simulations, cleared or not
---   pragmata_simulations_info    description, rules, rewards
---   pragmata_archive_list / _info          the pause menu's Archive (anywhere)
---   pragmata_earth_memories_list / _info   Earth Memories (Rem Replicators):
---                                owned and placed, by group
+-- Each is one `menu` value of pragmata_menu_list / pragmata_menu_info
+-- (menu_actions.lua):
+--   library          found entries' titles by category / full text of up to 8
+--   bot_database     collected figures, how many are left / size, description
+--   simulations      available simulations, cleared or not / rules, rewards
+--   archive          the pause menu's Archive (anywhere)
+--   earth_memories   Earth Memories (Rem Replicators): owned and placed, by group
 --
 -- Available anywhere in the Shelter, or while the catalog's own screen is
 -- open; the Archive everywhere, as it is in the pause menu. Simulations that
@@ -487,70 +485,32 @@ end
 
 local function unavailable() return false, "the catalog reader failed to load" end
 
-function M.register(dispatcher, gates_mod, binding)
+function M.register(menu_actions, gates_mod, binding)
     cat, gates = binding, gates_mod
     local function wrap(fn) return function(args) if cat == nil then return unavailable() end return fn(args) end end
     local function where(key) return gates.any(gates.shelter_only, gates.menu_open(key)) end
 
-    dispatcher.register("pragmata_library_list", {
-        description = "List the Data Library: for each category, how many entries are found out of the total and the titles of those found. Only available in the Shelter. Read-only.",
-        schema = { type = "object" },
-        available = where("library"),
-        handler = wrap(library_list),
-    })
-    dispatcher.register("pragmata_library_info", {
-        description = "Read the full text of up to 8 found Data Library entries by title. Only available in the Shelter. Read-only.",
-        schema = name_match.schema("Data Library entries"),
-        available = where("library"),
-        handler = wrap(library_info),
-    })
-    dispatcher.register("pragmata_bot_database_list", {
-        description = "List the Bot Database: how many figures are collected out of the total, and the names of those collected. Only available in the Shelter. Read-only.",
-        schema = { type = "object" },
-        available = where("bot_database"),
-        handler = wrap(bot_database_list),
-    })
-    dispatcher.register("pragmata_bot_database_info", {
-        description = "Details for up to 8 collected Bot Database figures by name: size and description. Only available in the Shelter. Read-only.",
-        schema = name_match.schema("Bot Database figures"),
-        available = where("bot_database"),
-        handler = wrap(bot_database_info),
-    })
-    dispatcher.register("pragmata_simulations_list", {
-        description = "List the Training Simulations that are available, with whether each is cleared, and how many are still locked. Only available in the Shelter. Read-only.",
-        schema = { type = "object" },
-        available = where("simulations"),
-        handler = wrap(simulations_list),
-    })
-    dispatcher.register("pragmata_simulations_info", {
-        description = "Details for up to 8 available Training Simulations by name: description, and (once the Training tab has been opened) time limit, special rules and rewards with whether each is earned. Only available in the Shelter. Read-only.",
-        schema = name_match.schema("Training Simulations"),
-        available = where("simulations"),
-        handler = wrap(simulations_info),
-    })
+    menu_actions.add({ key = "library", label = "the Data Library",
+                       about = "found entries by category; info gives an entry's full text; Shelter only",
+                       list = wrap(library_list), info = wrap(library_info), gate = where("library") })
     -- The Archive is in the pause menu, so it is readable anywhere.
-    dispatcher.register("pragmata_archive_list", {
-        description = "List the Archive (the pause menu's collection of documents and records): for each category, how many entries are found out of the total and the titles of those found. Read-only.",
-        schema = { type = "object" },
-        handler = wrap(archive_list),
-    })
-    dispatcher.register("pragmata_archive_info", {
-        description = "Read the full text of up to 8 found Archive entries by title. Read-only.",
-        schema = name_match.schema("Archive entries"),
-        handler = wrap(archive_info),
-    })
-    dispatcher.register("pragmata_earth_memories_list", {
-        description = "List the Earth Memories (the items shown at the Rem Replicators) by group: which are owned and which of those are placed in the Shelter, with counts per group. Only available in the Shelter. Read-only.",
-        schema = { type = "object" },
-        available = where("replicator"),
-        handler = wrap(earth_memories_list),
-    })
-    dispatcher.register("pragmata_earth_memories_info", {
-        description = "Details for up to 8 owned Earth Memories by name: group, whether placed in the Shelter, and description. Only available in the Shelter. Read-only.",
-        schema = name_match.schema("Earth Memories"),
-        available = where("replicator"),
-        handler = wrap(earth_memories_info),
-    })
+    menu_actions.add({ key = "archive", label = "the Archive",
+                       about = "the pause menu's documents and records by category; "
+                           .. "info gives the full text; anywhere",
+                       list = wrap(archive_list), info = wrap(archive_info) })
+    menu_actions.add({ key = "bot_database", label = "the Bot Database",
+                       about = "figures collected; info gives size and description; Shelter only",
+                       list = wrap(bot_database_list), info = wrap(bot_database_info),
+                       gate = where("bot_database") })
+    menu_actions.add({ key = "simulations", label = "the Training Simulations",
+                       about = "available simulations, cleared or not; info gives rules and "
+                           .. "rewards; Shelter only",
+                       list = wrap(simulations_list), info = wrap(simulations_info),
+                       gate = where("simulations") })
+    menu_actions.add({ key = "earth_memories", label = "the Earth Memories",
+                       about = "Rem Replicator items owned and placed, by group; Shelter only",
+                       list = wrap(earth_memories_list), info = wrap(earth_memories_info),
+                       gate = where("replicator") })
 
     re.on_frame(function()
         _frame = _frame + 1

@@ -9,7 +9,9 @@ open sockets, so we use newline-delimited JSON files in
     bridge_to_lua.jsonl  WS from peer -> this sidecar appends, Lua tails
 
 Wire content is opaque Neuro-SDK JSON. The sidecar does no protocol
-validation — it forwards lines verbatim in both directions.
+validation — it forwards lines verbatim in both directions. Its one line of
+its own: on every WebSocket connect it appends `actions/reregister_all` to the
+inbox, so the mod re-sends startup + its actions to the new connection.
 
 Usage:
     python pragmata_mailbox.py \\
@@ -129,6 +131,28 @@ async def _ws_reader(ws, inbox_path: Path, stop: asyncio.Event) -> None:
             logger.exception("ws_reader: inbox append failed")
 
 
+REREGISTER_LINE = '{"command":"actions/reregister_all"}'
+
+
+def _announce_connect(inbox_path: Path) -> None:
+    """Tell the mod a (new) peer connection is up.
+
+    The one place the sidecar speaks for itself. A fresh connection knows
+    none of the actions the mod registered on the old one, and the mod, which
+    sees only files, cannot tell that a reconnect happened. So every connect
+    appends the Neuro-SDK server's own `actions/reregister_all` command to the
+    inbox; the mod answers it exactly as if the server had sent it: startup,
+    then the full action list. The mod drops a stale tail of the inbox at
+    boot, so a line written before the game starts is harmless.
+    """
+    try:
+        with inbox_path.open("a", encoding="utf-8") as f:
+            f.write(REREGISTER_LINE + "\n")
+        logger.info("asked the mod to re-register its actions")
+    except Exception:
+        logger.exception("announce_connect: inbox append failed")
+
+
 async def _connect_loop(
     bridge_url: str,
     outbox: Path,
@@ -147,6 +171,7 @@ async def _connect_loop(
             try:
                 async with websockets.connect(bridge_url, ping_interval=20) as ws:
                     logger.info("connected to bridge")
+                    _announce_connect(inbox)
                     writer = asyncio.create_task(_ws_writer(ws, send_queue, stop), name="ws_writer")
                     reader = asyncio.create_task(_ws_reader(ws, inbox, stop), name="ws_reader")
                     done, pending = await asyncio.wait(

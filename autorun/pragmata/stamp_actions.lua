@@ -1,10 +1,9 @@
--- Peer action for the Stamp Club.
+-- The Stamp Club, as pragmata_menu_list { menu = "stamps" } (menu_actions.lua).
 --
---   pragmata_stamps   the board on screen: a map of stamped / open / hidden
---                     cells, each cell's reward, the line bonuses, Cabin
---                     Coins, and the other boards
+-- The board on screen: a map of stamped / open / hidden cells, each cell's
+-- reward, the line bonuses, Cabin Coins, and the other boards.
 --
--- Visible only while the Cabin hub shows the Stamp Club tab
+-- Readable only while the Cabin hub shows the Stamp Club tab
 -- (action_gates.menu_open("stamps")). Formatting only: the reads go through
 -- bindings/stamp_club.lua. Another board is reported by switching to it in
 -- game; the off-screen boards' cells are not read.
@@ -136,14 +135,15 @@ local function stamps_action()
     return true, board_text(b)
 end
 
-function M.register(dispatcher, gates, binding)
+-- pragmata_menu_list { menu = "stamps" } (menu_actions.lua). No info: the
+-- board text already carries every cell.
+function M.register(menu_actions, gates, binding)
     stamps = binding
-    dispatcher.register("pragmata_stamps", {
-        description = "Read the Stamp Club board on screen: a map of which cells are stamped, not yet stamped or hidden rewards, what each cell gives, lines completed and their bonuses, Cabin Coins held, and the other boards. Only available while the Stamp Club tab of the Cabin is open. Read-only.",
-        schema = { type = "object" },
-        available = gates.menu_open("stamps"),
-        handler = function() return stamps_action() end,
-    })
+    menu_actions.add({ key = "stamps", label = "the Stamp Club",
+                       about = "the board on screen: stamped, open and hidden cells, rewards, "
+                           .. "line bonuses, Cabin Coins; only while the Cabin's Stamp Club tab is open",
+                       list = function() return stamps_action() end,
+                       gate = gates.menu_open("stamps") })
 end
 
 -- For Pragmata State Debug: the text the peer would get.

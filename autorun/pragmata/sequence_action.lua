@@ -1,4 +1,4 @@
--- pragmata_hack_sequence's registration, and switching its group at runtime.
+-- pragmata_enviro_hack_sequence's registration, and switching its group at runtime.
 --
 -- The sequence hack is shown to the peer as one of five tested groups
 -- (mod_config.puzzle_sequence_group; util/puzzle_render.lua has the table). The
@@ -26,7 +26,7 @@ local render = require("pragmata.util.puzzle_render")
 
 local M = {}
 
-M.ACTION_NAME = "pragmata_hack_sequence"
+M.ACTION_NAME = "pragmata_enviro_hack_sequence"
 
 -- The configured group, as it was at boot, so the panel can say whether the
 -- active one came from the config or from a switch.
@@ -35,7 +35,12 @@ M.configured_group = render.sequence_group().number
 -- Description and schema for the active group.
 function M.definition()
     return {
-        description = render.buttons_description(),
+        -- The group text is an experiment (puzzle_render); only the opening
+        -- says which kind of hack this is, to tell it from the enemy grid.
+        description = "Environment hack (a door, switch or elevator). " .. render.buttons_description(),
+        -- mod_config.action_descriptions = "short": the group's description
+        -- above then rides on the force as its rules (dispatcher.lua).
+        short = "Solve the active sequence hack, an environment hack (a door, switch or elevator): answer with the presses the state field asks for.",
         schema = render.buttons_schema(),
     }
 end

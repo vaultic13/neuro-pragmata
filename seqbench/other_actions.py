@@ -18,7 +18,7 @@ DIRECTIONS = ["up", "down", "left", "right"]
 HACK_PLAN = grid_texts.ACTION_DEF
 
 HACK_ROTATE = {
-    "name": "pragmata_hack_rotate",
+    "name": "pragmata_enviro_hack_rotate",
     "description": (
         "Solve the active circuit hack. One to four connectors sit around a centre, "
         "each of them one circuit to close. A circuit is a line running in from the "

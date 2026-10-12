@@ -38,7 +38,7 @@ local render = require("pragmata.util.puzzle_render")
 local M = {}
 
 M.kind = "buttons"
-M.action_name = "pragmata_hack_sequence"
+M.action_name = "pragmata_enviro_hack_sequence"
 -- A function rather than a string: the wording follows the active group, and
 -- the group can be switched for the session from the debug panel.
 M.force_query = render.buttons_force_query
@@ -552,7 +552,10 @@ end
 
 function M.set_plan(id, order, resolve)
     local rec = store.by_id(id)
-    if rec == nil then return 0, false end
+    if rec == nil then
+        if resolve ~= nil then pcall(resolve, true, "Nothing was done: that hack is no longer there.") end
+        return 0, false
+    end
 
     local steps = {}
     local form = render.buttons_letter_form()
@@ -570,9 +573,7 @@ function M.set_plan(id, order, resolve)
             -- the one the peer sees; the handler's own "discarded" is dropped.
             log.info("puzzle_buttons: letter answer for puzzle " .. tostring(id)
                   .. " refused -- " .. why)
-            if resolve ~= nil then
-                pcall(resolve, false, "Nothing was pressed: " .. why .. ".")
-            end
+            P.refuse(rec, resolve, "Nothing was pressed: " .. why .. ".")
             return 0, false
         end
         steps = sorted
@@ -581,8 +582,20 @@ function M.set_plan(id, order, resolve)
         -- No entries at all: nothing to press, which the plan layer reports.
         steps = {}
     else
-        for _, d in ipairs(order or {}) do
-            if input.is_direction(d) then steps[#steps + 1] = d end
+        -- A bad entry refuses the whole answer: skipping it would shift every
+        -- later press onto the wrong step of the sequence.
+        local bad = {}
+        for i, d in ipairs(order or {}) do
+            if input.is_direction(d) then
+                steps[#steps + 1] = d
+            else
+                bad[#bad + 1] = string.format("entry %d (%s)", i, tostring(d))
+            end
+        end
+        if #bad > 0 then
+            P.refuse(rec, resolve, "Nothing was pressed: " .. table.concat(bad, ", ")
+                .. " is not a direction. Each entry must be one of up, down, left, right.")
+            return 0, false
         end
     end
 

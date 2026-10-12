@@ -44,6 +44,13 @@ end
 local POLL_INTERVAL = 12  -- ~5 Hz at 60 fps; world-state changes are slow
 local _frame = 0
 
+-- Combat must read the same for this many polls (~2 s) before it counts as a
+-- change. A flag that flickers at an encounter's edges would otherwise send
+-- "Combat started." / "Combat ended." pairs the peer can only be confused by.
+local COMBAT_STABLE_POLLS = 10
+local _combat_seen = nil        -- last raw reading
+local _combat_polls = 0         -- polls it has read that way
+
 re.on_frame(function()
     _frame = _frame + 1
     if (_frame % POLL_INTERVAL) ~= 0 then return end
@@ -75,14 +82,22 @@ re.on_frame(function()
     end
 
     if combat ~= nil then
-        local in_combat = safe_call(combat.is_in_combat)
-        combat_track(in_combat, function(now)
+        local raw = safe_call(combat.is_in_combat)
+        if raw == _combat_seen then
+            _combat_polls = _combat_polls + 1
+        else
+            _combat_seen, _combat_polls = raw, 1
+        end
+        -- Unread (nil) or not yet stable: report nothing and keep the last.
+        local in_combat = nil
+        if raw ~= nil and _combat_polls >= COMBAT_STABLE_POLLS then in_combat = raw end
+        if in_combat ~= nil then combat_track(in_combat, function(now)
             if now then
                 emit.narrative("Combat started.")
             else
                 emit.narrative("Combat ended.")
             end
-        end)
+        end) end
     end
 end)
 

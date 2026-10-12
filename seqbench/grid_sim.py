@@ -1,4 +1,4 @@
-"""Play a pragmata_hack_plan reply on a puzzle, the way the game and mod would.
+"""Play a pragmata_enemy_hack_plan reply on a puzzle, the way the game and mod would.
 
 The rules are the mod's as of 2026-10-08 (bindings/puzzle_snake.lua set_plan /
 tick_plan / the settle machine) on top of what the game does with each cell:

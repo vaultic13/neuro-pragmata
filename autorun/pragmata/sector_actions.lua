@@ -1,13 +1,13 @@
--- Peer actions for the tram terminal's sector selection:
+-- The tram terminal's sector selection, as pragmata_menu_list / _info
+-- { menu = "sectors" } (menu_actions.lua):
 --
---   pragmata_sectors_list   every sector with its completion %, and each
---                           location (area) in it with the stations that
---                           lead there and its collected count
---   pragmata_sectors_info   up to 8 locations, stations or sectors: which
---                           sector, the completion, and every kind of
---                           collectible present there with how many are found
+--   list   every sector with its completion %, and each location (area) in
+--          it with the stations that lead there and its collected count
+--   info   up to 8 locations, stations or sectors: which sector, the
+--          completion, and every kind of collectible present there with how
+--          many are found
 --
--- Shown only while the sector selection screen is open
+-- Readable only while the sector selection screen is open
 -- (action_gates.menu_open("train_sector")): the counts are read from that
 -- screen, which holds every sector at once. Stations not reached yet are only
 -- counted. Formatting only: the reads go through bindings/sectors.lua.
@@ -182,20 +182,16 @@ end
 -- Registration (called once from pragmata_main.lua at startup)
 -- ---------------------------------------------------------------------------
 
-function M.register(dispatcher, gates, binding)
+-- pragmata_menu_list / pragmata_menu_info { menu = "sectors" } (menu_actions.lua).
+function M.register(menu_actions, gates, binding)
     sectors = binding
-    dispatcher.register("pragmata_sectors_list", {
-        description = "List the tram's sectors with each one's completion percentage, and every location in them (with the stations that lead there) and how many of its collectibles are collected. Only available while the tram terminal's sector selection is open. Read-only.",
-        schema = { type = "object" },
-        available = gates.menu_open("train_sector"),
-        handler = function() return list_action() end,
-    })
-    dispatcher.register("pragmata_sectors_info", {
-        description = "Details for up to 8 locations, stations or sectors by name: which sector a location is in, its completion, and every kind of collectible present there with how many are found. Only available while the tram terminal's sector selection is open. Read-only.",
-        schema = name_match.schema("locations, stations or sectors"),
-        available = gates.menu_open("train_sector"),
-        handler = function(args) return info_action(args) end,
-    })
+    menu_actions.add({ key = "sectors", label = "the tram's sector selection",
+                       about = "sectors with completion %, their locations and stations, "
+                           .. "collectibles found; info takes locations, stations or sectors; "
+                           .. "only while that screen is open",
+                       list = function() return list_action() end,
+                       info = function(args) return info_action(args) end,
+                       gate = gates.menu_open("train_sector") })
 end
 
 -- For Pragmata State Debug: the exact peer text of the list action, and of
@@ -211,7 +207,7 @@ function M.debug_text()
         local loc = locations(s)[1]
         if loc ~= nil then names[2] = loc.name end
         local ok_i, success_i, text_i = pcall(info_action, { names = names })
-        out = out .. "\n----- pragmata_sectors_info " .. join(names, " + ") .. "\n"
+        out = out .. "\n----- pragmata_menu_info sectors " .. join(names, " + ") .. "\n"
             .. (ok_i and string.format("[%s] %s", tostring(success_i), tostring(text_i))
                      or ("RAISED: " .. tostring(success_i)))
     end

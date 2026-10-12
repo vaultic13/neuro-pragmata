@@ -14,7 +14,7 @@ Default peer URL is `ws://127.0.0.1:8000` matching neuro-pragmata's README.
 Each trial:
     1. (Re)send startup + actions/register on connect.
     2. Send a context message containing the rendered grid.
-    3. Send actions/force for `pragmata_hack_plan` + `pragmata_hack_route`.
+    3. Send actions/force for `pragmata_enemy_hack_plan` + `pragmata_hack_route`.
     4. Wait for an `action` response (with timeout).
     5. Validate the proposed moves against the grid via solver.validate_plan.
     6. Send action/result back with success + diagnostic message.
@@ -43,7 +43,7 @@ from .solver import ValidationResult, solve, validate_plan
 
 GAME_NAME = "Pragmata"
 
-ACTION_HACK_PLAN = "pragmata_hack_plan"
+ACTION_HACK_PLAN = "pragmata_enemy_hack_plan"
 ACTION_HACK_ROUTE = "pragmata_hack_route"
 
 _HACK_PLAN_DESCRIPTION = (
@@ -278,12 +278,12 @@ class ModMock:
             query = (
                 "Hacking grid is live. Read the cursor (@) and Goal (G) "
                 "coordinates from the state above. Use the Adjacency block "
-                "to confirm your first move is legal. Call pragmata_hack_plan "
+                "to confirm your first move is legal. Call pragmata_enemy_hack_plan "
                 "with the move list."
             )
         else:
             query = (
-                "Hacking grid is live. Plan via pragmata_hack_plan (preferred) "
+                "Hacking grid is live. Plan via pragmata_enemy_hack_plan (preferred) "
                 "or pragmata_hack_route as a fallback."
             )
 

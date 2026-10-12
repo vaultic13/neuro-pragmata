@@ -27,7 +27,7 @@ local function send_context(message, lane, silent)
     if message == nil or message == "" then return end
     local data = { message = message }
     if silent ~= false then data.silent = true end
-    if lane then data.lane = lane end
+    --if lane then data.lane = lane end
     mailbox.send({
         command = "context",
         game = GAME,

@@ -579,25 +579,25 @@ function M.buttons_force_query()
     local form = M.buttons_letter_form()
     if form ~= nil then
         return "A sequence hack is live. Read each lettered button off the drawing in the "
-            .. "state and call pragmata_hack_sequence with "
+            .. "state and call pragmata_enviro_hack_sequence with "
             .. (form == "both" and "its direction and distance" or "its direction")
             .. " for every letter."
     end
     if M.buttons_as_cross() then
         return "A sequence hack is live. Read the directions off the drawing in the "
-            .. "state and call pragmata_hack_sequence with them in order."
+            .. "state and call pragmata_enviro_hack_sequence with them in order."
     end
     if not (M.buttons_shuffle() or M.buttons_compass()) then
-        return "A sequence hack is live. Call pragmata_hack_sequence with the "
+        return "A sequence hack is live. Call pragmata_enviro_hack_sequence with the "
             .. "directions in the order shown."
     end
-    return "A sequence hack is live. Call pragmata_hack_sequence with the directions "
+    return "A sequence hack is live. Call pragmata_enviro_hack_sequence with the directions "
         .. (M.buttons_shuffle() and "sorted by their numbers" or "in the order shown")
         .. (M.buttons_compass() and ", translated from compass points to up/down/left/right" or "")
         .. "."
 end
 
--- pragmata_hack_sequence's action description, for the active group.
+-- pragmata_enviro_hack_sequence's action description, for the active group.
 function M.buttons_description()
     local form = M.buttons_letter_form()
     local middle
@@ -642,7 +642,7 @@ function M.buttons_description()
         .. "on a frame the game will accept."
 end
 
--- pragmata_hack_sequence's schema, for the active group.
+-- pragmata_enviro_hack_sequence's schema, for the active group.
 function M.buttons_schema()
     local form = M.buttons_letter_form()
     local field = M.buttons_answer_field()

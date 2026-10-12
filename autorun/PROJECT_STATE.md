@@ -31,6 +31,7 @@ autorun/
     bridge_mailbox.lua       JSONL transport under reframework/data/
     mod_config.lua           every user-tunable setting, commented in place
     ability_actions.lua      deferred confirmation windows for the 3 abilities
+    scan_memory.lua          last scan's time / place: scan again or use cache
     ability_state.lua        gauge / readiness / unlock / scan-result emitters
     world_state.lua          scene, checkpoint, combat edges
     autonomy.lua             optional in-combat ability hints
@@ -41,10 +42,13 @@ autorun/
     abilities_debug.lua      ImGui panel + the F6/F7/F8 manual triggers
     hacking_debug.lua        ImGui panel + the only remaining file dump
     puzzle_debug.lua         ImGui panel: sequence-hack group switch, peer view
-    game_state.lua           the six read-only state actions (health, weapons,
-                             mods, upgrades, inventory, location)
+    game_state.lua           the read-only state actions: pragmata_status
+                             (health, location, weapons, mods, inventory);
+                             describe_upgrades for State Debug only
     game_state_observer.lua  area / low-HP / equip context pushes
-    action_gates.lua         which actions are offered now (Shelter, open menus)
+    action_gates.lua         which actions are offered now (Shelter, prompts)
+    menu_actions.lua         pragmata_menu_list / _info: every menu below,
+                             by a `menu` enum, always registered
     shelter_menu_actions.lua Firmware Updater, Unit Printer, train mod menu
     stamp_actions.lua        the Stamp Club board
     catalog_actions.lua      Data Library, Archive, Bot Database, Training
@@ -61,11 +65,16 @@ autorun/
 Read-only actions about the player and the game's menus, each answering from
 live game data. Their wire format and examples are in `ACTIONS.md`.
 
-- **Gating.** An action can carry an `available` predicate; `action_gates`
+- **Two stable actions.** Every menu and catalog is a `menu` value of
+  `pragmata_menu_list` / `pragmata_menu_info` (`menu_actions.lua`), registered
+  once and never hidden: the Shelter's menus open and close constantly, and
+  every change to the action set slows the peer down (BEST_PRACTICES.md). Each
+  menu keeps its gate (`mod_config.menu_gui` maps menus to screen codes), and a
+  call while it is closed is refused with the gate's reason. Until 2026-10-11
+  these were nineteen actions, each announced only while its screen was open.
+- **Gating** remains for the abilities and hacking actions: `action_gates`
   polls about five times a second and the dispatcher re-announces the set when
-  it changes. In the Shelter the abilities and hacking actions go away and the
-  catalog actions appear; a menu's actions exist only while its screen is open
-  (`mod_config.menu_gui` maps menus to screen codes).
+  it changes. In the Shelter the abilities and hacking actions go away.
 - **Menus read their own screen** (Firmware Updater, Unit Printer, train mod
   menu, Stamp Club, tram sector selection), so values match what is shown. The
   printer rebuilds the tabs not on screen from the same data.
@@ -207,7 +216,17 @@ them any more.
 
 ## Scan reporting
 
-A scan produces one narrative line naming what the engine can actually place:
+`pragmata_scan` is both the scan and the re-read. `scan_memory.lua` decides:
+a new scan only once the last one (the peer's or the player's) is
+`scan_cache_seconds` (7) old; otherwise the held results, labelled as cached
+with their age. A "Hugh has moved 5 m" condition was tried and removed on
+2026-10-12: the position read through handle `_Core` -> `_Updater` ->
+GameObject -> Transform never returned anything. A new scan's result waits for the list to
+settle and carries the findings, and that scan is left out of the context
+stream.
+
+A player-made scan produces one narrative line naming what the engine can
+actually place:
 
 ```
 Diana scanned: 3x escape hatches (8 / 44 / 97 m), 2x Upgrade Components (34 / 67 m).
@@ -317,10 +336,10 @@ one observer able to drive all five.
 
 | Family | Types | Mechanic | Action |
 |---|---|---|---|
-| Circuit | `PuzzleCircuit` (+ `WithTimer`, `Advanced`, level reskins) | rotate 1-3 pieces until each reaches the centre | `pragmata_hack_rotate` |
-| Buttons | `PuzzleButtonTimingNoRotate`, `PuzzleButtonTiming` | press the directions in order, with or without a timing dial | `pragmata_hack_sequence` |
-| SlidePipe | `PuzzleSlidePipe` | slide tiles to complete a pipe run | `pragmata_hack_slide` |
-| ThroughThePath | `PuzzleThroughThePath` | turn columns to open a route | `pragmata_hack_path` |
+| Circuit | `PuzzleCircuit` (+ `WithTimer`, `Advanced`, level reskins) | rotate 1-3 pieces until each reaches the centre | `pragmata_enviro_hack_rotate` |
+| Buttons | `PuzzleButtonTimingNoRotate`, `PuzzleButtonTiming` | press the directions in order, with or without a timing dial | `pragmata_enviro_hack_sequence` |
+| SlidePipe | `PuzzleSlidePipe` | slide tiles to complete a pipe run | `pragmata_enviro_hack_slide` |
+| ThroughThePath | `PuzzleThroughThePath` | turn columns to open a route | `pragmata_enviro_hack_path` |
 
 Findings worth keeping:
 
@@ -391,6 +410,25 @@ the record sweep already covers a puzzle that is genuinely gone.
 `bindings/player_status.lua` had reflected these flags for a long time; nothing
 had ever read them.
 
+### Failures and the server's retry
+
+A `success: false` result to a forced action is retried by the Neuro server
+on its own, so the observer does not send a second force beside it. A failure
+on a hack that is still live (refused, reset, stopped short, grid changed) is
+held until the binding would ask again (`needs_force`), then sent with the
+current render appended and the force slot kept. The mod forces afresh only
+after `force_retry_limit` failures in a row, no retry reply within
+`force_retry_wait_seconds`, or a puzzle that does not settle within
+`force_retry_settle_seconds` (then the failure goes out as `success: true`,
+"nothing to retry"). Early refusals in a binding's `set_plan` go through
+`puzzle_plan.refuse`, which answers the call's own `resolve` and clears the
+snapshot so the retry carries a board.
+
+Every deferred result is answered within `deferred_result_max_seconds` (12):
+past it the dispatcher replies "accepted, still running" and the real outcome
+follows as context. A plan parked on a target the player looked away from is
+answered that way at once.
+
 ## Context emitted
 
 All context messages are sent with `silent: true`.
@@ -399,10 +437,9 @@ All context messages are sent with `silent: true`.
 |---|---|
 | Subtitle line | `Dialogue: [Conversation] Diana says "Let's finish this!"` |
 | Collectible document opened | `Collectible document text: "…"` |
-| Gauge crosses 25/50/75/100% upward | `Hacking gauge: 75%` |
 | Overdrive becomes ready | `Overdrive is ready.` |
 | Auto-Hack upgrade unlocks | `Auto-Hack upgrade is now available.` |
-| Scan results resolve | `Diana scanned: 1x escape hatch (32 m), 1x Upgrade Components (49 m).` |
+| Scan results resolve (scans the player makes) | `Diana scanned: 1x escape hatch (32 m), 1x Upgrade Components (49 m).` |
 | Scene / area change | `Hugh and Diana entered a new area.` |
 | Checkpoint | `Checkpoint reached.` |
 | Combat edges | `Combat started.` / `Combat ended.` |
@@ -459,7 +496,7 @@ demand. The only other file the mod writes is State Debug's F11
 **Pragmata Puzzle Debug** is deliberately small. Its top section switches the
 sequence hack's group (`mod_config.puzzle_sequence_group`) for the session: one
 button per group, the active one marked, and the result of the last switch. A
-switch re-registers `pragmata_hack_sequence` with the peer and is refused while a
+switch re-registers `pragmata_enviro_hack_sequence` with the peer and is refused while a
 sequence force is waiting for its answer. Below that it shows which puzzle is
 live and whether a force is outstanding, a **peer view** with the exact state
 text the peer is sent (kept after aim is released, labelled with its age), and

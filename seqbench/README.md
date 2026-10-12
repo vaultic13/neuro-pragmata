@@ -3,9 +3,9 @@
 A Tk tool that measures how well an AI peer handles the mod's hacking puzzles,
 in batches, without the game. Two benches, picked under **Bench** at the top:
 
-- **Sequence hack** (`pragmata_hack_sequence`): the prompt versions and the
+- **Sequence hack** (`pragmata_enviro_hack_sequence`): the prompt versions and the
   mod's five groups. Most of this README.
-- **Enemy grid** (`pragmata_hack_plan`): the enemy hacking grid with today's
+- **Enemy grid** (`pragmata_enemy_hack_plan`): the enemy hacking grid with today's
   modifiers (red blocks, corruption), big and non-square grids, mid-hack
   re-forces and the final boss's timed stages. See
   [Enemy grid bench](#enemy-grid-bench).
@@ -44,8 +44,8 @@ the other, so port a change on purpose.
 For each version:
 
 1. `actions/unregister` the previous registration, `actions/register` this
-   version's `pragmata_hack_sequence` — plus fixed copies of
-   `pragmata_hack_plan` / `pragmata_hack_rotate` when **Register plan + rotate
+   version's `pragmata_enviro_hack_sequence` — plus fixed copies of
+   `pragmata_enemy_hack_plan` / `pragmata_enviro_hack_rotate` when **Register plan + rotate
    copies** is on, so apitest's catalogue (prompt size, cache prefix) matches
    the game.
 2. An unscored **warm-up** force, if on. apitest's first call of a session
@@ -202,7 +202,7 @@ expected answer in the same shape and, for letters, each misread
 
 Tests the enemy hacking grid the way the mod plays it, as of 2026-10-08.
 Nothing is imported from `autorun/`: `grid_texts.py` is a Python port of
-`util/snake_render.lua` (plus the force query, the `pragmata_hack_plan`
+`util/snake_render.lua` (plus the force query, the `pragmata_enemy_hack_plan`
 registration and the mod's tool-result strings). The selftest proves the port
 byte for byte against every recorded force. If the mod's render changes, port
 the change on purpose.

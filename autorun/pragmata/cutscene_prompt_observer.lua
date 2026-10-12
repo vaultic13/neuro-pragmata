@@ -245,6 +245,15 @@ re.on_frame(function()
     end
 end)
 
+-- A failed press needs nothing here: the result is `success: false`, the
+-- server retries the force on its own, and the slot stays held because
+-- note_peer_press runs only on a press that went through. A new connection,
+-- though, never saw the old force, so the prompt is offered again.
+dispatcher.on_reregister(function()
+    _inflight = nil
+    if _offered ~= nil and not _offered.peer_pressed then _offered.forced = false end
+end)
+
 -- ---------------------------------------------------------------------------
 -- Public
 -- ---------------------------------------------------------------------------

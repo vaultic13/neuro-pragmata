@@ -5,7 +5,7 @@
 The bench plays the mod: it dials the listening peer, registers the hack
 action in one version's wording, forces a set of puzzles, and times and scores
 each reply. Two benches, picked at the top: the sequence hack
-(pragmata_hack_sequence) and the enemy hacking grid (pragmata_hack_plan). See
+(pragmata_enviro_hack_sequence) and the enemy hacking grid (pragmata_enemy_hack_plan). See
 README.md.
 """
 from __future__ import annotations

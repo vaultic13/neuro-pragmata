@@ -4,7 +4,7 @@ A REFramework Lua mod for [Pragmata](https://www.capcom-games.com/pragmata/)
 that exposes Diana's abilities and the game's world state to **Neuro**, an AI
 peer, over a standard Neuro-SDK WebSocket connection. Neuro can perform Diana's
 actions (scan, auto-hack, overdrive), route the hacking minigame, and receive
-context updates (dialogue, gauge state, scene transitions, combat state).
+context updates (dialogue, Overdrive readiness, scene transitions, combat state).
 
 > **Status: working, actively developed.** All three of Diana's abilities are
 > now runtime-confirmed in-game, as are the hacking integration and dialogue
@@ -16,32 +16,18 @@ context updates (dialogue, gauge state, scene transitions, combat state).
 
 | Action | Arguments | Effect |
 |---|---|---|
-| `pragmata_ping` | none | Sanity check; returns `pong`. |
-| `pragmata_scan` | none | Diana scans the environment. |
-| `pragmata_scan_results` | none | Re-read the last scan. Read-only, costs nothing. |
-| `pragmata_health` | none | HP, repair kits carried, HP per kit. Read-only. |
-| `pragmata_weapons` | none | Weapons owned / equipped, level, ammo. Read-only. |
-| `pragmata_mods` | none | Equipped mods and hacking mods, and what each does. Read-only. |
-| `pragmata_upgrades` | none | Firmware and Unit Printer upgrade levels. Read-only. |
-| `pragmata_inventory` | none | Currency, collectibles and materials held. Read-only. |
-| `pragmata_location` | none | Current area and what is left to collect there. Read-only. |
-| `pragmata_firmware_list` / `_info` | none / `names` | Firmware Updater units, levels, costs, stat changes. Only while that menu is open. Read-only. |
-| `pragmata_printer_list` / `_info` | none / `names` | Every Unit Printer unit on every tab: printed or not, level, cost, description. Only while that menu is open. Read-only. |
-| `pragmata_mod_terminal_list` / `_info` | none / `names` | The train terminal's mod menu: capacity, equipped mods, owned mods, what each does. Only while that menu is open. Read-only. |
-| `pragmata_stamps` | none | The Stamp Club board on screen: which cells are stamped, what each gives, lines and bonuses, Cabin Coins, other boards. Only while the Stamp Club tab is open. Read-only. |
-| `pragmata_library_list` / `_info` | none / `names` | The Data Library: entries found per category, and their full text. Only in the Shelter. Read-only. |
-| `pragmata_archive_list` / `_info` | none / `names` | The pause menu's Archive: documents found per category, and their full text. Anywhere. Read-only. |
-| `pragmata_bot_database_list` / `_info` | none / `names` | Bot Database figures collected, with size and description. Only in the Shelter. Read-only. |
-| `pragmata_simulations_list` / `_info` | none / `names` | Training Simulations available and cleared; description, time limit, rules, rewards. Only in the Shelter. Read-only. |
-| `pragmata_earth_memories_list` / `_info` | none / `names` | Earth Memories (the Rem Replicators) by group: owned, placed in the Shelter, description. Only in the Shelter. Read-only. |
-| `pragmata_sectors_list` / `_info` | none / `names` | The tram's sectors: completion per sector and location, and each collectible kind found / present. Only while the sector selection is open. Read-only. |
-| `pragmata_auto_hack` | none | Auto-hacks the locked-on target (needs the Auto-Hack upgrade). |
+| `pragmata_ping` | none | Sanity check; returns `pong`. Only with `mod_config.debug_actions`. |
+| `pragmata_scan` | none | Diana scans and reports what she found, with distances. Within 7 s of the last scan it answers from that scan instead and says so. |
+| `pragmata_status` | `category` (optional) | Health, location, weapons, mods, hacking mods and inventory in one reply, or just one of them. Read-only. |
+| `pragmata_menu_list` | `menu` | Read a Shelter menu or catalog: the Firmware Updater, Unit Printer, train mod menu, Stamp Club or tram sector selection (while open), the Data Library, Bot Database, Training Simulations or Earth Memories (in the Shelter), or the Archive (anywhere). Always registered; says why when a menu cannot be read. Read-only. |
+| `pragmata_menu_info` | `menu`, `names` | Detail for up to 8 entries of one of those. Read-only. |
+| `pragmata_enemy_auto_hack` | none | Auto-hacks the locked-on target (needs the Auto-Hack upgrade). |
 | `pragmata_overdrive` | none | Fires Overdrive (needs 100 gauge points). |
-| `pragmata_hack_plan` | `moves` | Plans a path through the active hacking grid. Auto-forced on grid-start. |
-| `pragmata_hack_rotate` | `rotations` | Solves a circuit hack — turn pieces until each connects to the centre. Auto-forced. |
-| `pragmata_hack_sequence` | `buttons` or `order` | Solves a sequence hack — each lettered button read off a picture of the puzzle, or the directions from a list, depending on the sequence group. Auto-forced. |
-| `pragmata_hack_slide` | `moves` | Solves a pipe hack — slide tiles to complete the run. Auto-forced. Off by default. |
-| `pragmata_hack_path` | `rotations` | Solves a path hack — turn columns to open a route. Auto-forced. Off by default. |
+| `pragmata_enemy_hack_plan` | `moves` | Plans a path through the active hacking grid. Auto-forced on grid-start. |
+| `pragmata_enviro_hack_rotate` | `rotations` | Solves a circuit hack — turn pieces until each connects to the centre. Auto-forced. |
+| `pragmata_enviro_hack_sequence` | `buttons` or `order` | Solves a sequence hack — each lettered button read off a picture of the puzzle, or the directions from a list, depending on the sequence group. Auto-forced. |
+| `pragmata_enviro_hack_slide` | `moves` | Solves a pipe hack — slide tiles to complete the run. Auto-forced. Off by default. |
+| `pragmata_enviro_hack_path` | `rotations` | Solves a path hack — turn columns to open a route. Auto-forced. Off by default. |
 
 The last five are the hacking minigames. **Only one is ever offered at a time** —
 the force names exactly the action matching the puzzle on screen, so Neuro never
@@ -50,7 +36,7 @@ has to work out which kind it is looking at.
 **Diana's three abilities take no arguments.** There is nothing to choose: Scan
 is a single input command, Overdrive is a single driver call, and the engine's
 Auto-Hack entry point has no target parameter, so the game's lock-on decides the
-target. `pragmata_hack_plan` is the only action with arguments, because it is a
+target. `pragmata_enemy_hack_plan` is the only action with arguments, because it is a
 reply to a grid the mod sent.
 
 **Success means the game acted.** All three abilities use deferred results — the
@@ -62,7 +48,7 @@ the window.
 ```
 pragmata_scan       -> true   "scan started (request-specific progression observed)"
 pragmata_overdrive  -> true   "the game started Overdrive (canDeathblow cleared)"
-pragmata_auto_hack  -> false  "no valid hack target (nothing is locked on)"
+pragmata_enemy_auto_hack  -> false  "no valid hack target (nothing is locked on)"
 ```
 
 ### Actions come and go
@@ -98,9 +84,9 @@ All sent as `context` messages with `silent: true`:
   `Dialogue: [Conversation] Diana says "Let's finish this!"`
 - Collectible-document text, when a document is opened (needs
   `mod_config.archive_gui_path` set — see [Configuration](#configuration))
-- `Hacking gauge: 75%` on upward crossings of 25 / 50 / 75 / 100%
 - `Overdrive is ready.` · `Auto-Hack upgrade is now available.`
-- `Diana scanned: …` result summaries
+- `Diana scanned: …` result summaries, for scans the player makes (a scan the
+  peer asks for returns its findings as the action result)
 - `Hacking grid started.` · `Hack succeeded.` · `Hack failed.`
 - `Hugh and Diana entered a new area.` — with the area's name, its map
   completion % and what is left to collect there, while the area summary is on
@@ -310,7 +296,7 @@ The enemy grid works like this:
 
 1. The mod observes the active puzzle's start edge and, the moment a grid
    appears, sends an `actions/force` with the rendered grid as the `state` field
-   and `pragmata_hack_plan` as the only allowed action. Only one force may be
+   and `pragmata_enemy_hack_plan` as the only allowed action. Only one force may be
    outstanding — across all five kinds — so replies are never ambiguous.
 2. Neuro returns a list of cardinal moves. The render highlights **bonus
    nodes** — cells that do more damage and make the hack last longer — and asks
@@ -349,7 +335,7 @@ Two things are worth calling out:
   works. It writes no controller and creates no OS-visible device, and because
   the engine runs its own input chain the puzzle completes for real.
 
-`pragmata_hack_slide` and `pragmata_hack_path` cover two families that have not
+`pragmata_enviro_hack_slide` and `pragmata_enviro_hack_path` cover two families that have not
 yet been seen in a live capture, so their readers are written from the type dump
 and are **off by default** (`mod_config.puzzle_kinds`). With them off those
 puzzles are still detected and narrated, just not offered to Neuro.
@@ -362,7 +348,7 @@ aiming. The second catches a hack finishing after the player has already turned
 away — which used to mean the outcome was never reported at all.
 
 Full schemas, the glyph table, and integration notes are in
-[ACTIONS.md](ACTIONS.md#pragmata_hack_plan).
+[ACTIONS.md](ACTIONS.md#pragmata_enemy_hack_plan).
 
 ## Files referencing game internals
 
@@ -410,7 +396,7 @@ resolves.
   `?`.
 - **Mission/objective state** is not yet bound.
 - **Two puzzle families are unverified.** The pipe and path hacks
-  (`pragmata_hack_slide`, `pragmata_hack_path`) are written from the type dump
+  (`pragmata_enviro_hack_slide`, `pragmata_enviro_hack_path`) are written from the type dump
   and have never been exercised against a real one; they ship disabled.
 
 ## License

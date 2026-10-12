@@ -164,7 +164,7 @@ def test_texts() -> None:
     check("letters query names the form",
           texts.force_query(cfg_of(letters="dist")).endswith("with its distance for every letter."))
     check("list twists query", texts.force_query(cfg_of(render="list", compass=True, shuffle=True))
-          == "A sequence hack is live. Call pragmata_hack_sequence with the directions sorted by their "
+          == "A sequence hack is live. Call pragmata_enviro_hack_sequence with the directions sorted by their "
              "numbers, translated from compass points to up/down/left/right.")
 
 
@@ -189,7 +189,7 @@ def test_judge() -> None:
           j(cfg_of(render="list", shuffle=True), {"order": seq}).outcome == "solved")
     check("wrong length", j(cross, {"order": ["up"]}).message
           == "The sequence needs exactly 3 presses but the plan had 1; nothing was pressed.")
-    check("wrong action", j(cross, {"order": seq}, "pragmata_hack_plan").outcome == "wrong_action")
+    check("wrong action", j(cross, {"order": seq}, "pragmata_enemy_hack_plan").outcome == "wrong_action")
     check("bad JSON", scoring.judge(cross, seq, texts.ACTION_NAME, "{nope").outcome == "bad_args")
 
     both, side, dist = cfg_of(letters="both"), cfg_of(letters="side"), cfg_of(letters="dist")
@@ -388,7 +388,7 @@ def test_e2e() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Enemy hacking grid (pragmata_hack_plan)
+# Enemy hacking grid (pragmata_enemy_hack_plan)
 # ---------------------------------------------------------------------------
 
 def _grid(rows: list[str], cursor=(0, 0), goal=None, **kw) -> gt.GridPuzzle:

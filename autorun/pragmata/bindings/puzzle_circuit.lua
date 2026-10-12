@@ -43,8 +43,8 @@ local config = require("pragmata.mod_config")
 local M = {}
 
 M.kind = "circuit"
-M.action_name = "pragmata_hack_rotate"
-M.force_query = "A circuit hack is live. Call pragmata_hack_rotate to give each "
+M.action_name = "pragmata_enviro_hack_rotate"
+M.force_query = "A circuit hack is live. Call pragmata_enviro_hack_rotate to give each "
              .. "connector the presses its line asks for."
 
 local P = plan_lib.new({ kind = "circuit" })
@@ -1733,7 +1733,7 @@ function M.set_plan(id, rotations, resolve)
     end
 
     if rejected ~= nil then
-        P.resolve(rec, false, "Nothing was rotated: " .. rejected .. ".")
+        P.refuse(rec, resolve, "Nothing was rotated: " .. rejected .. ".")
         return 0, false
     end
 
@@ -1746,13 +1746,13 @@ function M.set_plan(id, rotations, resolve)
         P.discard(rec)
         P.clear_snapshot(rec)
         if answered > 0 and dropped == answered then
-            P.resolve(rec, false, "The board moved between the state you were shown and"
+            P.refuse(rec, resolve, "The board moved between the state you were shown and"
                   .. " your answer: every connector you named had already reached the"
                   .. " orientation you asked for, so nothing was pressed. Here is the"
                   .. " board as it stands now.")
             P.push_event("retrying")
         else
-            P.resolve(rec, false, "Nothing was rotated: the answer named no connector to"
+            P.refuse(rec, resolve, "Nothing was rotated: the answer named no connector to"
                   .. " turn.")
         end
         return 0, false

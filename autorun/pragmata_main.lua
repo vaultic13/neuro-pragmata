@@ -22,7 +22,7 @@ local puzzle_snake = require("pragmata.bindings.puzzle_snake")
 -- call site for why that cannot wait until a puzzle is sighted.
 local puzzle_registry = require("pragmata.bindings.puzzle_registry")
 local puzzle_input = require("pragmata.bindings.puzzle_input")
--- pragmata_hack_sequence's definition, which follows the sequence group.
+-- pragmata_enviro_hack_sequence's definition, which follows the sequence group.
 local sequence_action = require("pragmata.sequence_action")
 
 -- Dialogue capture binding. Pulls subtitle text from UI/Asset/ui2000/gui/ui2010
@@ -42,7 +42,7 @@ require("pragmata.ability_state")
 -- World state emitters. Scene transitions, checkpoint reaches, combat start/end.
 require("pragmata.world_state")
 
--- Game-state reporting: the formatter behind the six read-only state actions
+-- Game-state reporting: the formatter behind the read-only state actions
 -- below, and the observer that pushes area / low-health / new-weapon context
 -- (each switchable in mod_config). Required here, at boot, because that is the
 -- only time `require` resolves.
@@ -99,16 +99,20 @@ log.info("booting")
 -- Sanity check
 -- --------------------------------------------------------------------
 
-dispatcher.register("pragmata_ping", {
-    description = "Sanity check. Confirms the mod, sidecar, and bridge are wired up. Returns 'pong' as the result message.",
-    -- Empty Lua tables encode ambiguously in some JSON encoders ([] vs {}).
-    -- Plain {type = "object"} avoids that without losing meaning here.
-    schema = { type = "object" },
-    handler = function(_args)
-        log.info("pragmata_ping called")
-        return true, "pong"
-    end,
-})
+-- Developer-only: it does nothing in the game, so the peer does not see it
+-- unless mod_config.debug_actions is on.
+if config.debug_actions then
+    dispatcher.register("pragmata_ping", {
+        description = "Sanity check. Confirms the mod, sidecar, and bridge are wired up. Returns 'pong' as the result message.",
+        -- Empty Lua tables encode ambiguously in some JSON encoders ([] vs {}).
+        -- Plain {type = "object"} avoids that without losing meaning here.
+        schema = { type = "object" },
+        handler = function(_args)
+            log.info("pragmata_ping called")
+            return true, "pong"
+        end,
+    })
+end
 
 -- --------------------------------------------------------------------
 -- Diana abilities
@@ -144,8 +148,15 @@ load_binding("pragmata.cutscene_prompt_observer")
 -- load costs its own action and nothing else.
 pcall(puzzle_registry.preload)
 
+-- Scanning and re-reading the last scan are one action. scan_memory decides
+-- which: a new scan only once the last is mod_config.scan_cache_seconds old;
+-- otherwise the results already held, said to be cached. A new scan resolves
+-- with what it found (ability_actions.scan), so no second call is needed.
 dispatcher.register("pragmata_scan", {
-    description = "Have Diana scan the environment through the game's native Scan input path. Highlights nearby objectives, paths, and (with the Object Scan upgrade) pickups like REM disks, Upgrade Modules, Mods, and Pure Lunum.",
+    description = "Have Diana scan the surroundings and report what she finds: each entry gives a name and the distance in metres to every instance the game can place, so '4x Upgrade Components (51 / 63 / 70 / 88 m)' means four separate pickups at those ranges. Items are named from the game's own catalogs; unnamed markers are described by what they are (objective marker, escape hatch, point of interest). Only live markers the game can place are listed; 'cannot be taken yet' means the game currently refuses interaction. "
+        .. string.format("If the last scan is under %d s old, no new scan is made and the reply gives the cached results and how old they are.",
+            tonumber(config.scan_cache_seconds) or 7),
+    short = "Have Diana scan the surroundings and report what she finds, with distances in metres. A scan made a few seconds ago is answered from cache, and the reply says so.",
     schema = { type = "object" },
     available = gates.abilities_available,
     handler = function(_args, ctx)
@@ -155,111 +166,83 @@ dispatcher.register("pragmata_scan", {
     end,
 })
 
--- Read-only companion to pragmata_scan. Re-reading the last result costs
--- nothing, so the peer never has to burn a scan just to recall what it saw.
-dispatcher.register("pragmata_scan_results", {
-    description = "Report what Diana's most recent scan found. Read-only — it does not perform a new scan. Each entry gives a name, and the distance in metres to every instance the game can place, so '4x Upgrade Components (51 / 63 / 70 / 88 m)' means four separate pickups at those four ranges. Items are named from the game's own catalogs, including by what a container holds; markers the catalogs do not name are described by what they are (objective marker, escape hatch, point of interest). Only live markers the game can actually place are listed, so collected items, deactivated objects, and anything without a known position are omitted. 'cannot be taken yet' means the game is currently refusing interaction.",
-    schema = { type = "object" },
-    handler = function(_args)
-        if not scan_bind then return false, "scan binding not loaded" end
-        local readable = scan_bind.describe_results()
-        if readable == nil or readable.total_count == 0 then
-            return true, "no scan results are currently held; run pragmata_scan first"
-        end
-        -- The engine keeps the last result list after its display window ends,
-        -- so say when the peer is recalling something old rather than silently
-        -- presenting it as current.
-        -- No marker total here: total_count includes the markers the report
-        -- deliberately does not enumerate, so printing it beside the rows
-        -- would contradict them.
-        return true, string.format("Last scan%s: %s.",
-                                   readable.stale and " (possibly out of date)" or "",
-                                   readable.text)
-    end,
-})
-
 -- --------------------------------------------------------------------
 -- Game state (read-only)
 -- --------------------------------------------------------------------
--- Six small questions the peer can ask about the player, each answered
--- synchronously from live game data. They change nothing in the game, so
--- asking is always safe and costs nothing but the reply. game_state.lua does
--- the formatting and turns a missing binding or an unreadable value into a
--- stated reason rather than an empty success.
-
-dispatcher.register("pragmata_health", {
-    description = "Report Hugh's health: current and maximum HP, how many repair kits are carried out of how many can be carried, and roughly how much HP one kit restores (upgrades change this; once a kit has been used the figure is the measured one). Read-only.",
-    schema = { type = "object" },
-    handler = function(_args) return game_state.describe_health() end,
+-- One question the peer can ask about the player, answered synchronously from
+-- live game data. It changes nothing in the game, so asking is always safe and
+-- costs nothing but the reply. game_state.lua does the formatting and turns a
+-- missing binding or an unreadable value into a stated reason rather than an
+-- empty success.
+--
+-- Health, location, weapons, mods and inventory were five actions, and
+-- upgrades a sixth. Asked together they are one look at "how are we doing",
+-- so they are one action now. Upgrades went: the equipped levels are in the
+-- weapons and mods lines, and the rest is what the Shelter's Unit Printer and
+-- Firmware Updater show (pragmata_menu_list).
+dispatcher.register("pragmata_status", {
+    description = "Report Hugh's current state: health (HP, repair kits carried and roughly how much one restores), location (map area, its completion and what is left to collect there), weapons (equipped ones, level as 'Lv current/max', ammo, what each does), equipped mods, equipped hacking mods (what each does, uses left, the hacking style) and inventory (everything held, by the game's item category). Give `category` for just one of them; leave it out for all. Read-only.",
+    short = "Report Hugh's health, location, weapons, mods, hacking mods and inventory; `category` picks just one. Read-only.",
+    -- `category` is optional: no `required` list, so a call with no arguments
+    -- still answers everything, as it did before the argument existed.
+    schema = {
+        type = "object",
+        properties = {
+            category = {
+                type = "string",
+                ["enum"] = game_state.status_categories(),
+                description = "Only this part of the status. Leave out for all of them.",
+            },
+        },
+    },
+    handler = function(args)
+        return game_state.describe_status(type(args) == "table" and args.category or nil)
+    end,
 })
 
-dispatcher.register("pragmata_weapons", {
-    description = "Report the weapons owned: which are equipped (and which is the main weapon), each one's upgrade level as 'Lv current/max', and remaining ammo as 'ammo current/max' where the game tracks it. Read-only.",
-    schema = { type = "object" },
-    handler = function(_args) return game_state.describe_weapons() end,
-})
+-- Shelter menus and catalogs, behind two stable actions: pragmata_menu_list
+-- and pragmata_menu_info, with the menu as an enum argument
+-- (menu_actions.lua). Each module adds its menus -- formatting, gate and, for
+-- the printer, its tab cache stay in the module -- and the two actions are
+-- registered once all of them have, since the enum is built from them.
+local menu_actions = require("pragmata.menu_actions")
 
-dispatcher.register("pragmata_mods", {
-    description = "Report the equipped mods and hacking mods: slots used, each one's level and what it does, and for hacking mods how many uses are left. Also names the equipped hacking style. Mods owned but not equipped are not listed (the train terminal's mod menu lists them). Read-only.",
-    schema = { type = "object" },
-    handler = function(_args) return game_state.describe_mods() end,
-})
-
-dispatcher.register("pragmata_upgrades", {
-    description = "Report upgrade progress: Firmware upgrades (suit, main weapon and hacking) with their levels, and the Unit Printer levels of each weapon and ability, all as 'Lv current/max'. Read-only.",
-    schema = { type = "object" },
-    handler = function(_args) return game_state.describe_upgrades() end,
-})
-
-dispatcher.register("pragmata_inventory", {
-    description = "Report everything held with a quantity: currency, collectibles, crafting materials and consumables, grouped by the game's own item category and named as the game names them. Read-only.",
-    schema = { type = "object" },
-    handler = function(_args) return game_state.describe_inventory() end,
-})
-
-dispatcher.register("pragmata_location", {
-    description = "Report the map area Hugh and Diana are in, the map screen's completion percentage for it, and what is still left to collect there (grouped, e.g. '2x Upgrade Components'). For where those things are, use pragmata_scan. Read-only.",
-    schema = { type = "object" },
-    handler = function(_args) return game_state.describe_location() end,
-})
-
--- Shelter upgrade menus (Firmware Updater, Unit Printer, train mod menu): a
--- list / info pair each, shown only while that menu is open. The module
--- registers them itself so their gates and the printer's tab cache stay
--- together.
+-- Firmware Updater, Unit Printer, train mod menu: readable while open.
 local shelter_menus_bind = load_binding("pragmata.bindings.shelter_menus")
 local shelter_menu_actions = load_binding("pragmata.shelter_menu_actions")
 if shelter_menu_actions ~= nil then
-    shelter_menu_actions.register(dispatcher, gates, shelter_menus_bind)
+    shelter_menu_actions.register(menu_actions, gates, shelter_menus_bind)
 end
 
--- Stamp Club (the Cabin hub's shop tab): one read-only board report, shown
--- only while that tab is selected.
+-- Stamp Club (the Cabin hub's shop tab): readable while that tab is selected.
 local stamp_club_bind = load_binding("pragmata.bindings.stamp_club")
 local stamp_actions = load_binding("pragmata.stamp_actions")
 if stamp_actions ~= nil then
-    stamp_actions.register(dispatcher, gates, stamp_club_bind)
+    stamp_actions.register(menu_actions, gates, stamp_club_bind)
 end
 
--- Shelter catalogs (Data Library, Bot Database, Training Simulations): a
--- list / info pair each, shown anywhere in the Shelter, plus the Shelter-only
--- "new entry" pushes.
+-- Catalogs (Data Library, Archive, Bot Database, Training Simulations, Earth
+-- Memories): readable anywhere in the Shelter (the Archive everywhere), plus
+-- the Shelter-only "new entry" pushes.
 local catalogs_bind = load_binding("pragmata.bindings.catalogs")
 local catalog_actions = load_binding("pragmata.catalog_actions")
 if catalog_actions ~= nil then
-    catalog_actions.register(dispatcher, gates, catalogs_bind)
+    catalog_actions.register(menu_actions, gates, catalogs_bind)
 end
 
--- Train sector selection: a list / info pair, shown only while that screen
--- is open (State Debug F11 also dumps its data).
+-- Train sector selection: readable while that screen is open (State Debug
+-- F11 also dumps its data).
 local sectors_bind = load_binding("pragmata.bindings.sectors")
 local sector_actions = load_binding("pragmata.sector_actions")
 if sector_actions ~= nil then
-    sector_actions.register(dispatcher, gates, sectors_bind)
+    sector_actions.register(menu_actions, gates, sectors_bind)
 end
 
-dispatcher.register("pragmata_auto_hack", {
-    description = "Have Diana auto-hack the target she is currently locked on to. Consumes part of the hacking gauge to bypass the manual hacking minigame. Requires the Auto-Hack upgrade (unlocked mid-game from the Unit Printer). Takes no arguments: the engine's start call has no target parameter, so the lock-on decides the target. Success means the game entered Auto-Hack, not merely that preconditions passed.",
+menu_actions.register(dispatcher)
+
+dispatcher.register("pragmata_enemy_auto_hack", {
+    description = "Enemies only: have Diana auto-hack the enemy she is currently locked on to. Consumes part of the hacking gauge to bypass the manual hacking minigame. Requires the Auto-Hack upgrade (unlocked mid-game from the Unit Printer). Takes no arguments: the engine's start call has no target parameter, so the lock-on decides the target. Success means the game entered Auto-Hack, not merely that preconditions passed.",
+    short = "Enemies only: have Diana auto-hack the enemy she is locked on to, spending part of the hacking gauge. Needs the Auto-Hack upgrade; takes no arguments.",
     -- No target selector. startAutoHack() takes no parameters; the target_id
     -- this used to advertise was resolved and then discarded, so a peer that
     -- sent one got no choice of target AND skipped the "is anything locked on"
@@ -275,6 +258,7 @@ dispatcher.register("pragmata_auto_hack", {
 
 dispatcher.register("pragmata_overdrive", {
     description = "Fire Diana's Overdrive. Requires a charged gauge and confirms only after the game actually starts the ability and spends the gauge. When a scene has stopped on the Overdrive button prompt, this presses that prompt for the player instead, and confirms once the scene continues.",
+    short = "Fire Diana's Overdrive (needs a charged gauge), or press a scene's Overdrive button prompt when one is up.",
     schema = { type = "object" },
     available = gates.overdrive_available,
     handler = function(_args, ctx)
@@ -303,6 +287,45 @@ dispatcher.register("pragmata_purify", {
 -- The hacking observer fires actions/force on grid-start, listing this
 -- action as the only allowed name. The handler validates the returned
 -- plan and queues it for cursor-movement dispatch via puzzle_snake.tick_plan.
+
+-- How a plan reply is answered once the observer has looked at it. Shared by
+-- every hacking action.
+--
+-- Not applied (no hack is waiting, the puzzle is gone): success = true. Nothing
+-- went wrong that a retry of the same answer could fix, and a failing result
+-- inside a force would make the server ask again for a hack that is not there.
+-- The message says plainly that nothing happened.
+--
+-- Parked (the player looked away before the reply came): answered at once,
+-- because the plan may wait longer than the server's ~20 s result window. Its
+-- outcome follows as context when it runs.
+local NOT_APPLIED = "Nothing was done: "
+local NOT_APPLIED_REASONS = {
+    ["no in-flight force"] = "no hack is waiting for a plan right now.",
+    ["puzzle gone"] = "that hack is no longer there.",
+    ["reply does not match the active puzzle"] =
+        "this action is for a different kind of hack than the one that asked.",
+    ["puzzle binding unavailable"] = "the mod cannot drive this kind of hack.",
+}
+
+local function plan_reply(name, ctx, applied, info, what)
+    if not applied then
+        log.info(name .. ": " .. what .. " not applied (" .. tostring(info) .. ")")
+        if info == "plan rejected by the puzzle" then
+            -- The binding already sent the reason as the result.
+            return true, "plan rejected"
+        end
+        return true, NOT_APPLIED .. (NOT_APPLIED_REASONS[info] or (tostring(info) .. "."))
+    end
+    local parked = info  -- on success, info is the `parked` bool
+    log.info(string.format("%s: applied %s (parked=%s); result deferred until it resolves",
+                           name, what, tostring(parked)))
+    if parked and ctx.answer_now ~= nil then
+        ctx.answer_now(true, "Plan saved: Hugh is not aimed at that target now, so it "
+            .. "runs when he aims at it again. The outcome will follow as context.")
+    end
+    return ctx.defer()
+end
 
 -- Schema is built around the `hacking_require_reasoning` config flag.
 -- When true, the peer must emit a step-by-step trace alongside the moves
@@ -348,9 +371,9 @@ end
 -- required-order. Backend-agnostic — applies to whatever peer reads the schema.
 hack_plan_properties.__keyorder = hack_plan_required
 
-dispatcher.register("pragmata_hack_plan", {
+dispatcher.register("pragmata_enemy_hack_plan", {
     description = (
-        "Plan a path through the active hacking grid from cursor @ to Goal G.\n"
+        "Enemy hack: plan a path through the hacking grid on the enemy, from cursor @ to Goal G.\n"
         .. "Coordinates: (0,0) is TOP-LEFT. x=column (left->right). y=row "
         .. "(top->bottom). 'up' decreases y by 1; 'down' increases y by 1; "
         .. "'left' decreases x by 1; 'right' increases x by 1. The first row "
@@ -375,6 +398,8 @@ dispatcher.register("pragmata_hack_plan", {
         .. "O is reachable without crossing a # or d. (Yellow '*' = minor "
         .. "secondary bonus.)"
     ),
+    short = "Enemy hack: plan the cursor's path through the hacking grid on the enemy to the goal G, as a list of moves. The rules are in the force's state.",
+    rules_in_force = true,
     schema = {
         type = "object",
         required = hack_plan_required,
@@ -382,7 +407,10 @@ dispatcher.register("pragmata_hack_plan", {
     },
     available = gates.hacking_available,
     handler = function(args, ctx)
-        local moves = args.moves or {}
+        local moves = args.moves
+        if type(moves) ~= "table" then
+            return false, "Give 'moves' as a list of directions (up, down, left, right)."
+        end
         local count = #moves
 
         -- Hand the reply to the observer. It owns the force→reply→target
@@ -393,7 +421,7 @@ dispatcher.register("pragmata_hack_plan", {
         -- dispatch time by the binding's structural-signature check.
         local hacking_observer = package.loaded["pragmata.hacking_observer"]
         if not (hacking_observer and hacking_observer.on_plan_received) then
-            return true, "observer unavailable; plan dropped"
+            return true, NOT_APPLIED .. "the hacking observer is not loaded."
         end
 
         -- DEFER the action result. The plan executes asynchronously over the
@@ -402,21 +430,9 @@ dispatcher.register("pragmata_hack_plan", {
         -- via ctx.resolve when the plan resolves — so the AI sees what actually
         -- happened, not a blind "plan applied". The observer stores ctx.resolve
         -- on the puzzle and the binding fires it at the terminal point.
-        local applied, info = hacking_observer.on_plan_received("snake", moves, ctx.resolve)
-        if not applied then
-            -- Couldn't park the plan (puzzle gone / no in-flight force). Resolve
-            -- synchronously — there's nothing to wait on.
-            log.info("pragmata_hack_plan: " .. tostring(count)
-                  .. " moves not applied (" .. tostring(info) .. ")")
-            return true, ("plan discarded (" .. tostring(info) .. "): "
-                       .. tostring(count) .. " moves")
-        end
-
-        local parked = info  -- on success, info is the `parked` bool
-        log.info(string.format("pragmata_hack_plan: applied %d moves (parked=%s); "
-                            .. "result deferred until the plan resolves",
-                               count, tostring(parked)))
-        return ctx.defer()
+        local applied, info = hacking_observer.on_plan_received("snake", moves, ctx.resolve, ctx)
+        return plan_reply("pragmata_enemy_hack_plan", ctx, applied, info,
+                          tostring(count) .. " moves")
     end,
 })
 
@@ -433,11 +449,11 @@ dispatcher.register("pragmata_hack_plan", {
 -- contradicted itself half the time. The observer only ever offers the peer the
 -- one action that matches the puzzle actually in front of it.
 --
--- Each handler follows pragmata_hack_plan exactly: hand the reply to the
+-- Each handler follows pragmata_enemy_hack_plan exactly: hand the reply to the
 -- observer, which parks it on the puzzle the in-flight force was for, then
 -- defer -- so the tool result the peer sees is what the hack actually did.
 
-local function register_puzzle_action(name, kind, payload_key, description, schema)
+local function register_puzzle_action(name, kind, payload_key, description, schema, short)
     -- Don't advertise an action for a family this install has switched off: the
     -- observer would never force it, so a peer calling it could only ever be
     -- told there was nothing to plan. `slide` and `path` ship off, which is why
@@ -450,35 +466,37 @@ local function register_puzzle_action(name, kind, payload_key, description, sche
 
     dispatcher.register(name, {
         description = description,
+        -- With mod_config.action_descriptions = "short", `short` is what the
+        -- peer sees and the full text rides on every force as its rules.
+        short = short,
+        rules_in_force = true,
         schema = schema,
         available = gates.hacking_available,
         handler = function(args, ctx)
             local observer = package.loaded["pragmata.hacking_observer"]
             if not (observer and observer.on_plan_received) then
-                return true, "observer unavailable; plan dropped"
+                return true, NOT_APPLIED .. "the hacking observer is not loaded."
             end
             -- Each family names its payload differently; the observer passes it
             -- straight through to the binding, which is the only thing that
             -- knows how to read it. A function key is resolved per call, for
             -- the sequence hack, whose key follows the group active right now.
             local key = type(payload_key) == "function" and payload_key() or payload_key
-            local payload = args[key] or {}
-            local applied, info = observer.on_plan_received(kind, payload, ctx.resolve)
-            if not applied then
-                log.info(name .. ": not applied (" .. tostring(info) .. ")")
-                return true, "plan discarded (" .. tostring(info) .. ")"
+            local payload = args[key]
+            if type(payload) ~= "table" then
+                return false, "Give the answer in '" .. tostring(key)
+                    .. "' as a list, as the action's schema describes."
             end
-            log.info(string.format("%s: applied (parked=%s); result deferred "
-                                .. "until the hack resolves", name, tostring(info)))
-            return ctx.defer()
+            local applied, info = observer.on_plan_received(kind, payload, ctx.resolve, ctx)
+            return plan_reply(name, ctx, applied, info, "the answer")
         end,
     })
 end
 
 local DIRECTION_ENUM = { "up", "down", "left", "right" }
 
-register_puzzle_action("pragmata_hack_rotate", "circuit", "rotations",
-    "Solve the active circuit hack. One to four connectors sit around a centre, "
+register_puzzle_action("pragmata_enviro_hack_rotate", "circuit", "rotations",
+    "Solve the active circuit hack, an environment hack (a door, switch or elevator). One to four connectors sit around a centre, "
     .. "each of them one circuit to close. A circuit is a line running in from the "
     .. "edge of the board; its connector closes it when it JOINS that line to the "
     .. "centre, both ends lined up -- pointing at the centre is not enough.\n"
@@ -517,7 +535,8 @@ register_puzzle_action("pragmata_hack_rotate", "circuit", "rotations",
                 },
             },
         },
-    })
+    },
+    "Solve the active circuit hack, an environment hack (a door, switch or elevator), by giving connectors presses, named as the state field names them.")
 
 -- The description, the schema and even the payload key follow the active
 -- group (mod_config.puzzle_sequence_group), which the puzzle debug panel can
@@ -525,10 +544,10 @@ register_puzzle_action("pragmata_hack_rotate", "circuit", "rotations",
 -- the re-registration a switch needs.
 local sequence_def = sequence_action.definition()
 register_puzzle_action(sequence_action.ACTION_NAME, "buttons", sequence_action.answer_field,
-    sequence_def.description, sequence_def.schema)
+    sequence_def.description, sequence_def.schema, sequence_def.short)
 
-register_puzzle_action("pragmata_hack_slide", "slide", "moves",
-    "Solve the active pipe hack. Tiles slide into a single empty space; the hack "
+register_puzzle_action("pragmata_enviro_hack_slide", "slide", "moves",
+    "Solve the active pipe hack, an environment hack (a door, switch or elevator). Tiles slide into a single empty space; the hack "
     .. "completes when an unbroken pipe runs from the source S to the goal O.\n"
     .. "Each move names the direction the EMPTY SPACE travels, so 'up' pulls the "
     .. "tile above the gap down into it. (0,0) is TOP-LEFT: x runs left to "
@@ -547,10 +566,11 @@ register_puzzle_action("pragmata_hack_slide", "slide", "moves",
                 description = "directions the empty space travels, in order",
             },
         },
-    })
+    },
+    "Solve the active pipe hack, an environment hack (a door, switch or elevator): move the empty space until a pipe runs from S to O.")
 
-register_puzzle_action("pragmata_hack_path", "path", "rotations",
-    "Solve the active path hack. Pieces on a board are turned until an unbroken "
+register_puzzle_action("pragmata_enviro_hack_path", "path", "rotations",
+    "Solve the active path hack, an environment hack (a door, switch or elevator). Pieces on a board are turned until an unbroken "
     .. "path runs across it.\n"
     .. "Pieces are addressed by COLUMN, numbered from 0 at the left; the state "
     .. "field says which columns can be turned. `steps` is how many QUARTER "
@@ -577,7 +597,8 @@ register_puzzle_action("pragmata_hack_path", "path", "rotations",
                 },
             },
         },
-    })
+    },
+    "Solve the active path hack, an environment hack (a door, switch or elevator), by giving columns quarter turns until a path runs across the board.")
 
 
 -- --------------------------------------------------------------------
@@ -615,6 +636,10 @@ re.on_frame(function()
         if msg == nil then break end
         dispatcher.handle_incoming(msg, mailbox.send)
     end
+
+    -- Answer any deferred result that is about to outlive the server's
+    -- ~20 s window (dispatcher.lua, "THE 20-SECOND RULE").
+    pcall(dispatcher.tick)
 
     -- Drive Scan's command input. This injects into the game's own
     -- app.PlayerInputDriver queries; it writes no controller, no OS keyboard

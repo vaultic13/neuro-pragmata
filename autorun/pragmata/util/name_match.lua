@@ -54,13 +54,31 @@ function M.names_arg(args)
     return names
 end
 
+-- How many valid names a "nothing matched" refusal lists.
+local MAX_LISTED = 20
+
 -- success, text: detail_fn(entry) for each match, the refusals in between.
+-- When not one name matches, the call fails and lists names that would have,
+-- so the peer's next try can succeed (BEST_PRACTICES.md: actionable errors).
 function M.info_reply(entries, args, detail_fn, sep)
     local names, err = M.names_arg(args)
     if names == nil then return false, err end
-    local parts = {}
+    local parts, found = {}, 0
     for _, m in ipairs(M.match(entries, names)) do
+        if m.entry then found = found + 1 end
         parts[#parts + 1] = m.entry and detail_fn(m.entry) or m.text
+    end
+    if found == 0 then
+        local valid = {}
+        for i = 1, math.min(#entries, MAX_LISTED) do valid[#valid + 1] = tostring(entries[i].name) end
+        if #valid == 0 then
+            parts[#parts + 1] = "There are no entries to name here yet."
+        else
+            parts[#parts + 1] = "Valid names" .. (#entries > MAX_LISTED
+                and string.format(" (first %d of %d)", MAX_LISTED, #entries) or "")
+                .. ": " .. join(valid) .. "."
+        end
+        return false, join(parts, sep or "\n")
     end
     return true, join(parts, sep or "\n")
 end
