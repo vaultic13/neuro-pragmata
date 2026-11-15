@@ -1,8 +1,7 @@
 --
 -- The player's weapons: what is owned, what is equipped, ammo and level.
 --
--- Engine layout (verified against the IL2CPP dump; invocation still to be
--- confirmed in-game through the State Debug panel):
+-- Engine layout:
 --
 --   app.WeaponManager (managed singleton)
 --     - getUnlockedWeaponIDs()      -> System.UInt32[]   every owned weapon
@@ -23,7 +22,7 @@
 --
 -- The slot list is the preferred ammo source because it names the weapon id
 -- directly. The UInt64 slot hashes are the fallback; how they encode the id is
--- not documented, so the debug panel prints them raw.
+-- not documented, so they are kept raw.
 
 local log = require("pragmata.util.log")
 local r = require("pragmata.bindings.reflect")
@@ -69,7 +68,7 @@ function M.weapon_name(id)
     local resolved = name ~= nil
     name = name or object_names.display_name(id)
     resolved = resolved or name ~= nil
-    -- A bare number means nothing to the peer; the id is in the debug panel.
+    -- A bare number means nothing to the peer.
     name = name or object_names.object_name(id) or "an unnamed weapon"
     -- Only cache a real name: the catalogs load after the singleton does.
     if resolved then _name_cache[id] = name end
@@ -103,7 +102,7 @@ end
 -- read() uses for its `equipped` field. Ammo is deliberately not part of it.
 -- Nil outside gameplay.
 --
--- Round-5 test (2026-10-01): a field pickup does not change the owned list
+-- Round-5 test: a field pickup does not change the owned list
 -- (that only moves at checkpoints / reloads); what changes at the pickup is
 -- which weapons are equipped. game_state_observer compares this list.
 function M.equipped_ids()
@@ -134,7 +133,7 @@ end
 
 -- Returns nil outside gameplay, else:
 --   { weapons = { { id, name, main, equipped, slot, ammo, ammo_max, level, level_max } },
---     slot_hashes = { {hash, ammo, ammo_max} } }   -- raw, for the debug panel
+--     slot_hashes = { {hash, ammo, ammo_max} } }   -- raw
 function M.read()
     ensure_init()
     local wm = r.singleton("app.WeaponManager")
@@ -195,17 +194,6 @@ function M.read()
         end
     end
     return out
-end
-
-function M.debug_status()
-    ensure_init()
-    return {
-        weapon_manager    = r.singleton("app.WeaponManager") ~= nil,
-        inventory_manager = r.singleton("app.InventoryManager") ~= nil,
-        unlocked_ok       = _s.m_unlocked ~= nil,
-        gadget_slots_ok   = _s.m_gadget_slots ~= nil,
-        slot_mode_ok      = _s.m_slot_mode ~= nil,
-    }
 end
 
 return M

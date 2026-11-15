@@ -155,23 +155,13 @@ local function poll_health()
         math.floor(v.hp_max + 0.5), kits))
 end
 
-local WEAPON_EVENTS_MAX = 16
-
--- For Pragmata State Debug: what the weapon check saw, newest first.
-M.weapon_events = {}
-
 local function weapon_event(text)
-    table.insert(M.weapon_events, 1, { frame = _frame, text = text })
-    while #M.weapon_events > WEAPON_EVENTS_MAX do table.remove(M.weapon_events) end
+    log.info("game_state_observer: " .. text)
 end
 
 -- Diff one sorted id list against its last reading. Returns the added ids,
 -- or nil for "nothing to announce" (unchanged, baseline, only losses, or a
 -- jump too large to be a pickup). `label` names the list in the event log.
--- Live readout for the debug panel: what the last poll of each equip list
--- read, so "no change seen" can be told apart from "nothing read at all".
-M.weapon_live = { frame = nil, equipped = "not read yet", hacking = "not read yet" }
-
 -- Most changes one poll may make and still be believed. A pickup or a swap is
 -- one item in, maybe one out; a larger jump is a save load or a bad read.
 local MAX_EQUIP_CHANGES = 2
@@ -182,7 +172,6 @@ local MAX_EQUIP_CHANGES = 2
 --   read()      -> sorted id list, or nil
 --   name(id)    -> display name
 --   label       -> "Weapon" / "Hacking mod" (message and log prefix)
---   live_key    -> field of M.weapon_live for the debug readout
 --   switch      -> mod_config field that turns the push on
 -- An empty reading is skipped when allow_empty is false: it is what a load
 -- looks like mid-way (the main weapon is always equipped in play). Hacking
@@ -192,13 +181,9 @@ local function equip_tracker(t)
     t.reset = function() last, pending = nil, nil end
     t.poll = function()
         local ok, ids = pcall(t.read)
-        M.weapon_live.frame = _frame
         if not ok or ids == nil or (#ids == 0 and not t.allow_empty) then
-            M.weapon_live[t.live_key] = (ok and ids ~= nil) and "nothing read"
-                or (ok and "unavailable" or ("error: " .. tostring(ids)))
             return
         end
-        M.weapon_live[t.live_key] = #ids > 0 and table.concat(ids, ", ") or "(none)"
 
         local key = table.concat(ids, ",")
         if last ~= nil and last.key == key then pending = nil return end

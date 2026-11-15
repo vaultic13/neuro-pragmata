@@ -33,17 +33,16 @@ local scan_memory = require("pragmata.scan_memory")
 -- Trackers
 -- --------------------------------------------------------------------
 
--- The gauge's 25 / 50 / 75 % steps used to go out as context too. They were
--- dropped (BEST_PRACTICES.md: occasional meaningful messages, not a stream):
--- "Overdrive is ready." is the one that changes what the peer can do.
+-- Only "Overdrive is ready." goes out about the gauge: it is the one that
+-- changes what the peer can do, and context should be occasional and
+-- meaningful, not a stream of percentages.
 local overdrive_cost_track    = emit.edge()
 local autohack_unlock_track   = emit.edge()
 local scanning_track          = emit.edge()
 
--- Scan results are only read while a scan is genuinely in flight. Previously
--- the observer polled currentTargetUnits unconditionally and emitted whenever
--- a new ping-set appeared — which fired spuriously after every loading screen
--- (the manager keeps stale entries). Now an is_scanning() rising edge opens a
+-- Scan results are only read while a scan is genuinely in flight: the
+-- manager keeps stale entries across loading screens, so polling it
+-- unconditionally reports scans nobody made. An is_scanning() rising edge opens a
 -- short window during which results are captured; outside that window we don't
 -- look at the (possibly stale) list at all.
 local _scan_emit_window = 0

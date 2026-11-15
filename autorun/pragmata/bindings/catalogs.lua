@@ -4,10 +4,9 @@
 --
 -- Unlike the upgrade menus these read the game's DATA, not an open screen, so
 -- they answer anywhere in the Shelter. When the matching screen is open it is
--- read too, for a check in the debug panel (and, for Training, the rewards,
--- which only the screen holds).
+-- read too (for Training, the rewards, which only the screen holds).
 --
--- Engine layout (il2cpp dump, 2026-10-06; NOT yet confirmed in game):
+-- Engine layout:
 --
 --   Data Library
 --     GuiDataManager.getNarrativeCategories() -> NarrativeTextData.Category[]
@@ -21,6 +20,16 @@
 --       -> List<Param>: the entries found so far.
 --     Screen ui5140._NarrativeMenu (ui5060).CateListCtrl InfoList of
 --       CategoryInfo { CategoryId, CategoryName, UnlockNum, UnlockTotalNum }.
+--     The pause menu's Archive is ui5000.Narrative (also a ui5060).
+--
+--   Archive "Help" (the tutorial notes that pop up mid-screen and pause the
+--   game): its category is get_IsTutorial and carries no Params of its own;
+--   the entries are GuiDataManager.getTutorialDatas() -> TutorialData.Param[]
+--     { get_IdHash, get_HeaderMessage, get_DescriptionMessage (TextMessageData),
+--       get_HeaderId, get_IsIgnoreList, get_IsInitOpen, get_IsLarge, SortNo }
+--   and the screen's DetailInfo rows carry IsTutorial. Which reading means
+--   "seen" is NOT in the dump: the screen when it has been open, else
+--   IsInitOpen, else state bits ~= 0.
 --
 --   Bot Database
 --     FigureDataHolder.getAllAssort() -> FigureDescriptionUnit[]
@@ -95,6 +104,7 @@ local function methods()
     _m = {
         opened_narrative = r.method(r.td("app.GuiUtil"), "getOpenedNarrativeData(System.UInt32)"),
         narrative_params = r.method(r.td("app.GuiDataManager"), "getNarrativeParams(System.UInt32)"),
+        tutorial_datas = r.method(r.td("app.GuiDataManager"), "getTutorialDatas()"),
         item_data = r.method(r.td("app.GuiDataManager"), "getItemData(System.UInt32)"),
         find_state = r.method(r.td("app.StateManager"), "findState(System.UInt32)"),
         is_cleared = r.method(r.td("app.MissionManager"), "isClearedMission(System.UInt32)"),
@@ -118,11 +128,11 @@ end
 --
 -- One narrative data set behind both: a category is the Library's when
 -- get_IsTerminalMenu, the Archive's when get_IsPauseMenu (the Library screen
--- ui5060 carries IsTerminalMenu = true, 2026-10-06). Hidden categories are
+-- ui5060 carries IsTerminalMenu = true). Hidden categories are
 -- skipped.
 --
--- Found: the 2026-10-06 test found nothing through
--- GuiUtil.getOpenedNarrativeData alone, so three answers are kept, in order
+-- Found: GuiUtil.getOpenedNarrativeData alone can find nothing, so three
+-- answers are kept, in order
 -- of trust: the screen (CategoryInfo.Infos -> DetailInfo.IsUnlock, remembered
 -- for the session once a Library / Archive screen has been open), the
 -- GuiUtil list when it has anything for the category, and state bits ~= 0
@@ -143,8 +153,8 @@ local function narrative_categories(menu)
             tutorial = bool(call(c, "get_IsTutorial")),
             sort = int(call(c, "get_SortNo")) or 0,
         }
-        -- The terminal shows "Secrets", which is flagged hidden (2026-10-06
-        -- dump): IsHideView is about the pause menu, so the Library ignores it.
+        -- The terminal shows "Secrets", which is flagged hidden: IsHideView is
+        -- about the pause menu, so the Library ignores it.
         e.library = e.id ~= nil and e.terminal == true
         e.archive = e.id ~= nil and e.hidden ~= true and e.pause == true
         out[#out + 1] = e
@@ -163,6 +173,61 @@ local function category_params(c)
         params = r.elements(r.call(methods().narrative_params, r.singleton("app.GuiDataManager"), c.id))
     end
     return params
+end
+
+-- One neutral row per entry of a category, narrative or tutorial alike:
+-- { id, ignore, sort, header_id, tutorial, init_open, title(), body(), pages() }.
+local function tutorial_rows()
+    local gdm = r.singleton("app.GuiDataManager")
+    local out = {}
+    for _, p in ipairs(r.elements(r.call(methods().tutorial_datas, gdm))) do
+        local id = int(call(p, "get_IdHash")) or int(r.field(p, "_IdHash"))
+        if id ~= nil and id ~= 0 then
+            out[#out + 1] = {
+                id = id, tutorial = true,
+                ignore = bool(call(p, "get_IsIgnoreList")) == true,
+                init_open = bool(call(p, "get_IsInitOpen")) == true,
+                sort = int(r.field(p, "SortNo")) or int(call(p, "get_SortNo")) or 0,
+                header_id = int(call(p, "get_HeaderId")) or int(r.field(p, "_HeaderId")),
+                title = function() return text(call(p, "get_HeaderMessage") or r.field(p, "_HeaderMessage")) end,
+                body = function() return text(call(p, "get_DescriptionMessage") or r.field(p, "_DescriptionMessage")) end,
+                pages = function() return {} end,
+            }
+        end
+    end
+    return out
+end
+
+-- A tutorial category, or (fallback) a pause-menu category with no Params
+-- while the flag reads nil.
+local function is_tutorial_category(c, params)
+    if c.tutorial == true then return true end
+    return c.tutorial == nil and c.pause == true and #params == 0
+end
+
+local function category_rows(c)
+    local params = category_params(c)
+    if #params == 0 and is_tutorial_category(c, params) then return tutorial_rows() end
+    local out = {}
+    for _, p in ipairs(params) do
+        out[#out + 1] = {
+            id = int(call(p, "get_IdHash")),
+            ignore = bool(call(p, "get_IsIgnoreList")) == true,
+            sort = int(call(p, "get_SortNo")) or 0,
+            header_id = int(call(p, "get_HeaderId")),
+            title = function() return text(call(p, "get_Title")) end,
+            body = function() return text(call(p, "get_Body")) end,
+            pages = function()
+                local pages = {}
+                for _, pg in ipairs(r.elements(call(p, "get_Pages"))) do
+                    local t = text(call(pg, "get_Body"))
+                    if t ~= nil then pages[#pages + 1] = t end
+                end
+                return pages
+            end,
+        }
+    end
+    return out
 end
 
 local function opened_ids(category_id)
@@ -188,6 +253,8 @@ local function narrative_screens()
     if lib ~= nil then out[#out + 1] = lib end
     local own = gui.control("ui5060")
     if own ~= nil then out[#out + 1] = own end
+    local pause = r.field(gui.control("ui5000"), "Narrative")
+    if pause ~= nil and pause ~= own then out[#out + 1] = pause end
     return out
 end
 
@@ -207,26 +274,35 @@ local function read_narrative_screens()
     return any
 end
 
--- found(id) for one category: screen, else GuiUtil (when it lists any), else bits.
+-- found(row) for one category: screen, else GuiUtil (when it lists any), else
+-- bits. A tutorial row has no GuiUtil list; IsInitOpen counts as found.
 local function found_fn(category_id)
     local opened, n = opened_ids(category_id)
-    return function(id)
+    return function(row)
+        local id = row and row.id
         if id == nil then return false end
         if _narrative_screen[id] ~= nil then return _narrative_screen[id] end
-        if n > 0 then return opened[id] == true end
+        if row.tutorial then
+            if row.init_open then return true end
+        elseif n > 0 then
+            return opened[id] == true
+        end
         local bits = state_bits(id)
         return bits ~= nil and bits ~= 0
     end
 end
 
 -- Ids of every entry found so far, as { [id] = category id }. For the push.
+-- Nil while the categories cannot be read, so an empty answer is a real one
+-- (nothing found yet) and the push may take it as its baseline.
 function M.narrative_ids(menu)
+    local cats = narrative_categories(menu)
+    if #cats == 0 then return nil end
     local out = {}
-    for _, c in ipairs((narrative_categories(menu))) do
+    for _, c in ipairs(cats) do
         local found = found_fn(c.id)
-        for _, p in ipairs(category_params(c)) do
-            local id = int(call(p, "get_IdHash"))
-            if bool(call(p, "get_IsIgnoreList")) ~= true and found(id) then out[id] = c.id end
+        for _, row in ipairs(category_rows(c)) do
+            if not row.ignore and found(row) then out[row.id] = c.id end
         end
     end
     return out
@@ -249,26 +325,21 @@ function M.narrative(menu, with_text)
         end
         local cat = { id = c.id, name = text(call(c.obj, "get_CategoryName")),
                       found = 0, total = 0, entries = {} }
-        for _, p in ipairs(category_params(c)) do
-            if bool(call(p, "get_IsIgnoreList")) ~= true then
+        for _, row in ipairs(category_rows(c)) do
+            if not row.ignore then
                 cat.total = cat.total + 1
-                local id = int(call(p, "get_IdHash"))
-                if found(id) then
+                if found(row) then
                     cat.found = cat.found + 1
                     local e = {
-                        id = id,
-                        title = text(call(p, "get_Title")),
-                        group = headers[int(call(p, "get_HeaderId")) or -1],
-                        sort = int(call(p, "get_SortNo")) or 0,
+                        id = row.id,
+                        title = row.title(),
+                        group = headers[row.header_id or -1],
+                        sort = row.sort,
                         category = cat.name,
                     }
                     if with_text ~= false then
-                        e.body = text(call(p, "get_Body"))
-                        e.pages = {}
-                        for _, pg in ipairs(r.elements(call(p, "get_Pages"))) do
-                            local t = text(call(pg, "get_Body"))
-                            if t ~= nil then e.pages[#e.pages + 1] = t end
-                        end
+                        e.body = row.body()
+                        e.pages = row.pages()
                     end
                     cat.entries[#cat.entries + 1] = e
                 end
@@ -280,6 +351,22 @@ function M.narrative(menu, with_text)
         if cat.total > 0 and (menu ~= "library" or cat.found > 0) then cats[#cats + 1] = cat end
     end
     return { categories = cats }
+end
+
+-- The Help notes found so far, as {{ id, title }}, by the same "found" rule
+-- as the Archive; nil while the tutorial list cannot be read. For
+-- action_gates' "main Shelter reached" check.
+function M.found_tutorials()
+    local rows = tutorial_rows()
+    if #rows == 0 then return nil end
+    local found = found_fn(nil)
+    local out = {}
+    for _, row in ipairs(rows) do
+        if not row.ignore and found(row) then
+            out[#out + 1] = { id = row.id, title = row.title() }
+        end
+    end
+    return out
 end
 
 function M.library(with_text) return M.narrative("library", with_text) end
@@ -294,11 +381,12 @@ function M.narrative_check()
     local _, all = narrative_categories(nil)
     local lines = {}
     for _, c in ipairs(all) do
-        local params = category_params(c)
+        local params = category_rows(c)
         local _, n_opened = opened_ids(c.id)
-        local n_bits, n_screen, n_screen_seen = 0, 0, 0
-        for _, p in ipairs(params) do
-            local id = int(call(p, "get_IdHash"))
+        local n_bits, n_screen, n_screen_seen, n_init = 0, 0, 0, 0
+        for _, row in ipairs(params) do
+            local id = row.id
+            if row.init_open then n_init = n_init + 1 end
             local bits = state_bits(id)
             if bits ~= nil and bits ~= 0 then n_bits = n_bits + 1 end
             if id ~= nil and _narrative_screen[id] ~= nil then
@@ -306,10 +394,12 @@ function M.narrative_check()
                 if _narrative_screen[id] then n_screen = n_screen + 1 end
             end
         end
-        lines[#lines + 1] = string.format("cat %s '%s' library=%s archive=%s (hidden=%s terminal=%s pause=%s tutorial=%s) params=%d | found: GuiUtil=%d bits~=0=%d screen=%d of %d seen",
+        local from_tutorials = #params > 0 and params[1].tutorial == true
+        lines[#lines + 1] = string.format("cat %s '%s' library=%s archive=%s (hidden=%s terminal=%s pause=%s tutorial=%s) %s=%d | found: GuiUtil=%d bits~=0=%d initOpen=%d screen=%d of %d seen",
             tostring(c.id), tostring(text(call(c.obj, "get_CategoryName"))), tostring(c.library), tostring(c.archive),
-            tostring(c.hidden), tostring(c.terminal), tostring(c.pause), tostring(c.tutorial), #params,
-            n_opened, n_bits, n_screen, n_screen_seen)
+            tostring(c.hidden), tostring(c.terminal), tostring(c.pause), tostring(c.tutorial),
+            from_tutorials and "tutorials" or "params", #params,
+            n_opened, n_bits, n_init, n_screen, n_screen_seen)
     end
     local gm = r.singleton("app.GuiManager")
     lines[#lines + 1] = string.format("categories=%d  GuiManager.getNarrativeDataNum=%s  screen read now=%s",
@@ -400,32 +490,6 @@ function M.bot_database()
     return out
 end
 
--- Debug: per-figure state bits against the screen, and the game's count.
-function M.bot_database_check()
-    local screen = read_figure_screen()
-    local lines = {}
-    local gm = r.singleton("app.GuiManager")
-    local by_bits, guess_owned, differ = {}, 0, 0
-    for _, u in ipairs(figure_units()) do
-        local id = int(call(u, "get_ID"))
-        local bits = state_bits(id)
-        local guess = bits ~= nil and bits ~= 0
-        if guess then guess_owned = guess_owned + 1 end
-        local sh = _screen_has[id]
-        if sh ~= nil and sh ~= guess then differ = differ + 1 end
-        local key = tostring(bits)
-        by_bits[key] = (by_bits[key] or 0) + 1
-        lines[#lines + 1] = string.format("  %s '%s' bits=%s screen=%s",
-            tostring(id), tostring(text(call(u, "get_FigureNameText"))), key, tostring(sh))
-    end
-    local dist = {}
-    for k, n in pairs(by_bits) do dist[#dist + 1] = k .. ":" .. n end
-    table.sort(dist)
-    table.insert(lines, 1, string.format("figures=%d  bits~=0: %d  GuiManager.getFigureNum=%s  screen read now=%s  screen-vs-bits differ=%d  bits histogram %s",
-        #lines, guess_owned, tostring(int(call(gm, "getFigureNum"))), tostring(screen), differ, table.concat(dist, " ")))
-    return lines
-end
-
 -- ---------------------------------------------------------------------------
 -- Training Simulations
 -- ---------------------------------------------------------------------------
@@ -484,7 +548,7 @@ end
 
 -- Why a mission is not one of the Training Simulations, or nil. Extra
 -- missions (the event ones) are not run from the Training tab, and an
--- unnamed one is not shown there (user test 2026-10-06). NOT IsNewGamePlus:
+-- unnamed one is not shown there. NOT IsNewGamePlus:
 -- every real Training Simulation carries it.
 local function skip_reason(u)
     if bool(r.field(u, "IsExtraMission")) == true then return "extra" end
@@ -546,30 +610,12 @@ function M.simulations()
     return out
 end
 
--- Debug: the manager's view against the open screen.
-function M.simulations_check()
-    local screen = read_mission_screen()
-    local s = M.simulations()
-    local lines = {}
-    local gm = r.singleton("app.GuiManager")
-    lines[#lines + 1] = string.format("entries=%d  GuiManager.getMissionNum=%s  screen read now=%s",
-        s and #s.entries or 0, tostring(int(call(gm, "getMissionNum"))), tostring(screen))
-    for _, e in ipairs(s and s.entries or {}) do
-        local sc = e.screen
-        lines[#lines + 1] = string.format("  %s '%s' skip=%s cat=%s available=%s cleared=%s extra=%s ng+=%s diff=%s | screen locked=%s level=%s rewards=%s",
-            tostring(e.id), tostring(e.name), tostring(e.skip), tostring(e.category), tostring(e.available),
-            tostring(e.cleared), tostring(e.extra), tostring(e.new_game_plus), tostring(e.difficulty), tostring(sc and sc.locked), tostring(sc and sc.level),
-            tostring(sc and #sc.rewards))
-    end
-    return lines
-end
-
 -- ---------------------------------------------------------------------------
 -- Earth Memories (the Rem Replicators)
 -- ---------------------------------------------------------------------------
 --
 -- Earth items Hugh gives Diana in the Shelter; each is placed there with a
--- cutscene. They come in groups. (il2cpp dump, 2026-10-06; not yet confirmed.)
+-- cutscene. They come in groups.
 --
 --   CharacterManager.getPartnerHandle().get_Updater()   app.Ch05000Updater
 --     ._SafeRoomTalkDriver   Ch05000SafeRoomTalkDriver (Diana in the Shelter)
@@ -583,15 +629,14 @@ end
 --                  the earth-item props in the loaded scene; the prop's
 --                  EarthItemPropDriver._IsPrintComp = printed by a Replicator
 --     _PlayedEventEarthItems  List<UInt32> -- NOT placement: it changed for
---                  one item mid-session with nothing placed (2026-10-06)
+--                  one item mid-session with nothing placed
 --     _EarthItemStateUnits    List<StateManager.Unit { Hash, StateBits }>
 --   Names: GuiDataManager.getItemData(id)._UIPageData[1].Header ("Globe",
 --   "CRT TV"); the display-name route gives only "It10010". An item without
 --   one (It10000) is not a Replicator item and is left out.
 --
--- Owned = acquired or held. Placed = a printed prop of it is in the scene
--- (all 16 owned read placed with everything placed, 2026-10-06; the "none
--- placed" case is not yet checked). Only readable in the Shelter.
+-- Owned = acquired or held. Placed = a printed prop of it is in the scene.
+-- Only readable in the Shelter.
 
 local inventory = nil
 do
@@ -737,45 +782,6 @@ function M.earth_memory_ids()
 end
 function M.earth_owned_ids() return (M.earth_memory_ids()) end
 function M.earth_placed_ids() local _, p = M.earth_memory_ids() return p end
-
--- Debug: every item with all four readings.
-function M.earth_memories_check()
-    local m = M.earth_memories(false)
-    if m == nil then return { "no earth items read (driver and state list both empty)" } end
-    local lines = { string.format("Diana's Shelter driver read=%s  groups=%d", tostring(m.driver), #m.groups) }
-    -- Other "placed" candidates: the earth-item props registered in the
-    -- loaded scene, and whether the Replicator finished printing each.
-    local im = r.singleton("app.ItemManager")
-    local props = {}
-    for _, kv in ipairs(r.dict_pairs(r.field(im, "_EarthItems"))) do
-        local ei = kv.value
-        local drv = r.field(ei, "<PropDriver>k__BackingField")
-        local id = int(r.field(ei, "<ItemID>k__BackingField")) or int(kv.key)
-        if id ~= nil then
-            props[id] = string.format("prop(key=%s print_comp=%s valid=%s item_hash=%s)",
-                tostring(int(kv.key)), tostring(r.field(drv, "_IsPrintComp")),
-                tostring(call(drv, "get_Valid")), tostring(int(call(drv, "get_ItemHash"))))
-        end
-    end
-    local np = 0
-    for _ in pairs(props) do np = np + 1 end
-    lines[#lines + 1] = string.format("earth-item props in the scene: %d", np)
-    local function line(e)
-        return string.format("  %s '%s' (%s) acquired=%s held=%s bits=%s played=%s %s -> owned=%s placed=%s",
-            tostring(e.id), tostring(e.name), tostring(e.internal), tostring(e.acquired), tostring(e.held),
-            tostring(e.bits), tostring(e.played), props[e.id] or "no prop", tostring(e.owned), tostring(e.placed))
-    end
-    for _, g in ipairs(m.groups) do
-        lines[#lines + 1] = string.format("group %d (%s): %d items, owned %d, placed %d",
-            g.index, tostring(g.kind), g.total, g.owned, g.placed)
-        for _, e in ipairs(g.entries) do lines[#lines + 1] = line(e) end
-    end
-    if #m.skipped > 0 then
-        lines[#lines + 1] = "left out (no name):"
-        for _, e in ipairs(m.skipped) do lines[#lines + 1] = line(e) end
-    end
-    return lines
-end
 
 -- Screen-held facts are kept per session; a new game or load may change
 -- them, so the observer drops them when the world unloads.

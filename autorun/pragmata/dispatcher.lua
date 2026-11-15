@@ -79,8 +79,8 @@ end
 -- An action registered with `rules` has a short description, and the long
 -- text goes to the peer another way: `rules_in_force` actions get it at the
 -- top of every force's state (hacking_observer), the rest once as context at
--- startup and after a reconnect. BEST_PRACTICES.md: one or two sentences per
--- description, longer rules in context.
+-- startup and after a reconnect: one or two sentences per description,
+-- longer rules in context.
 
 function M.rules(name)
     local a = _actions[name]
@@ -186,8 +186,7 @@ end
 -- then register the WHOLE available list. Neuro-SDK ignores a register for a
 -- name it already holds, so the others are no-ops there -- but a peer that reads
 -- each actions/register as the complete catalogue (apitest does) otherwise
--- forgets every other action. The 2026-09-16 session lost pragmata_enviro_hack_rotate's
--- schema that way after a sequence-group switch.
+-- forgets every other action.
 function M.reannounce(names)
     if not M.announced then return end
     if names ~= nil and #names > 0 then
@@ -220,15 +219,13 @@ function M.sync()
     return true
 end
 
--- For the debug panel: every registered name with its availability.
-function M.availability()
-    local out = {}
-    for name, def in pairs(_actions) do
-        local ok, reason = is_available(def)
-        out[#out + 1] = { name = name, available = ok, reason = reason, held = _announced[name] == true }
-    end
-    table.sort(out, function(a, b) return a.name < b.name end)
-    return out
+-- For the mod menu: how many actions are registered, and how many the peer
+-- holds as of the last actions/register. No availability checks run.
+function M.counts()
+    local total, held = 0, 0
+    for _ in pairs(_actions) do total = total + 1 end
+    for _ in pairs(_announced) do held = held + 1 end
+    return total, held
 end
 
 -- ---------------------------------------------------------------------------
@@ -236,6 +233,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local _reregister_hooks = {}
+local _last_reregister = nil
 
 -- fn() runs after a re-registration, e.g. to drop an in-flight force that the
 -- old connection will never answer.
@@ -243,6 +241,7 @@ function M.on_reregister(fn) _reregister_hooks[#_reregister_hooks + 1] = fn end
 
 local function reregister_all()
     log.info("dispatcher: re-sending startup + actions/register")
+    _last_reregister = os.time()
     mailbox.send({ command = "startup", game = GAME_NAME })
     send_register()
     send_startup_rules()
@@ -251,6 +250,12 @@ local function reregister_all()
         if not ok then log.warn("dispatcher: reregister hook failed: " .. tostring(err)) end
     end
 end
+
+-- The mod menu's "Re-send actions": the same as the server asking.
+M.reregister_all = reregister_all
+
+-- os.time() of the last re-registration, or nil.
+function M.last_reregister() return _last_reregister end
 
 -- ---------------------------------------------------------------------------
 -- Deferred-result deadlines
@@ -287,7 +292,12 @@ local function registered_names()
     return table.concat(list, ", ")
 end
 
+-- os.time() of the last message the sidecar passed in, or nil.
+local _last_incoming = nil
+function M.last_incoming() return _last_incoming end
+
 function M.handle_incoming(msg, send_fn)
+    _last_incoming = os.time()
     local cmd = msg.command
     if cmd == "actions/reregister_all" then
         reregister_all()

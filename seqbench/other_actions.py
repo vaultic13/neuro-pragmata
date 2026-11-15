@@ -3,8 +3,8 @@
 apitest builds its prompt prefix from every forcible action in the
 registration, so registering the sequence action alone would make the prompt
 smaller, and its cache entry different, from what the peer gets in game.
-These copies (pragmata_main.lua as of 2026-09-15, hacking_require_reasoning
-off; the plan action as of 2026-10-08, kept in grid_texts.py) keep the
+These copies (pragmata_main.lua as of 2026-11-15, hacking_require_reasoning
+off; the plan action is kept in grid_texts.py) keep the
 catalogue the same size. The sequence bench never forces them; the grid bench
 forces the plan action and registers the others around it.
 """
@@ -20,7 +20,7 @@ HACK_PLAN = grid_texts.ACTION_DEF
 HACK_ROTATE = {
     "name": "pragmata_enviro_hack_rotate",
     "description": (
-        "Solve the active circuit hack. One to four connectors sit around a centre, "
+        "Solve the active circuit hack, an environment hack (a door, switch or elevator). One to four connectors sit around a centre, "
         "each of them one circuit to close. A circuit is a line running in from the "
         "edge of the board; its connector closes it when it JOINS that line to the "
         "centre, both ends lined up -- pointing at the centre is not enough.\n"

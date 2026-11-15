@@ -42,7 +42,6 @@
 -- All hash fields are already engine-internal numeric ids. We pass them
 -- through verbatim — there is nothing to redact at this layer.
 
-local log = require("pragmata.util.log")
 
 local M = {}
 

@@ -8,8 +8,9 @@ state once, tags it with its categories and writes grid_corpus.json next to
 this file. The bench reads only the snapshot, never the mailbox, so a run is
 repeatable; re-run this after playing to add what the mod sent since.
 
-An existing snapshot is merged, not replaced: the mod's mailbox is truncated
-when the game starts, so a grid seen in an older session stays in the corpus.
+An existing snapshot is merged, not replaced: the mailbox can be emptied (the
+mod menu's "Clear bridge files", or by hand), so a grid seen before that stays
+in the corpus.
 Each entry must survive `render(parse(state)) == state`; one that doesn't is
 reported and left out (the port in grid_texts.py has fallen behind the mod).
 The one exception is a force sent before the red-block wording (part A): it is
@@ -29,7 +30,8 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_SOURCE = HERE.parent / "data" / "pragmata_mailbox" / "lua_to_bridge.jsonl"
 CORPUS = HERE / "grid_corpus.json"
 
-CATEGORIES = ("plain", "error", "blocks", "corrupt", "big", "nonsquare", "resume", "finale")
+CATEGORIES = ("plain", "error", "blocks", "corrupt", "big", "nonsquare", "resume", "finale",
+              "erase", "nodes", "gates")
 CATEGORY_HELP = {
     "plain": "none of the modifiers below; small square grid, cursor on the start",
     "error": "has d error nodes (entering one resets the hack)",
@@ -39,6 +41,9 @@ CATEGORY_HELP = {
     "nonsquare": "width differs from height",
     "resume": "a re-force mid-hack: cursor off the start, visited path drawn",
     "finale": "the final boss's five fixed stages, under a time limit, context kept",
+    "erase": "X erase traps: stepping on one fails the hack (generated only so far)",
+    "nodes": "bomb / purge / chain nodes on the grid (generated only so far)",
+    "gates": "directional gates = | J 7 L r (generated only so far)",
 }
 
 
@@ -59,6 +64,12 @@ def categories(p: gt.GridPuzzle) -> list[str]:
         tags.append("resume")
     if gt.finale_stage(p) is not None:
         tags.append("finale")
+    if "X" in flat:
+        tags.append("erase")
+    if flat & set("bBPC"):
+        tags.append("nodes")
+    if flat & set("=|J7Lr"):
+        tags.append("gates")
     return tags or ["plain"]
 
 

@@ -17,16 +17,12 @@
 -- gated on the engine's own "would this press count right now" flag. The peer
 -- still has to get the order right, and a wrong order still fails the hack.
 --
--- READING THE ORDER. Every force of the 2026-09-11 session told the peer
--- "On screen, in order: 1.?  2.?  3.?", so it guessed, and every guess failed
--- on its first press. The order was read from the GUI parameter's
--- InputCommands, an array of enum values: a value-type element comes back from
--- reflection boxed, and the generic enum reader asked the box for sdk.to_int64
--- first -- which is the box's ADDRESS, a number no direction has. The list the
--- GUI array is built from (updateStatus maps _Buttons to their Command, in
--- order) holds class objects whose Command is an ordinary field and reads as a
--- plain number, so that is now the source, the array the fallback, and a
--- sequence that still does not decode is not put to the peer at all.
+-- READING THE ORDER. The source is the puzzle's _Buttons list (updateStatus
+-- maps it to the GUI's InputCommands, in order): class objects whose Command
+-- is an ordinary field and reads as a plain number. The GUI array is the
+-- fallback; its elements are boxed value types, and asking a box for
+-- sdk.to_int64 gives its ADDRESS, not the direction. A sequence that still
+-- does not decode is not put to the peer at all.
 
 local log = require("pragmata.util.log")
 local config = require("pragmata.mod_config")
@@ -39,8 +35,7 @@ local M = {}
 
 M.kind = "buttons"
 M.action_name = "pragmata_enviro_hack_sequence"
--- A function rather than a string: the wording follows the active group, and
--- the group can be switched for the session from the debug panel.
+-- A function rather than a string: the wording follows the configured group.
 M.force_query = render.buttons_force_query
 
 local P = plan_lib.new({ kind = "buttons" })
@@ -255,7 +250,7 @@ local function read_state(rec)
         from_commands[#from_commands + 1] = way_to_direction(arr_get(commands, i)) or "?"
     end
 
-    -- Neutral names for where the order came from, for the debug panel.
+    -- Neutral names for where the order came from, for the log.
     local sequence, source
     if all_known(from_buttons) then
         sequence, source = from_buttons, "button list"
@@ -272,10 +267,9 @@ local function read_state(rec)
     local circle_num = registry.to_int(pget("CircleNum"))
     -- The GUI parameter exists from the first frame but is filled in a frame
     -- later, and until then it holds defaults: CircleNum 0, no commands, and
-    -- NoRotateMode false. The 2026-09-11 session forced on exactly that frame,
-    -- so the peer was told the untimed puzzle had a timing dial, and the
-    -- fingerprint flipped from timed to untimed 10 ms later -- which discards
-    -- whatever plan was made against it.
+    -- NoRotateMode false. Asking on that frame would tell the peer an untimed
+    -- puzzle has a timing dial, and the fingerprint would flip a frame later,
+    -- discarding whatever plan was made against it.
     local gui_ready = (circle_num or 0) > 0 and command_count > 0
     local no_rotate = nil
     if gui_ready then no_rotate = pget("NoRotateMode") end
@@ -332,10 +326,10 @@ function M.get_state(id)
 end
 
 
-function M.render_state()
+function M.render_state(_, opts)
     local state = M.get_state(nil)
     if state == nil then return nil end
-    return render.buttons(state)
+    return render.buttons(state, opts)
 end
 
 
@@ -397,8 +391,7 @@ function M.needs_force(id)
 end
 
 -- Never an answerless force. A sequence with a "?" in it asks the peer to guess,
--- and a guess fails the hack on its first wrong press -- which is all the
--- 2026-09-11 session's sequence forces ever did. Held back instead, and said
+-- and a guess fails the hack on its first wrong press. Held back instead, and said
 -- once, quietly, so the silence reads as a decision; the player can still enter
 -- the sequence by hand, and a read that starts working forces as normal.
 function M.force_blocked(id)
@@ -802,18 +795,6 @@ function M.tick_plan()
     end
 end
 
-
-function M.debug_status()
-    local rec, active = current_record()
-    return {
-        kind      = M.kind,
-        puzzle_id = rec and rec.id or nil,
-        type_name = active and active.type_name or nil,
-        state     = read_state(rec),
-        plan      = P.status(rec),
-        input     = input.status(),
-    }
-end
 
 
 return M

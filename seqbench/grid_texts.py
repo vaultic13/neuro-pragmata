@@ -1,13 +1,14 @@
 """The mod's enemy hacking-grid wording (pragmata_enemy_hack_plan), for the grid bench.
 
-A Python port of autorun/pragmata/util/snake_render.lua as of 2026-10-08, at
+A Python port of autorun/pragmata/util/snake_render.lua as of 2026-11-15, at
 glyph level: a puzzle here is a grid of glyphs (what the peer sees), not the
 engine's cell records. It covers everything the mod has actually sent -- walls,
 error nodes, red blocks (R), corrupted cells (c), blue O / A and yellow * nodes,
 the trail (arrows or ~), the sticky-bomb note, the red-block and corruption
-notes, the hacking-mode line, the dynamic legend and the bonus list. Left out
-because no force has ever carried them: directional gates, the equipped-skill
-note, bomb / purge / chain / shield nodes.
+notes, the hacking-mode line, the equipped-skill note (and the skill's name in
+the legend and bonus list), the dynamic legend and the bonus list. Left out
+because no force has ever carried them: directional gates, bomb / purge /
+chain / shield nodes, and Chain's own 'C' skill glyph.
 
 `parse_state` reads a state text back into a GridPuzzle, and the selftest
 checks `render(parse_state(s)) == s` for every force in grid_corpus.json, so
@@ -39,7 +40,7 @@ ARROW_DIR = {v: k for k, v in ARROW.items()}
 ACTION_DEF = {
     "name": ACTION_NAME,
     "description": (
-        "Plan a path through the active hacking grid from cursor @ to Goal G.\n"
+        "Enemy hack: plan a path through the hacking grid on the enemy, from cursor @ to Goal G.\n"
         "Coordinates: (0,0) is TOP-LEFT. x=column (left->right). y=row "
         "(top->bottom). 'up' decreases y by 1; 'down' increases y by 1; "
         "'left' decreases x by 1; 'right' increases x by 1. The first row "
@@ -124,6 +125,8 @@ class GridPuzzle:
     blocks: Optional[tuple[int, int, Optional[str]]] = None   # (active, total, next corner)
     skipped: Optional[tuple[int, int]] = None                   # sticky bombs: (rows, cols)
     mode_line: Optional[str] = None
+    # The equipped skill as the mod names it: (display, effect), or None.
+    skill: Optional[tuple[str, str]] = None
 
     def glyph(self, x: int, y: int) -> Optional[str]:
         if 0 <= x < self.width and 0 <= y < self.height:
@@ -135,6 +138,10 @@ class GridPuzzle:
         if g == "c":
             return self.under.get((x, y))
         return g if g in BONUS_NAMES else None
+
+    @property
+    def has_skill_node(self) -> bool:
+        return any("*" in row for row in self.cells) or "*" in self.under.values()
 
     @property
     def corrupted(self) -> bool:
@@ -247,12 +254,15 @@ def overlay(p: GridPuzzle) -> list[list[str]]:
     return rows
 
 
-def _legend(drawn: list[list[str]]) -> Optional[str]:
+def _legend(drawn: list[list[str]], skill: Optional[tuple[str, str]] = None) -> Optional[str]:
     present = {g for row in drawn for g in row}
     lines = ["Legend:"]
     for glyphs, desc in LEGEND_ENTRIES:
         shown = [g for g in glyphs if g in present]
         if shown:
+            if skill and glyphs == ("*",):
+                desc = (f"{skill[0]} skill node - an effective but limited-use bonus; "
+                        "route through it (effect in the skill note above)")
             lines.append("  " + "/".join(shown) + " = " + desc)
     return "\n".join(lines) if len(lines) > 1 else None
 
@@ -274,6 +284,9 @@ def _bonus_block(p: GridPuzzle) -> Optional[str]:
     lines = [BONUS_INTRO]
     for _, y, x, kind in found:
         name, label = BONUS_NAMES[kind]
+        if kind == "*" and p.skill:
+            name, label = (f"{p.skill[0]} skill node",
+                           "route THROUGH it when it's on your way (effect in the skill note above)")
         lines.append(f"  ({x}, {y}) [{p.cells[y][x]}] {name} - {label}")
     return "\n".join(lines)
 
@@ -354,6 +367,8 @@ def render(p: GridPuzzle, adjacency: bool = False) -> str:
     parts.append(ROUTING_RULE)
     if p.mode_line:
         parts.append(p.mode_line)
+    if p.skill and p.has_skill_node:
+        parts.append(f"Skill node ('*') = {p.skill[0]}: {p.skill[1]}")
     if len(p.trail) >= 1:
         parts.append("Hack in progress: @ is the CURRENT cursor (not the start); plan from @.")
         if p.trail_mode == "arrows":
@@ -362,7 +377,7 @@ def render(p: GridPuzzle, adjacency: bool = False) -> str:
             cx, cy = p.trail[-1]
             parts.append(f"You CAN reverse one step back onto the cell you came from "
                          f"({cx},{cy}) - it frees up. No other ~ cell is enterable.")
-    legend = _legend(drawn)
+    legend = _legend(drawn, p.skill)
     if legend:
         parts += ["", legend]
     if adjacency:
@@ -404,6 +419,7 @@ _BLOCKS = re.compile(r"^RED BLOCKS: (\d+) of (\d+) still up.*?(?:\(next to go: t
 _SKIP = re.compile(r"^NOTE: (\d+) row\(s\) and (\d+) column\(s\) are currently REMOVED")
 _CAME = re.compile(r"^You CAN reverse one step back onto the cell you came from \((\d+),(\d+)\)")
 _BONUS = re.compile(r"^  \((\d+), (\d+)\) \[(.)\] (.+?) - ")
+_SKILL = re.compile(r"^Skill node \('\*'\) = (.+?): (.*)$")
 
 
 class ParseError(ValueError):
@@ -472,7 +488,7 @@ def parse_state(text: str) -> GridPuzzle:
         drawn.append(row)
 
     cursor = goal = None
-    blocks = skipped = mode_line = came_from = None
+    blocks = skipped = mode_line = came_from = skill = None
     trail_mode = "none"
     under: dict[Pos, str] = {}
     for line in lines[2 + h:]:
@@ -495,6 +511,10 @@ def parse_state(text: str) -> GridPuzzle:
         if line.startswith("Hacking mode - "):
             mode_line = line
             continue
+        km = _SKILL.match(line)
+        if km:
+            skill = (km.group(1), km.group(2))
+            continue
         if line == ARROWS_NOTE:
             trail_mode = "arrows"
             continue
@@ -505,7 +525,10 @@ def parse_state(text: str) -> GridPuzzle:
             continue
         bn = _BONUS.match(line)
         if bn and bn.group(3) == "c":
-            kind = _NAME_TO_GLYPH.get(bn.group(4))
+            name = bn.group(4)
+            if skill and name == f"{skill[0]} skill node":
+                name = BONUS_NAMES["*"][0]
+            kind = _NAME_TO_GLYPH.get(name)
             if kind:
                 under[(int(bn.group(1)), int(bn.group(2)))] = kind
     if cursor is None or goal is None:
@@ -539,7 +562,7 @@ def parse_state(text: str) -> GridPuzzle:
         cells[cursor[1]][cursor[0]] = "S"
     trail = _order_trail(trail_cells, start, cursor, arrows, came_from) if trail_cells else []
     return GridPuzzle(w, h, cells, cursor, goal, start, trail, trail_mode, under,
-                      blocks, skipped, mode_line)
+                      blocks, skipped, mode_line, skill)
 
 
 def moves_text(moves) -> str:

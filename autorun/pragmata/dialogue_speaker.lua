@@ -11,11 +11,6 @@
 -- This module polls get_CurrentMessageInfo each frame and sets
 -- _current_speaker from it, preferring bindings/speaker_resolver.lua when that
 -- file is present and falling back to try_extract_speaker() below.
---
--- The one-shot MessageInfo structure dump that used to write
--- messageinfo_discovery.log has been removed -- it was discovery scaffolding,
--- and the shapes it found are encoded in try_extract_speaker() and the
--- resolver. Recover it from git history if a future build changes the type.
 
 local M = {}
 local log = require("pragmata.util.log")

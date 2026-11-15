@@ -1,4 +1,5 @@
--- The Stamp Club, as pragmata_menu_list { menu = "stamps" } (menu_actions.lua).
+-- The Stamp Club, as pragmata_menu_list while the Cabin's Stamp Club tab is
+-- open (menu_actions.lua).
 --
 -- The board on screen: a map of stamped / open / hidden cells, each cell's
 -- reward, the line bonuses, Cabin Coins, and the other boards.
@@ -135,22 +136,14 @@ local function stamps_action()
     return true, board_text(b)
 end
 
--- pragmata_menu_list { menu = "stamps" } (menu_actions.lua). No info: the
--- board text already carries every cell.
+-- pragmata_menu_list while the tab is open (menu_actions.lua). No info:
+-- the board text already carries every cell.
 function M.register(menu_actions, gates, binding)
     stamps = binding
-    menu_actions.add({ key = "stamps", label = "the Stamp Club",
-                       about = "the board on screen: stamped, open and hidden cells, rewards, "
-                           .. "line bonuses, Cabin Coins; only while the Cabin's Stamp Club tab is open",
+    menu_actions.add({ key = "stamps", label = "the Stamp Club", title = "Stamp Club",
+                       open_key = "stamps",
                        list = function() return stamps_action() end,
-                       gate = gates.menu_open("stamps") })
-end
-
--- For Pragmata State Debug: the text the peer would get.
-function M.debug_text()
-    local ok, success, text = pcall(stamps_action)
-    if not ok then return "RAISED: " .. tostring(success) end
-    return string.format("[%s] %s", tostring(success), tostring(text))
+                       info_refusal = "the list already gives every cell; use pragmata_menu_list" })
 end
 
 return M

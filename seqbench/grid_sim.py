@@ -15,6 +15,14 @@ tick_plan / the settle machine) on top of what the game does with each cell:
                         mod's own dead reckoning). Off: the hack fails on contact
     c corrupted         walkable; the cursor is stunned (STUN_S)
     G goal              solved; the moves after it are never sent
+    = | J 7 L r gate    directional gate: entered only along its arrows, and
+                        left only by the exit that entry leads to (= | straight
+                        through, the corners turn); any other move into or out
+                        of it is blocked like a wall. The rule is the old sim/
+                        harness's model of the engine's TwoWay cells, never
+                        seen in game; retracing onto the cell you came from is
+                        always allowed
+    b B P C             bomb / purge / chain nodes: walkable floor here
     plan runs out       "Ran all N planned move(s) without reaching the goal"
 
 Times are estimates for the finale's clock, not measurements of the peer:
@@ -35,6 +43,37 @@ STUN_S = 0.5
 RESET_S = 0.5
 
 Pos = gt.Pos
+
+# Directional gates (snake_render's TwoWay* glyphs): the move that entered
+# the gate -> the only move that may leave it. A move into a gate that is not
+# a key here is blocked. From the old sim/ harness (CELL_RULES).
+GATE_EXITS: dict[str, dict[str, str]] = {
+    "=": {"right": "right", "left": "left"},
+    "|": {"down": "down", "up": "up"},
+    "J": {"right": "up", "down": "left"},     # joins left and top
+    "7": {"right": "down", "up": "left"},     # joins left and bottom
+    "L": {"left": "up", "down": "right"},     # joins right and top
+    "r": {"left": "down", "up": "right"},     # joins right and bottom
+}
+
+
+def _gate_ok(p: gt.GridPuzzle, at: Pos, entered: Optional[str], d: str, target: Pos) -> bool:
+    """May the cursor at `at` (reached by the move `entered`, None when not
+    known) move `d` onto `target`, as far as gates go?"""
+    here = GATE_EXITS.get(p.glyph(*at) or "")
+    if here is not None and entered is not None and here.get(entered) != d:
+        return False
+    there = GATE_EXITS.get(p.glyph(*target) or "")
+    return there is None or d in there
+
+
+def _arrival(p: gt.GridPuzzle) -> Optional[str]:
+    """The move that brought the cursor to where it is, from the trail."""
+    if not p.trail:
+        return None
+    px, py = p.trail[-1]
+    step = (p.cursor[0] - px, p.cursor[1] - py)
+    return next((d for d, v in gt.DELTAS.items() if v == step), None)
 
 
 @dataclass
@@ -89,6 +128,7 @@ def play(p: gt.GridPuzzle, raw_moves, refuse_red: bool = True) -> PlayResult:
         return PlayResult(outcome, success, message, cur, landed, stuns, path,
                           landed * MOVE_S + stuns * STUN_S + extra_s)
 
+    entered = _arrival(cur)
     for d in moves:
         dx, dy = gt.DELTAS[d]
         x, y = cur.cursor[0] + dx, cur.cursor[1] + dy
@@ -96,6 +136,10 @@ def play(p: gt.GridPuzzle, raw_moves, refuse_red: bool = True) -> PlayResult:
         if g is None:
             return result("off_grid", False, gt.MSG_OFF_GRID)
         target = (x, y)
+        retrace = bool(cur.trail) and target == cur.trail[-1]
+        if not retrace and not _gate_ok(cur, cur.cursor, entered, d, target):
+            return result("wall", False, gt.MSG_WALL.format(n=landed))
+        entered = None if retrace else d
         if target == cur.goal:
             landed += 1
             path.append(target)
@@ -163,24 +207,30 @@ def shortest_path(p: gt.GridPuzzle, avoid_c: bool = False) -> Optional[list[str]
 
 
 def _bfs(p: gt.GridPuzzle, avoid_c: bool) -> Optional[list[str]]:
-    start = p.cursor
-    prev: dict[Pos, tuple[Pos, str]] = {}
+    # A state is (cell, the move that entered it): on a gate the way out
+    # depends on the way in. Off gates the entry is dropped (None).
+    start = (p.cursor, _arrival(p))
+    prev: dict = {}
     seen = {start}
     q = deque([start])
     while q:
-        at = q.popleft()
+        state = q.popleft()
+        at, entered = state
         if at == p.goal:
             moves = []
-            while at != start:
-                at, d = prev[at]
+            while state != start:
+                state, d = prev[state]
                 moves.append(d)
             return moves[::-1]
         for d, (dx, dy) in gt.DELTAS.items():
             nxt = (at[0] + dx, at[1] + dy)
-            if nxt not in seen and _passable(p, nxt, avoid_c):
-                seen.add(nxt)
-                prev[nxt] = (at, d)
-                q.append(nxt)
+            if not _passable(p, nxt, avoid_c) or not _gate_ok(p, at, entered, d, nxt):
+                continue
+            ns = (nxt, d if (p.glyph(*nxt) or "") in GATE_EXITS else None)
+            if ns not in seen:
+                seen.add(ns)
+                prev[ns] = (state, d)
+                q.append(ns)
     return None
 
 
@@ -201,7 +251,7 @@ def best_route(p: gt.GridPuzzle, slack: int = 4, budget: int = 150_000) -> Optio
     def dist(pos: Pos) -> int:
         return abs(pos[0] - p.goal[0]) + abs(pos[1] - p.goal[1])
 
-    def dfs(at: Pos, used: set, n: int, blues: int) -> bool:
+    def dfs(at: Pos, used: set, n: int, blues: int, entered: Optional[str] = None) -> bool:
         steps[0] += 1
         if steps[0] > budget:
             return False
@@ -209,20 +259,20 @@ def best_route(p: gt.GridPuzzle, slack: int = 4, budget: int = 150_000) -> Optio
             if blues > best[0] or (blues == best[0] and n < best[1]):
                 best[0], best[1] = blues, n
             return True
-        for dx, dy in gt.DELTAS.values():
+        for d, (dx, dy) in gt.DELTAS.items():
             nxt = (at[0] + dx, at[1] + dy)
-            if nxt in used or not _passable(p, nxt, False):
+            if nxt in used or not _passable(p, nxt, False) or not _gate_ok(p, at, entered, d, nxt):
                 continue
             if n + 1 + dist(nxt) > limit:
                 continue
             used.add(nxt)
-            ok = dfs(nxt, used, n + 1, blues + blue(nxt))
+            ok = dfs(nxt, used, n + 1, blues + blue(nxt), d)
             used.discard(nxt)
             if not ok:
                 return False
         return True
 
-    if not dfs(p.cursor, {p.cursor}, 0, 0) or best[0] < 0:
+    if not dfs(p.cursor, {p.cursor}, 0, 0, _arrival(p)) or best[0] < 0:
         return None     # out of budget, or only reachable by retracing first
     return best[0], best[1]
 

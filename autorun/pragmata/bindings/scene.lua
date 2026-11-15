@@ -48,7 +48,6 @@
 --   first and fall back to reading the private List<UInt32> backing
 --   fields _CurrentSceneID / _DestSceneID (also ExposeMember-tagged).
 
-local log = require("pragmata.util.log")
 
 local M = {}
 

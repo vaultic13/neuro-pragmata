@@ -1,10 +1,11 @@
 -- ASCII rendering for hacking grid state.
 --
--- Mirrors `sim/ascii_render.py` from the evaluation harness — same glyph
--- table, same coordinate convention, same adjacency-block format. The
--- representation the AI peer sees in production must match what was tested
--- against in the simulator, otherwise the simulator's solve rate doesn't
--- transfer to live play.
+-- Ported to Python as `seqbench/grid_texts.py` (the grid bench), whose
+-- selftest checks the port byte for byte against every force recorded from
+-- this file. The representation the AI peer sees in production must match
+-- what the bench tested, otherwise its solve rate doesn't transfer to live
+-- play: when this render changes, port the change there. (It began as a
+-- mirror of the old `sim/` harness's ascii_render.py, retired 2026-11-15.)
 --
 -- Input: a state table as produced by bindings.puzzle_snake.get_state():
 --   {
@@ -138,7 +139,7 @@ local DIRECTIONAL_TYPES = {
 --     a genuinely different type). `Open` renders 'O' (BLUE); `Attack` renders
 --     'A' (ORANGE) — kept DISTINCT because Hybrid mode spawns BOTH on the same
 --     grid, and flattening them would hide the difference the mode note explains.
---     Both are route-through reward nodes (REWARD_TYPES). Modes other than
+--     Both are route-through reward nodes. Modes other than
 --     Offense/Hybrid leave the node as `Open`; the active mode (see state.mode)
 --     dictates the EFFECT.
 --   * YELLOW (secondary: the "skill node"): ActiveSkill (and its
@@ -156,18 +157,6 @@ local ACTIVE_SKILL_TYPES = {
     ActiveSkill2 = true,
     ActiveSkill3 = true,
 }
-
--- Route-through reward node grid types. Both are BLUE in-game; they differ only
--- by ICON, which we mirror as distinct glyphs: Open -> 'O', Attack -> 'A'. Kept
--- distinct because Hybrid mode puts both on one grid. Both are "pass through me"
--- nodes; bonus_info labels each (same BLUE color, different icon/role). NOTE: do
--- NOT assign 'A' a different color name — they're blue, and a wrong color would
--- clash with what the streamer says aloud ("route through the blue ones").
-local REWARD_TYPES = {
-    Open   = true,   -- blue node, 'O' icon (default / most modes)
-    Attack = true,   -- blue offensive node, 'A' icon (Offense / Hybrid; dump-verified)
-}
-
 
 local function cell_glyph(cell)
     -- Cells with no entry, or "None"/"Nothing" type cells, are positions
@@ -640,9 +629,10 @@ end
 
 -- Render the full prompt block: header, terrain, coords, the single routing
 -- rule, dynamic legend, optional adjacency, optional bonus list. Kept lean —
--- only the structural lines (header / " y  glyphs" rows / Cursor:/Goal:) are
--- load-bearing for the sim's round-trip parser; everything else is prose the
--- model reads. Mirrors the sim renderer in `sim/`.
+-- the structural lines (header / " y  glyphs" rows / Cursor:/Goal:, and the
+-- red-block, sticky-bomb, skill, path and bonus-list lines) are what
+-- seqbench's parse_state reads back; everything else is prose the model reads.
+-- Ported in `seqbench/grid_texts.py`.
 --
 -- opts.with_legend (default true)    - include the dynamic legend
 -- opts.with_adjacency (default true) - include the per-direction adjacency block
@@ -767,6 +757,81 @@ function M.render(state, opts)
     end
 
     return table.concat(parts, "\n")
+end
+
+
+-- The grid alone, for context messages: size, the drawn grid, cursor and
+-- goal. No routing rules, notes or bonus list -- those are in the action's
+-- description. opts.with_legend adds the dynamic legend.
+function M.render_grid_only(state, opts)
+    opts = opts or {}
+    local parts = {}
+    table.insert(parts, string.format(
+        "Hacking grid (%d wide, %d tall - x ranges 0..%d, y ranges 0..%d):",
+        state.width, state.height, state.width - 1, state.height - 1))
+    table.insert(parts, render_terrain(state))
+    if state.cursor then
+        table.insert(parts, string.format("Cursor: (%d, %d)", state.cursor.x, state.cursor.y))
+    end
+    if state.goal then
+        table.insert(parts, string.format("Goal:   (%d, %d)", state.goal.x, state.goal.y))
+    end
+    if opts.with_legend then
+        local legend = dynamic_legend(state)
+        if legend then
+            table.insert(parts, "")
+            table.insert(parts, legend)
+        end
+    end
+    return table.concat(parts, "\n")
+end
+
+
+-- Glyphs a checked plan may step on. Everything else -- walls, error nodes,
+-- traps, red blocks, the trail, directional cells and anything unknown --
+-- makes the plan "unchecked": it still runs, it just gets no special
+-- treatment if it is interrupted.
+local CHECK_WALKABLE = {
+    ["."] = true, ["O"] = true, ["A"] = true, ["*"] = true, ["C"] = true,
+    ["G"] = true, ["S"] = true, ["c"] = true, ["b"] = true, ["B"] = true,
+    ["P"] = true,
+}
+local CHECK_DELTAS = {
+    up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 },
+}
+
+-- Walk `moves` from the cursor on `state`. Returns true when every step stays
+-- on the board, enters only plain walkable cells (never the existing trail or
+-- a cell the plan already used) and the last step ends on the goal; else
+-- false and a short reason.
+function M.check_plan(state, moves)
+    if state == nil or state.cursor == nil or state.goal == nil then
+        return false, "grid unreadable"
+    end
+    local used = {}
+    if state.trail then
+        for _, p in ipairs(state.trail) do used[p.x .. "," .. p.y] = true end
+    end
+    local x, y = state.cursor.x, state.cursor.y
+    used[x .. "," .. y] = true
+    for i, d in ipairs(moves) do
+        local dd = CHECK_DELTAS[d]
+        if dd == nil then return false, "move " .. i .. " is not a direction" end
+        x, y = x + dd[1], y + dd[2]
+        if not in_bounds(state, x, y) then return false, "move " .. i .. " leaves the grid" end
+        local key = x .. "," .. y
+        if used[key] then return false, "move " .. i .. " re-enters the path" end
+        used[key] = true
+        local row = state.cells[y + 1]
+        local glyph = (x == state.goal.x and y == state.goal.y) and "G"
+            or cell_glyph(row and row[x + 1])
+        if not CHECK_WALKABLE[glyph] then
+            return false, string.format("move %d enters '%s'", i, glyph)
+        end
+        if glyph == "G" and i < #moves then return false, "moves continue past the goal" end
+    end
+    if x ~= state.goal.x or y ~= state.goal.y then return false, "does not end on the goal" end
+    return true
 end
 
 

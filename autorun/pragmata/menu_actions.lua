@@ -1,137 +1,138 @@
--- pragmata_menu_list / pragmata_menu_info: every Shelter menu and catalog
--- behind two actions.
+-- pragmata_menu_list / pragmata_menu_info: the Shelter menu open right now.
 --
--- These used to be nineteen actions (pragmata_firmware_list, _info,
--- pragmata_printer_list, ... pragmata_stamps), each announced only while its
--- menu was open. BEST_PRACTICES.md asks for the opposite on both counts: a
--- stable action set (every register / unregister slows the peer down, and
--- the Shelter's menus open and close constantly) and one parameterized action
--- instead of many near-identical ones (the peer fixates on a few of them).
--- So the menu is now an enum argument, both actions are registered once and
--- never hidden, and a menu that cannot be read right now refuses with the
--- same reason its gate used to give.
+-- The Shelter menus read right only while their screen is open, so naming
+-- one that is closed could only ever be refused. The two actions take no menu
+-- at all: they read whichever menu is on screen, and the reply's first line
+-- names it. The peer learns
+-- that a menu opened from menu_observer.lua's push.
 --
--- The menu modules keep their formatting and their gates; they hand them to
--- add() instead of registering actions of their own:
+-- The catalogs (Data Library, Bot Database, Training Simulations, Earth
+-- Memories) read right with their screens closed, so they moved to the
+-- Archive pair (catalog_actions.lua), where a `catalog` choice still makes
+-- sense.
+--
+-- The two actions are announced while in the main Shelter or while one of
+-- these screens is open (the tram's sector selection can be opened outside
+-- the Shelter). Elsewhere there is nothing they could read.
+--
+-- Menu modules hand their readers to add():
 --
 --   menu_actions.add({ key = "printer", label = "the Unit Printer",
---                      about = "every tab: printed or not, levels, costs",
+--                      title = "Unit Printer", open_key = "printer",
 --                      list = fn(), info = fn(args) or nil,
---                      gate = fn() -> ok, reason or nil })
+--                      info_refusal = "..." (when info is nil),
+--                      open_note = fn() -> "on the Weapon tab" or nil })
 --
--- `label` names the menu in a refusal; `about` explains the enum value in the
--- schema, so the peer can tell the values apart without a long description.
+-- `open_key` is the menu's mod_config.menu_gui key (action_gates.menu_is_open).
+-- `label` names the menu in running text, `title` heads a reply. Only one of
+-- these menus can be on screen at a time (they are full-screen; the Cabin hub
+-- shows one tab); if two ever read open, add() order decides, and State
+-- Debug -> Gates lists both.
 
 local M = {}
 
 local name_match = require("pragmata.util.name_match")
 
 local _menus = {}       -- key -> entry
-local _order = {}       -- keys in add() order (the enum order the peer sees)
+local _order = {}       -- keys in add() order
+local _gates = nil      -- action_gates, set by register()
 
 function M.add(entry)
     assert(type(entry.key) == "string", "menu key required")
     assert(type(entry.list) == "function", "list function required for " .. entry.key)
+    entry.open_key = entry.open_key or entry.key
+    entry.title = entry.title or entry.label or entry.key
     if _menus[entry.key] == nil then _order[#_order + 1] = entry.key end
     _menus[entry.key] = entry
 end
 
-local function keys(with_info)
+function M.entry(key) return _menus[key] end
+function M.keys()
     local out = {}
+    for i, k in ipairs(_order) do out[i] = k end
+    return out
+end
+
+-- The entries whose screens are open now, in add() order.
+function M.open_entries()
+    local out = {}
+    if _gates == nil then return out end
     for _, k in ipairs(_order) do
-        if not with_info or _menus[k].info ~= nil then out[#out + 1] = k end
+        local e = _menus[k]
+        if _gates.menu_is_open(e.open_key) then out[#out + 1] = e end
     end
     return out
 end
 
-local function menu_lines(with_info)
+local function labels()
     local parts = {}
-    for _, k in ipairs(keys(with_info)) do
-        local e = _menus[k]
-        parts[#parts + 1] = k .. " = " .. tostring(e.label or k)
-            .. (e.about and (" (" .. e.about .. ")") or "")
-    end
-    return table.concat(parts, "; ")
+    for _, k in ipairs(_order) do parts[#parts + 1] = tostring(_menus[k].label or k) end
+    if #parts <= 1 then return table.concat(parts) end
+    return table.concat(parts, ", ", 1, #parts - 1) .. " or " .. parts[#parts]
 end
 
--- The entry for args.menu, or nil + an actionable refusal.
-local function pick(args, with_info)
-    local key = type(args) == "table" and args.menu or nil
-    local entry = type(key) == "string" and _menus[key] or nil
-    if entry == nil or (with_info and entry.info == nil) then
-        return nil, "Unknown menu '" .. tostring(key) .. "'. Use one of: "
-            .. menu_lines(with_info) .. "."
-    end
-    if entry.gate ~= nil then
-        local ok, avail, reason = pcall(entry.gate)
-        if ok and avail == false then
-            local label = tostring(entry.label or key)
-            return nil, (label:gsub("^%l", string.upper)) .. " cannot be read right now"
-                .. (reason and (": " .. reason) or "") .. "."
-        end
-    end
-    return entry
+local function none_open()
+    return "No menu is open. Open one of: " .. labels() .. ". "
+        .. "The Archive and the Shelter's catalogs are read with pragmata_archive_list."
 end
 
-local function call(fn, ...)
+-- Every reply starts by naming the menu it read, unless its text already does.
+local function headed(entry, success, text)
+    text = tostring(text or "")
+    if text:sub(1, #entry.title) == entry.title then return success, text end
+    return success, entry.title .. ":\n" .. text
+end
+
+local function call(entry, fn, ...)
     local ok, success, message = pcall(fn, ...)
-    if not ok then return false, "that menu could not be read: " .. tostring(success) end
-    return success, message
+    if not ok then return false, entry.title .. " could not be read: " .. tostring(success) end
+    return headed(entry, success, message)
+end
+
+-- In the main Shelter, or while one of these menus is open.
+local function available()
+    if _gates == nil then return false, "the menu readers failed to load" end
+    if _gates.in_main_shelter() or #M.open_entries() > 0 then return true end
+    return false, "only in the main Shelter, or while one of its menus is open"
 end
 
 -- Called once from pragmata_main.lua, after every menu module has added its
--- entries (the enum is built from them).
-function M.register(dispatcher)
+-- entries.
+function M.register(dispatcher, gates)
+    _gates = gates
     if #_order == 0 then return end
-    local list_schema = {
-        type = "object",
-        required = { "menu" },
-        properties = {
-            menu = { type = "string", ["enum"] = keys(false),
-                     description = "Which menu or catalog to read: " .. menu_lines(false) .. "." },
-        },
-    }
-    local info_schema = name_match.schema("entries, exactly as pragmata_menu_list gives them")
-    info_schema.properties.menu = { type = "string", ["enum"] = keys(true),
-                                    description = "Which menu or catalog the names are from: "
-                                        .. menu_lines(true) .. "." }
-    info_schema.required = { "menu", "names" }
-    info_schema.properties.__keyorder = { "menu", "names" }
+    local info_schema = name_match.schema("entries of the open menu")
 
     dispatcher.register("pragmata_menu_list", {
-        description = "Read a Shelter menu or catalog: what it lists, with levels, costs, counts "
-            .. "or completion. Most work only while that menu is open or in the Shelter; "
-            .. "a call that cannot be answered says why. Read-only.",
-        schema = list_schema,
-        handler = function(args)
-            local entry, why = pick(args, false)
-            if entry == nil then return false, why end
-            return call(entry.list)
+        description = "Read the Shelter menu open on screen right now (" .. labels() .. "): "
+            .. "what it lists, with levels, costs, counts or completion. The reply names the "
+            .. "menu it read; with none open it says which can be opened. You are told when "
+            .. "one opens or closes. Read-only.",
+        short = "Read the Shelter menu open on screen right now. Read-only.",
+        schema = { type = "object" },
+        available = available,
+        handler = function()
+            local entry = M.open_entries()[1]
+            if entry == nil then return false, none_open() end
+            return call(entry, entry.list)
         end,
     })
     dispatcher.register("pragmata_menu_info", {
-        description = "Details for up to 8 entries of a Shelter menu or catalog, by the names "
-            .. "pragmata_menu_list gives. Same availability as pragmata_menu_list. Read-only.",
+        description = "Details for up to 8 entries of the Shelter menu open on screen right now, "
+            .. "by the names pragmata_menu_list gives. Read-only.",
+        short = "Details for up to 8 entries of the open Shelter menu, by name. Read-only.",
         schema = info_schema,
+        available = available,
         handler = function(args)
-            local entry, why = pick(args, true)
-            if entry == nil then return false, why end
-            return call(entry.info, args)
+            local entry = M.open_entries()[1]
+            if entry == nil then return false, none_open() end
+            if entry.info == nil then
+                return false, entry.title .. ": " .. tostring(entry.info_refusal
+                    or "this menu has no details beyond what pragmata_menu_list gives") .. "."
+            end
+            return call(entry, entry.info, args)
         end,
     })
-end
-
--- For Pragmata State Debug.
-function M.menus()
-    local out = {}
-    for _, k in ipairs(_order) do
-        local e = _menus[k]
-        local ok, avail, reason = true, true, nil
-        if e.gate ~= nil then ok, avail, reason = pcall(e.gate) end
-        out[#out + 1] = { key = k, label = e.label, about = e.about, has_info = e.info ~= nil,
-                          available = (not ok) or avail ~= false, reason = reason }
-    end
-    return out
 end
 
 return M

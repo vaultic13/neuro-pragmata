@@ -1,13 +1,16 @@
 # seqbench — hacking puzzle prompt bench
 
-A Tk tool that measures how well an AI peer handles the mod's hacking puzzles,
-in batches, without the game. Two benches, picked under **Bench** at the top:
+A Tk tool and a command-line runner that measure how well an AI peer handles
+the mod's hacking puzzles, in batches, without the game. Two benches, picked
+under **Bench** at the top (or as `sequence` / `grid` on the command line):
 
 - **Sequence hack** (`pragmata_enviro_hack_sequence`): the prompt versions and the
   mod's five groups. Most of this README.
 - **Enemy grid** (`pragmata_enemy_hack_plan`): the enemy hacking grid with today's
   modifiers (red blocks, corruption), big and non-square grids, mid-hack
-  re-forces and the final boss's timed stages. See
+  retries, the final boss's timed stages, and the cells the mod can draw but
+  no game has shown yet (X traps, bomb / purge / chain nodes, directional
+  gates). See
   [Enemy grid bench](#enemy-grid-bench).
 
 ```
@@ -16,6 +19,33 @@ py -3 seqbench_gui.py --url ws://127.0.0.1:8123 [--bench grid]
 
 Use `py -3` (3.12, which has `websockets` and `tkinter` on this machine), as for
 apitest.
+
+### Command line
+
+`run_eval.py` runs the same batch without the window: it prints one line per
+scored trial or episode and the summary table, and writes the same
+`results/<timestamp>[-grid]/` files.
+
+```
+py -3 run_eval.py --url ws://127.0.0.1:8123 grid --categories plain,blocks,finale --per 5
+py -3 run_eval.py --url ws://127.0.0.1:8123 --repeats 3 sequence --groups 1,3 --set-size 7
+py -3 run_eval.py --url ws://127.0.0.1:8124 grid --per 2 --no-warmup --min-solved 100
+```
+
+| Option | Meaning |
+|---|---|
+| `--url` | the peer (apitest listens on 8123) |
+| `--seed`, `--repeats`, `--cap`, `--gap` | as in the GUI; `--cap` defaults to 15 s (sequence) / 30 s (grid) |
+| `--no-warmup`, `--plan-only` | skip the warm-up; register only the forced action |
+| `--out-root DIR` | where the run folder goes (default `results/`) |
+| `--quiet` | the summary only |
+| `grid --categories --per --source --versions` | the puzzle set and the wording versions |
+| `grid --max-forces --finale-budget --no-refuse-red` | as the GUI's grid settings |
+| `grid --min-solved P` / `sequence --min-pass P` | exit 2 if any summary row is below P % |
+| `sequence --groups 1,2,... --set-size 5/7/9` | the mod groups to run |
+
+Exit status: 0 finished, 1 stopped / aborted / no connection, 2 a threshold
+missed.
 
 ## Where it sits
 
@@ -88,9 +118,6 @@ version id, so results line up with the runs that picked them.
 | 3 | `list+compass+shuffle` | compass words, numbered entries out of order | `order` | `puzzle_sequence_group = 3` |
 | 4 | `list+compass` | compass words | `order` | `puzzle_sequence_group = 4` |
 | 5 | `list` | the original list | `order` | `puzzle_sequence_group = 5` |
-
-In game the group can also be switched for the session, without saving, under
-REFramework menu → Pragmata Puzzle Debug → **Sequence hack group**.
 
 The mod's texts for these five are ports of `sequence_texts.py`, checked byte
 for byte against it. If either side changes, port the change to the other.
@@ -200,7 +227,7 @@ expected answer in the same shape and, for letters, each misread
 
 ## Enemy grid bench
 
-Tests the enemy hacking grid the way the mod plays it, as of 2026-10-08.
+Tests the enemy hacking grid the way the mod plays it, as of 2026-11-15.
 Nothing is imported from `autorun/`: `grid_texts.py` is a Python port of
 `util/snake_render.lua` (plus the force query, the `pragmata_enemy_hack_plan`
 registration and the mod's tool-result strings). The selftest proves the port
@@ -216,7 +243,7 @@ Two sources, picked under **Source** (`both` by default):
   py -3 grid_corpus_build.py [lua_to_bridge.jsonl ...]
   ```
   - The default source is `../data/pragmata_mailbox/lua_to_bridge.jsonl`.
-  - The snapshot is merged, never replaced, because the mod truncates the mailbox when the game starts. Re-run it after playing.
+  - The snapshot is merged, never replaced, because the mailbox can be emptied (mod menu → **Clear bridge files**). Re-run it after playing.
   - Forces sent before today's red-block wording are kept, marked `reworded`, and sent in today's wording.
   - A grid that cannot be solved as drawn is kept but never benched. Today that is r019 and r020: 3-of-4 red-block grids where the cursor is boxed in by R cells of the top-left block, which had already gone down.
 - **generated**: seeded grids from `grid_gen.py`, in the shapes the recorded ones have.
@@ -232,8 +259,19 @@ Two sources, picked under **Source** (`both` by default):
 | corrupt | corrupted `c` cells stun the cursor | yes | ≤ 30 cells (the mod's gate) |
 | big | more than 49 cells | finale only | 8x8, 9x9 |
 | nonsquare | width ≠ height | yes | 3x4, 5x4, 4x6, 5x7, 7x9, 9x7 |
-| resume | a re-force mid-hack: cursor off the start, path drawn as arrows | yes | partway along a safe route |
+| resume | asked again mid-hack: cursor off the start, path drawn as arrows | yes | partway along a safe route |
 | finale | the boss's five fixed stages | yes | — |
+| erase | 1–3 `X` erase traps (stepping on one fails the hack) | not yet | 5x5–7x7 |
+| nodes | bomb `b` / `B`, purge `P` and chain `C` nodes (walkable) | not yet | 5x5–7x7 |
+| gates | 2–5 directional gates `=` `\|` `J` `7` `L` `r` | not yet | 5x5–7x7 |
+
+They are unticked by default (and left out of `run_eval.py`'s default), so a
+default run stays comparable with earlier ones. `erase`, `nodes` and `gates`
+came over from the old `sim/` harness (see
+[History](#history)). The mod can draw these cells, but no recorded force has
+carried one, so their density and placement are guesses, and the gate rules
+are sim's model, not something seen in game. The OneWay cell (`?`) is left out:
+the mod draws it without its direction, so no peer could plan through it.
 
 - **Per category** puzzles are taken from each ticked category. A grid tagged `finale` is used only by the finale.
 - With `both`, half of each category is recorded and the rest generated. A category short of recorded grids is topped up from the generator.
@@ -245,7 +283,9 @@ A grid trial is an **episode**:
 
 1. The bench forces the puzzle exactly as the mod would: `state`, `query`, `priority: "high"`, `ephemeral_context`.
 2. It plays the reply on the grid (`grid_sim.py`) and sends back the mod's own result string.
-3. While the hack is neither solved nor over, it forces again from where the cursor ended, as the mod re-forces, up to **Max forces** (default 3).
+3. A failure while the hack is still live goes back the way the mod sends it: `success: false`, the message, then "The board is now (this replaces the earlier one):", the board from where the cursor ended and the query. No new force is sent: the Neuro server retries a failed forced action by itself (apitest emulates this, and so does `stub_peer.py`), and that retry is the next answer.
+4. After 3 retried failures in a row (the mod's `force_retry_limit`) the failure goes back plain and the puzzle is forced afresh; a retry that never arrives within the cap is also followed by a fresh force.
+5. Answers per episode stop at **Max forces** (default 3), retries included.
 
 | Move | What happens (game + mod) |
 |---|---|
@@ -253,8 +293,10 @@ A grid trial is an **episode**:
 | `#`, or a visited cell other than the one it came from | wall: "Move blocked by a wall after N move(s) landed" |
 | back onto the cell it came from | retrace: that cell frees up |
 | `d` | "Hit an error node": back to the start, path cleared |
-| `R` | **Refuse plans into a red block** on (mod `hack_block_refuse_plan`): the whole plan is refused, nothing moves, re-forced. Off: the hack fails |
+| `R` | **Refuse plans into a red block** on (mod `hack_block_refuse_plan`): the whole plan is refused, nothing moves, and the peer retries. Off: the hack fails |
 | `X` | the hack fails |
+| gate `=` `\|` `J` `7` `L` `r` | entered only along its arrows (`=` / `\|` straight, the corners turn: `J` joins left and top, `7` left and bottom, `L` right and top, `r` right and bottom), left only by the exit that entry leads to; any other move into or out of it is a wall. Stepping back onto the cell you came from is always allowed |
+| `b` `B` `P` `C` | walkable floor |
 | `c` | walkable, one stun |
 | `G` | solved; later moves never run |
 | plan runs out | "Ran all N planned move(s) without reaching the goal" |
@@ -280,7 +322,7 @@ Past the budget the stage gets "The hack failed." and is rated timeout.
 |---|---|
 | very good | solved on the first force, reply under 3 s |
 | good | solved on the first force, slower |
-| risky | solved, but only on a retry |
+| risky | solved, but only on a later answer (a retry or a fresh force) |
 | fail | not solved within the forces, or the hack failed |
 | timeout | no reply within the cap, or a finale stage over its budget |
 
@@ -291,7 +333,7 @@ One summary row per version and category:
 | Solved % | episodes that reached the goal |
 | 1st try % | episodes that reached it on the first force |
 | Very good / Good / Risky / Fail / Timeout | the ratings above |
-| Forces | average forces per episode |
+| Forces | average answers per episode, retries included |
 | Median ms | the median reply time |
 | +Moves | average moves over the shortest safe route, for solved episodes |
 | Blue % | blue nodes collected against the best route at most 4 moves longer (`grid_sim.best_route`) |
@@ -301,14 +343,14 @@ One summary row per version and category:
 - `mod` is the mod's wording as sent today.
 - `mod+adjacency` is a candidate that adds `snake_render`'s per-direction adjacency block. The mod has it, but sends it off.
 
-Select an episode to see each force's moves, the result sent, and the grid with the played path (`+` entered, `!` stopped). It also shows a shortest route and every state sent.
+Select an episode to see each answer's moves, the result sent, and the grid with the played path (`+` entered, `!` stopped). It also shows a shortest route and every state sent.
 
-A grid run writes `results/<timestamp>-grid/` with the same four files. `trials.jsonl` holds one episode per line, with every force inside.
+A grid run writes `results/<timestamp>-grid/` with the same four files. `trials.jsonl` holds one episode per line, with every answer inside (`retry: true` for one given to a server retry rather than a force).
 
 ## Testing the bench
 
 ```
-py -3 selftest.py            # renders, round trips, judging, ratings, loopback runs
+py -3 selftest.py            # renders, round trips, judging, ratings, loopback runs, run_eval
 py -3 stub_peer.py --port 8124 --mode correct|wrong|random|redblock|slow:2.5
 ```
 
@@ -317,7 +359,8 @@ registered schema asks for, so pointing the GUI at it checks the whole pipeline
 at no API cost:
 - **sequence hack:** it reads "+", letters, compass words and shuffled numbers;
 - **grid:** it parses the state and answers with a shortest safe route, clean of `c` where possible;
-- **`redblock` mode:** it walks into a red block the first time it sees a grid, then answers correctly on the re-force.
+- **`redblock` mode:** it walks into a red block the first time it sees a grid, then answers correctly on the retry.
+- **retries:** like the Neuro server, it retries a grid answer that came back `success: false`, up to 3 times, planning on the board sent with the failure. A new force cancels a retry still due. Sequence answers are not retried; that bench scores one answer per puzzle.
 
 ## Files
 
@@ -336,5 +379,31 @@ at no API cost:
 | `grid_puzzles.py` | grid: categories, sets, the finale chain, versions |
 | `grid_sim.py` | grid: plays a reply on a grid; shortest and best routes |
 | `grid_scoring.py` | grid: episode ratings, summary, detail pane |
-| `stub_peer.py` | local test peer |
+| `stub_peer.py` | local test peer (with the server's retry of a failed grid answer) |
+| `run_eval.py` | the command-line runner |
 | `selftest.py` | offline checks |
+
+## History
+
+- **2026-11-15: the `sim/` harness was merged in and deleted.** `sim/` (in
+  `reframework/` and the `neuro-pragmata-main/` mirror) was the first offline
+  grid evaluator: a generator, a BFS solver, its own ASCII render, a mock mod
+  and `run_eval.py`. By then it had fallen behind the mod. It registered a
+  `pragmata_hack_route` action the mod never shipped and used an older render
+  and description. It also scored a single answer per grid, with no retry, red
+  blocks, corruption or finale. The grid bench had replaced everything else
+  in it. What it still had came over here:
+  - its command-line batch runner, as `run_eval.py` above;
+  - the cells its generator could place that the bench never generated: X
+    traps, bomb / purge / chain nodes and directional gates (the `erase`,
+    `nodes` and `gates` categories), with its gate rules in `grid_sim.py`.
+
+  Its difficulty presets (`easy`/`medium`/`hard`/`mixed`) became the category
+  picks, and its stub strategies map onto `stub_peer.py`'s modes (`random`,
+  `wrong`, `slow:X` for its `timeout`). The old code is in git history.
+- **2026-11-15: ports brought up to date.** The descriptions of all three
+  puzzle actions (now prefixed "Enemy hack:" / "Environment hack (a door,
+  switch or elevator)"), the equipped-skill note in the grid render, and the
+  re-ask after a failed plan (sent back with the board for the Neuro server's
+  retry instead of a new force) were ported from the mod, and the grid
+  forces in the mailbox were merged into `grid_corpus.json` (218 grids).

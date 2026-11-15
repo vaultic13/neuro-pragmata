@@ -74,7 +74,7 @@ ASCENDING_FIRST = {"group", "version", "median_ms", "mean_ms", "fail", "timeout"
 LEFT_ALIGNED = ("version", "category", "puzzle", "sequence", "answer", "rating", "outcome")
 
 GRID_LEGEND = "\n".join((
-    "Episode -- one puzzle, forced again after a wall / reset / refusal / short plan, up to Max forces",
+    "Episode -- one puzzle; a wall / reset / refusal / short plan goes back with the board for the server to retry, up to Max forces answers",
     "Solved % / 1st try % -- reached the goal at all / on the first force",
     "Very good / Good -- solved first try, reply under 3 s / slower; Risky -- solved on a retry",
     "Fail -- not solved, or the hack failed (X, red block with refusal off); "
@@ -236,7 +236,7 @@ class BenchApp:
         counts = {c: len(grid_puzzles.recorded(c)) for c in grid_puzzles.CATEGORIES}
         self.category_vars: list[tuple[str, tk.BooleanVar]] = []
         for row, cat in enumerate(grid_puzzles.CATEGORIES):
-            var = tk.BooleanVar(value=True)
+            var = tk.BooleanVar(value=cat in grid_puzzles.DEFAULT_CATEGORIES)
             ttk.Checkbutton(cf, text=cat, variable=var, command=self._refresh_grid).grid(
                 row=row, column=0, sticky="nw")
             gen = "" if cat == "finale" else ", generated"
@@ -272,7 +272,7 @@ class BenchApp:
             ("Repeats", ttk.Spinbox(rf, textvariable=self.g_repeats, from_=1, to=100, width=8),
              "each repeat re-rolls the set"),
             ("Max forces", ttk.Spinbox(rf, textvariable=self.g_forces, from_=1, to=10, width=8),
-             "per puzzle, as the mod re-forces; finale: until its budget"),
+             "answers per puzzle, retries included; finale: until its budget"),
             ("Finale budget (s)", ttk.Spinbox(rf, textvariable=self.g_budget, from_=1, to=120, increment=1,
                                               width=8),
              "replies + moves per stage; ~2-3 tries in game at today's speed"),

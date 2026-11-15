@@ -79,13 +79,4 @@ function M.quantity(id)
     return r.to_int(r.call(_s.m_qty, inv, id))
 end
 
-function M.debug_status()
-    ensure_init()
-    return {
-        inventory_manager = r.singleton("app.InventoryManager") ~= nil,
-        ids_ok            = _s.m_ids ~= nil,
-        quantity_ok       = _s.m_qty ~= nil,
-    }
-end
-
 return M

@@ -3,20 +3,24 @@
 Reference for AI integrators wiring up to this mod. All wire content is standard
 Neuro-SDK JSON over WebSocket.
 
-Every example message in this document is real output copied from
-`reframework/data/pragmata_mailbox/lua_to_bridge.jsonl`.
+Example messages are real output copied from
+`reframework/data/pragmata_mailbox/lua_to_bridge.jsonl`, except where a section
+says they are illustrative.
+
+The mod has been tested only on Windows with mouse and keyboard. On Linux
+(Proton) or with a controller, the presses the mod makes for the peer (Scan,
+hacking inputs, scene prompts) are untested and may not land; a result that
+reports a failed or dropped press may come from that.
 
 ## Actions registered by the mod
 
 The actions below are registered at startup, but the peer is only ever told
 about the ones **available right now** — see
 [Action availability](#action-availability). Outside the Shelter that is
-nine (more if a hack family is switched on in `mod_config.puzzle_kinds`,
-plus `pragmata_ping` with `mod_config.debug_actions`).
+nine (fewer if a hack family is switched off in `mod_config.puzzle_kinds`).
 
 | Action | Arguments | Effect |
 |---|---|---|
-| [`pragmata_ping`](#pragmata_ping) | none | Sanity check. Only with `mod_config.debug_actions`. |
 | [`pragmata_scan`](#pragmata_scan) | none | Diana scans and reports what she found; a recent scan from about the same spot is answered from cache. |
 | [`pragmata_status`](#game-state-read-only) | `category` (optional) | Health, location, weapons, mods, hacking mods and inventory in one reply, or just the one `category` names. Read-only. |
 | [`pragmata_enemy_auto_hack`](#pragmata_enemy_auto_hack) | none | Auto-hack the locked-on target. |
@@ -25,18 +29,18 @@ plus `pragmata_ping` with `mod_config.debug_actions`).
 | [`pragmata_enemy_hack_plan`](#pragmata_enemy_hack_plan) | `moves` | Route the hacking grid. Auto-forced. |
 | [`pragmata_enviro_hack_rotate`](#the-other-hacking-puzzles) | `rotations` | Solve a circuit hack. Auto-forced; the render names the press count. Not forced when there is nothing to press. |
 | [`pragmata_enviro_hack_sequence`](#the-other-hacking-puzzles) | `buttons` or `order` | Solve a sequence hack; the payload follows `mod_config.puzzle_sequence_group`. Auto-forced. |
-| [`pragmata_enviro_hack_slide`](#the-other-hacking-puzzles) | `moves` | Solve a pipe hack. Auto-forced. |
-| [`pragmata_enviro_hack_path`](#the-other-hacking-puzzles) | `rotations` | Solve a path hack. Auto-forced. |
-| [`pragmata_menu_list`](#shelter-menus) | `menu` | Read a Shelter menu or catalog: `firmware`, `printer`, `mod_terminal`, `stamps`, `sectors` (while that screen is open), `library`, `bot_database`, `simulations`, `earth_memories` (in the Shelter), `archive` (anywhere). Always registered; refuses with the reason when it cannot be read. Read-only. |
-| [`pragmata_menu_info`](#shelter-menus) | `menu`, `names` | Detail for up to 8 entries of one of those (all but `stamps`). Same availability. Read-only. |
+| [`pragmata_menu_list`](#shelter-menus) | none | Read the Shelter menu open on screen right now (Firmware Updater, Unit Printer, train terminal mod menu, Cabin's Stamp Club tab, tram's sector selection); the reply names it. Registered only in the main Shelter or while one of those screens is open. Read-only. |
+| [`pragmata_menu_info`](#shelter-menus) | `names` | Detail for up to 8 entries of the open menu (not the Stamp Club). Same availability. Read-only. |
+| [`pragmata_archive_list`](#catalogs) | `catalog` (optional) | The Archive (pause menu; the default), or one of the Shelter's catalogs: `library`, `bot_database`, `simulations`, `earth_memories`. Always registered; the catalogs answer only in the main Shelter. Read-only. |
+| [`pragmata_archive_info`](#catalogs) | `catalog` (optional), `names` | Full text or details of up to 8 entries of the Archive or a catalog. Same availability. Read-only. |
 
-The five hacking actions are the hacking minigames: `pragmata_enemy_hack_plan` for the grid on enemies, and the four `pragmata_enviro_hack_*` for doors, switches and elevators. (Renamed on 2026-10-12 so the two kinds read apart: they were `pragmata_auto_hack`, `pragmata_hack_plan`, `pragmata_hack_rotate`, `pragmata_hack_sequence`, `pragmata_hack_slide` and `pragmata_hack_path`.) **Only one of them is ever offered at a
+The three hacking actions are the hacking minigames: `pragmata_enemy_hack_plan` for the grid on enemies, and the two `pragmata_enviro_hack_*` for doors, switches and elevators. **Only one of them is ever offered at a
 time** — the force names exactly the action that matches the puzzle actually on
 screen, so the peer never has to work out which kind it is looking at.
 
 Each force also carries a **`priority`** — `"low"`, `"medium"`, `"high"` or
 `"critical"`. The enemy grid goes out as `high`, because it is nearly always
-mid-combat and the window to act closes; the four environmental hacks (doors,
+mid-combat and the window to act closes; the two environmental hacks (doors,
 switches, elevators) go out as `low`, because nothing is shooting at you while
 you solve one. It is a hint about urgency, not a queue: the mod still keeps
 exactly one force outstanding at a time, first come first served. Defaults are
@@ -46,8 +50,8 @@ per family in `mod_config.puzzle_force_priority`.
 `{"type": "object"}`. There is nothing to choose: Scan is a single input
 command, Overdrive is a single driver call, and Auto-Hack's engine entry point
 (`startAutoHack()`) has no target parameter — the game's lock-on decides the
-target. Only `pragmata_enemy_hack_plan` takes arguments, and only because it is
-answering a question the mod asked.
+target. The actions that take arguments are the hack answers (replies to a
+board the mod sent) and the read-only lookups (`category`, `catalog`, `names`).
 
 ### Action availability
 
@@ -56,16 +60,32 @@ the game runs:
 
 | Where | Hidden | Shown |
 |---|---|---|
-| In the Shelter | `pragmata_scan`, `pragmata_enemy_auto_hack`, `pragmata_overdrive` (`mod_config.hide_abilities_in_shelter`), `pragmata_enemy_hack_plan` and every `pragmata_enviro_hack_*` (`hide_hacking_in_shelter`; not while a hack target is in front of the player, e.g. the opening tutorial, which runs in the Shelter sector) | — |
+| Until the game's Shelter level reads at least `mod_config.abilities_min_shelter_level` (0), e.g. the opening in the Cradle | `pragmata_scan`, `pragmata_enemy_auto_hack`, `pragmata_overdrive` (except a scene waiting on its Overdrive prompt) | — |
+| In the Shelter's sector (the opening tutorial included) | `pragmata_scan`, `pragmata_enemy_auto_hack`, `pragmata_overdrive` (`mod_config.hide_abilities_in_shelter`), `pragmata_enemy_hack_plan` and every `pragmata_enviro_hack_*` (`hide_hacking_in_shelter`; not while a hack target is in front of the player) | — |
+| Not in the main Shelter, and none of its menus' screens open | `pragmata_menu_list`, `pragmata_menu_info` | — |
 | A scene waits on the filament-cleaning button | — | `pragmata_purify` |
 
-`pragmata_menu_list` / `pragmata_menu_info` are **not** in this table: they are
-always registered, because the Shelter's menus open and close constantly and
-every change to the action set slows the peer down (BEST_PRACTICES.md). Which
-menus can be read where is a property of the `menu` argument instead
-([Shelter menus](#shelter-menus)), and a menu that cannot be read right now is
-refused with the reason, e.g. `The Unit Printer cannot be read right now: only
-available while that menu is open.`
+`pragmata_menu_list` / `pragmata_menu_info` come and go with the main Shelter
+only, not with each menu: the Shelter's menus open and close constantly and
+every change to the action set slows the peer down (BEST_PRACTICES.md). They
+read whichever menu is on screen, and the peer is told when one opens or
+closes ([Shelter menus](#shelter-menu-open--close)). With none open, a call is
+refused with the list of menus that can be opened. The Archive and the
+Shelter's catalogs read the same with their screens closed, so they are the
+`catalog` choice of the always-registered pair `pragmata_archive_list` /
+`pragmata_archive_info`; a catalog asked for outside the main Shelter is
+refused with the reason.
+
+**The main Shelter.** The game's opening tutorial runs in the Shelter's sector,
+before any of its machines exist. So "in the Shelter" in this document means
+the main Shelter: the Shelter's sector *and* the player has reached it, judged
+by default from the Archive's Help note about the Shelter
+(`mod_config.shelter_reached_rule` = `"help"`; the game's Shelter level is the
+other reading, `"level"` / `"both"` / `"either"`, but turns true too early).
+Before that, `pragmata_menu_list` / `_info` are not registered (unless one of
+those screens is open; a call that races the change is refused with `only
+available once the player has reached the main Shelter`). The abilities and
+hacking actions are hidden in the whole sector, tutorial included.
 
 A change is sent as `actions/unregister` for the names that went away, followed
 by `actions/register` carrying the **whole** current list (a peer that treats
@@ -132,30 +152,18 @@ These follow BEST_PRACTICES.md and hold for every action:
 
 ---
 
-### `pragmata_ping`
-
-Sanity check. Confirms mod, sidecar, and peer are wired up end to end.
-Registered only with `mod_config.debug_actions = true` (default `false`): it
-does nothing in the game, so the peer does not see it otherwise.
-
-- **Schema:** `{"type": "object"}` — no arguments.
-- **Result:** always `success: true`, message `"pong"`. Synchronous.
-
----
-
 ### `pragmata_scan`
 
 Diana's environmental scan, and the way to re-read it. Highlights nearby
 objectives, paths, and — with the in-game Object Scan upgrade — pickups such as
-REM disks, Upgrade Modules, Mods and Pure Lunum. Until 2026-10-12 re-reading was
-a separate action, `pragmata_scan_results`.
+REM disks, Upgrade Modules, Mods and Pure Lunum.
 
 - **Schema:** `{"type": "object"}` — no arguments.
 - **Scan or cache.** A new scan is made only when the last scan — the peer's or
   the player's own — is at least `mod_config.scan_cache_seconds` (7) old.
   Otherwise the results already held are returned, and the reply says so. With
-  nothing held, it scans anyway. (A "Hugh has moved 5 m" condition was tried
-  and removed on 2026-10-12: the player's position could not be read.)
+  nothing held, it scans anyway. Moving does not invalidate the cache; the
+  cached reply's distances are from where the scan was made.
 - **Dispatch:** injects the game's own Scan input command (the one bound to
   **C** by default). No OS key event and no virtual device is involved.
 - **Result of a new scan** — deferred until the result list has settled, so the
@@ -242,17 +250,15 @@ value is refused with the valid ones.
 It answers with one labelled line per part — `Health:`, `Location:`,
 `Weapons:`, `Mods:`, `Hacking mods:`, `Inventory:` — as below. A part that cannot be read says so
 on its own line and the others still answer; the reply fails only when none can
-be read. Until 2026-10-12 these were five actions (`pragmata_health`,
-`pragmata_location`, `pragmata_weapons`, `pragmata_mods`, `pragmata_inventory`),
-plus `pragmata_upgrades`, which was dropped: the equipped levels are in the
-Weapons and Mods lines, and the full upgrade picture is what the Shelter's Unit
-Printer and Firmware Updater show (`pragmata_menu_list`).
+be read. Upgrade levels of equipped items are in the Weapons and Mods lines;
+the full upgrade picture is what the Shelter's Unit Printer and Firmware
+Updater show (`pragmata_menu_list`).
 
 | Action / part | Reports |
 |---|---|
 | `pragmata_status` — Health | Current / max HP, repair kits carried of the carry limit, HP restored per kit. The per-kit figure is computed from the upgrade tables until a kit is used, then it is the HP actually gained ("measured on the last use"). |
 | `pragmata_status` — Weapons | Equipped weapons only, one per line: name (main weapon marked), `Lv current/max`, `ammo current/max` where the game tracks ammo, and what it does (the Unit Printer's unit text; left off when the printer data does not name the weapon). Weapons owned but not equipped are not listed. |
-| `pragmata_status` — Mods / Hacking mods | Two parts: equipped mods, and equipped hacking mods, each one per line with slot use, level where the mod has levels, hacking-mod uses left, and what the mod does; the hacking-mods part ends with the equipped hacking style. Mods owned but not equipped are not listed (`pragmata_menu_list` with `menu: "mod_terminal"` lists them at the train terminal). |
+| `pragmata_status` — Mods / Hacking mods | Two parts: equipped mods, and equipped hacking mods, each one per line with slot use, level where the mod has levels, hacking-mod uses left, and what the mod does; the hacking-mods part ends with the equipped hacking style. Mods owned but not equipped are not listed (`pragmata_menu_list` lists them while the train terminal's mod menu is open). |
 | `pragmata_status` — Inventory | Every held item with a quantity, grouped by the game's item category — currency, collectibles, materials, consumables. Items the game gives no name for are left out entirely. |
 | `pragmata_status` — Location | The current sector and area names (sector first; the last checkpoint's name if the map names neither), the map screen's completion % for it, and what is still left to collect there, grouped. Use `pragmata_scan` for *where* those things are. |
 
@@ -275,66 +281,114 @@ Mods: Mods equipped (2/4 slots):
 
 ### Shelter menus
 
-Every Shelter menu and catalog is read through two actions, with the menu as
-an enum argument:
+The Shelter menus are read **only while open**, through two actions that read
+whichever menu is on screen right now (no argument names it):
 
-- `pragmata_menu_list` `{"menu": "printer"}` — everything the menu lists.
-- `pragmata_menu_info` `{"menu": "printer", "names": ["...", ...]}` — 1 to 8
+- `pragmata_menu_list` `{}` — everything the open menu lists. The reply's first
+  line names the menu it read (`Unit Printer (tab on screen: Weapon):`,
+  `Firmware Updater:`, ...).
+- `pragmata_menu_info` `{"names": ["...", ...]}` — 1 to 8
   names as the list gives them. Case does not matter; a name is matched exactly
   first, then as a unique part of a name. Each requested name gets its own
   line: the detail, `Not found: 'x'.`, or `'x' matches several: A, B. Give the
   full name.` When not one name matches, the reply is `success: false` and ends
   with the valid names (up to 20).
 
-| `menu` | Readable | Section |
-|---|---|---|
-| `firmware`, `printer`, `mod_terminal` | while that menu is open | below |
-| `stamps` (list only) | while the Cabin's Stamp Club tab is selected | [Stamp Club](#stamp-club) |
-| `library`, `bot_database`, `simulations`, `earth_memories` | in the Shelter, or while that catalog's screen is open | [Catalogs](#catalogs) |
-| `archive` | anywhere | [Catalogs](#catalogs) |
-| `sectors` | while the tram's sector selection is open | [Tram sector selection](#tram-sector-selection) |
+| Menu on screen | Section |
+|---|---|
+| Firmware Updater, Unit Printer, train terminal mod menu | below |
+| the Cabin's Stamp Club tab (list only) | [Stamp Club](#stamp-club) |
+| the tram's sector selection | [Tram sector selection](#tram-sector-selection) |
 
-Both actions are always registered, and the `menu` enum's description says
-what each value covers. A menu that cannot be read right now is refused with
-the reason. Until 2026-10-11 these were nineteen separate actions
-(`pragmata_firmware_list`, `pragmata_stamps`, …), each shown only while its menu
-was open.
+Only one of them can be on screen at a time. With none open the call fails:
+`No menu is open. Open one of: the Firmware Updater, the Unit Printer, the
+train terminal's mod menu, the Stamp Club or the tram's sector selection. The
+Archive and the Shelter's catalogs are read with pragmata_archive_list.`
+`pragmata_menu_info` on the Stamp Club fails with `Stamp Club: the list already
+gives every cell; use pragmata_menu_list.` The catalogs (Data Library, Bot
+Database, Training Simulations, Earth Memories) are not menus here: see
+[Catalogs](#catalogs).
 
-The three upgrade menus read the open menu itself, so levels, costs and
-have-counts are exactly what the screen shows. All are read-only.
+#### Shelter menu open / close
 
-**Firmware Updater** (`menu: "firmware"`):
+When one of these menus opens or closes, one silent context line
+(`mod_config.menu_push_open_close`, the menus in `menu_push_keys`):
+
+```
+The Unit Printer is open on the Weapon tab. Read it with pragmata_menu_list.
+The Unit Printer closed.
+The Firmware Updater is open. Read it with pragmata_menu_list.
+The tram's sector selection is open. Read it with pragmata_menu_list.
+```
+
+A change must hold for two gate polls (~0.4 s, `menu_push_debounce_polls`), so
+page swaps do not flap it. Nothing is sent while loading, and the first reading
+after a load is a baseline: a save loaded with a menu open is not announced.
+Switching the Cabin hub from the Stamp Club tab to Training is a close.
+
+With the menu open, the three upgrade menus read the menu itself, so levels,
+costs and have-counts are exactly what the screen shows. All are read-only.
+
+**Levels open now only.** A unit's
+later levels stay hidden until the story reaches them, so the Firmware
+Updater and the Unit Printer show the maximum reachable *now*: `Lv 2/3`, not
+the unit's full `Lv 2/5`. The hidden levels are not mentioned. A unit at that
+cap reads `no further levels available yet`, with no cost. The Firmware
+Updater takes the cap from its own screen; the printer from the game's
+upgrade data (`mod_config.upgrade_level_cap`).
+
+**Firmware Updater**:
 
 ```
 Firmware Updater:
 - Suit (Suit) - Lv 15/20, next level costs 7x Upgrade Components (have 2, not enough)
+- Secondary Unit (Shockwave) - Lv 10/10, no further levels available yet
 - Primary Unit (Grip Gun) - Lv 20/20, fully upgraded
 ```
 
-Info adds "Upgradable up to Lv N for now." when progress caps it, and the stat
-changes at the next level (`HP 120 -> 140; Defense ...`).
+Info adds the stat changes at the next level (`HP 120 -> 140; Defense ...`),
+or just the current stats when no further level is available.
 
-**Unit Printer** (`menu: "printer"`). The printer shows one tab
-at a time; the list covers **every** tab (Weapon, Attachment, Ability,
-HackingNode) from the first call — the tab on screen read from the menu, the
-others rebuilt from the same game data:
+**Unit Printer**. The printer shows one tab at a time, and a tab's levels and
+costs are right only once it has been shown this visit. The list always names
+**all three tabs** (Weapon, Attachment, HackingNode), in the game's order, each
+marked:
+
+- `(on screen)` — read from the menu now;
+- `(as seen this visit)` — kept from when it was on screen, since the printer
+  opened;
+- `(not viewed yet this visit: levels and costs may be wrong; switch to this tab
+  in game to read it)` — rebuilt from game data, still listed under the
+  warning. A tab that rebuilt nothing reads `- its units cannot be read until
+  this tab is shown in game`.
+
+The list ends with the tabs not viewed yet. The marks reset when the printer
+closes.
 
 ```
-Unit Printer, tab Weapon (on screen):
+Unit Printer (tab on screen: Weapon):
+Tab Weapon (on screen):
 - Lim Cannon - printed, Lv 1/8, next level costs 900x Lunafilament (have 594, not enough)
 - Homing Missiles - not printed yet, printing costs 900x Lunafilament (have 594, not enough)
 - Riot Blaster - printed, Lv 8/8, fully upgraded
-Tab HackingNode:
+- Heat - printed, Lv 3/3, no further levels available yet
+Tab Attachment (not viewed yet this visit: levels and costs may be wrong; switch to this tab in game to read it):
+- its units cannot be read until this tab is shown in game
+Tab HackingNode (not viewed yet this visit: levels and costs may be wrong; switch to this tab in game to read it):
 - ??? - not found yet
+Tabs not viewed yet: Attachment, HackingNode.
 ```
 
-Info adds the unit's description and one line per level, the current and next
-level marked (`Lv 2 (current): ...`, `Lv 3 (next): ...`). Units not found yet
-get no text, as on screen.
+Info adds the unit's description and one line per level open now, the current
+and next level marked (`Lv 2 (current): ...`, `Lv 3 (next): ...`). Units not
+found yet get no text, as on screen. A unit of a tab not viewed yet ends with
+`(Its tab, Attachment, has not been viewed yet this visit: levels and costs may
+be wrong; switch to that tab in game to read it.)`
 
-**Train terminal mod menu** (`menu: "mod_terminal"`):
+**Train terminal mod menu**:
 
 ```
+Train terminal mod menu:
 Mod capacity: 5 used of 6.
 Equipped: Relay Amplifier; Overclocked Weaponry; Recursive Learning; Hyperfocus; Sympathetic Hacking; empty slot.
 Not equipped: Hardened Suit; Pocket Refinery (new); ...
@@ -349,7 +403,7 @@ not 1. Locked mods are only counted. Info gives what each mod does and
 
 ### Stamp Club
 
-`pragmata_menu_list` with `menu: "stamps"`. Readable only while the Cabin's Stamp Club tab is selected (the
+`pragmata_menu_list` while the Cabin's Stamp Club tab is selected (the
 Training Simulations tab shares the screen and does not count). It reads the
 board on screen; to see another board, switch to it in game.
 
@@ -386,19 +440,26 @@ Boards: Board A (on screen); Board B; Board C (locked).
 
 ### Catalogs
 
-Five of the game's collections are `menu` values of `pragmata_menu_list` /
-`pragmata_menu_info`. All are read-only and read the game's own data, so they answer the same whether or not
-the collection's screen is open.
+The game's five collections are read through one always-registered pair,
+`pragmata_archive_list` `{"catalog"?: ...}` and `pragmata_archive_info`
+`{"catalog"?: ..., "names": [...]}`. Without `catalog` they read the Archive,
+so `pragmata_archive_list {}` and `pragmata_archive_info {"names": [...]}` work
+as they always have. All are read-only and read the game's own data, so they
+answer the same whether or not the collection's screen is open.
 
-| Catalog | `menu` | Readable | In game |
+| Catalog | `catalog` | Readable | In game |
 |---|---|---|---|
-| Data Library | `library` | in the Shelter | the Shelter terminal |
-| Archive | `archive` | anywhere | the pause menu (Esc) |
-| Bot Database | `bot_database` | in the Shelter | the Bot Database screen |
-| Training Simulations | `simulations` | in the Shelter | the Cabin's Training tab |
-| Earth Memories | `earth_memories` | in the Shelter | the Rem Replicators, and the items placed around the Shelter |
+| Archive | `archive` (the default) | anywhere | the pause menu (Esc) |
+| Data Library | `library` | in the main Shelter, or while its screen is open | the Shelter terminal |
+| Bot Database | `bot_database` | in the main Shelter, or while its screen is open | the Bot Database screen |
+| Training Simulations | `simulations` | in the main Shelter, or while its tab is open | the Cabin's Training tab |
+| Earth Memories | `earth_memories` | in the main Shelter, or at the Rem Replicators | the Rem Replicators, and the items placed around the Shelter |
 
-`pragmata_menu_info` takes `{"menu": ..., "names": [...]}` and matches exactly as the
+Outside the main Shelter a catalog call fails with the reason, e.g. `The Data
+Library cannot be read right now: only available in the Shelter. It can be read
+anywhere in the main Shelter, or while its own screen is open.`
+
+`pragmata_archive_info` matches exactly as the
 [Shelter menus](#shelter-menus) do: 1 to 8 names, case ignored, exact first,
 then a unique part of a name, one reply per name (`Not found: 'x'.` or
 `'x' matches several: ...`). **Only found entries can be asked about.** Entries
@@ -495,8 +556,8 @@ New entries are announced as silent context; see
 
 ### Tram sector selection
 
-`pragmata_menu_list` / `pragmata_menu_info` with `menu: "sectors"`, readable
-only while the tram terminal's sector selection is open; they read that screen, which holds every
+`pragmata_menu_list` / `pragmata_menu_info` while the tram terminal's sector
+selection is open; they read that screen, which holds every
 sector at once. Read-only.
 
 The list gives each sector's completion (the screen's own %), then each
@@ -505,7 +566,7 @@ location, so two stations into one area are one line. Stations not reached
 yet are only counted.
 
 ```
-Tram sectors (6):
+Tram sector selection, 6 sectors:
 Solar Power Plant - 100% complete:
 - Generator Entrance (station: Power Plant Platform) - all 1 collected
 - Power Distribution Center (station: Sealed Sector Gate) - all 4 collected
@@ -516,7 +577,7 @@ Terra Dome - 100% complete:
 ...
 ```
 
-`pragmata_menu_info` takes `{"menu": "sectors", "names": [...]}`, matched as in the
+`pragmata_menu_info` takes `{"names": [...]}`, matched as in the
 [Shelter menus](#shelter-menus): a location, a station (which gives its
 location) or a sector. A location gives every collectible kind present there
 with how many are found; a sector gives its %, its locations and the kinds
@@ -664,8 +725,56 @@ the boss.` Nothing is forced for it. The sectors and delays are
 
 Plan a path through an active hacking grid (the `app.PuzzleSnake` minigame).
 Fired automatically by the mod via `actions/force` the moment a grid appears
-(`mod_config.hacking_auto_force`, on by default). This is the one action with
-arguments, because it is a reply.
+(`mod_config.hacking_auto_force`, on by default). For the environment hacks
+offered the same way, see [Offered instead of forced](#offered-instead-of-forced).
+
+#### Grids offered instead of forced
+
+Two settings send an enemy grid as one silent context message instead of a
+force, and leave it to the peer to decide whether to hack:
+
+| `hacking_auto_force` | Offered | Message starts |
+|---|---|---|
+| `false` | every enemy grid | `The enemy Hugh is aiming at has a hacking grid up. You are not asked to plan it; if you decide to hack it, call pragmata_enemy_hack_plan with moves for this grid while it is up.` |
+| `"not_open"` | grids on an enemy still open (vulnerable) from the last hack; the rest are forced | `This hacking grid is on an enemy that is already open from the last hack, so you are not asked to plan it. If hacking it again helps, call pragmata_enemy_hack_plan with moves for this grid while it is up; otherwise leave it.` |
+
+The message carries **the grid only**: size, the drawn grid, `Cursor:` and
+`Goal:`. The routing rules are in the action's description. The legend is
+added with `mod_config.hacking_context_legend = true`. Each grid layout is sent
+once per enemy; the cursor moving does not resend it, a changed layout does.
+When a hack on that enemy ends (completed, failed or reset), the next grid is
+sent again even if its layout is the same.
+
+A `pragmata_enemy_hack_plan` call made then (no force out) is taken as a plan
+for that grid and runs like a forced one; its result is final (there is no
+server retry outside a force). If the cursor or the board moved since the
+message, nothing is pressed and the call fails with the current grid: *"The
+grid changed since you saw it … Plan again from this grid if you still want to
+hack it: …"*.
+
+#### Checked plans
+
+Before a plan runs, the mod walks it on the grid: every move must stay on the
+board, enter only walkable cells (never `#`, `d`, `X`, `R`, a directional cell
+or the trail) and end on `G`. A plan that passes is **checked**. If a checked
+plan is stopped by something that is not its fault, its result is
+`success: true`:
+
+```
+Your plan was correct (checked: every move is legal and it ends on the goal), but Hugh stopped aiming at the enemy, so it did not finish. It is kept: if this grid comes back as it was, it runs again by itself.
+```
+
+The causes named are: Hugh stopped aiming at the enemy, Hugh turned to another
+target, the grid's layout changed, or the enemy is gone (that one is not
+kept). Up to `mod_config.hack_plan_store_max` (3) interrupted plans are kept,
+across all enemies, the oldest dropped first. A kept plan runs again by itself,
+**once**, without asking, when the same enemy shows the same layout with the
+cursor where the plan started; it is removed from memory as it starts, and a
+replay that is interrupted again is not kept. The peer then gets the silent
+context `Running your earlier plan again: this hacking grid is back as it
+was.` A reset, a failed hack, a completed hack or the enemy's death drops that
+enemy's kept plans. A plan that is not checked (a retrace along the trail, say) behaves as
+before: an interruption is reported as what happened.
 
 The peer reads the grid from the force's `state` field and returns an ordered
 list of cardinal moves.
@@ -721,6 +830,8 @@ Coordinates are `(x, y)` with `(0, 0)` at **top-left**; `up` is `-y`.
 | `#` | wall — the cursor stops |
 | `d` | **red error node — entering one RESETS the whole hack** |
 | `X` | `EraseCode` trap — fails the hack |
+| `R` | **red block — touching it FAILS the hack**; plans into one are refused (`hack_block_refuse_plan`) |
+| `c` | corrupted cell — walkable, but stuns the cursor for a moment; prefer a clean route |
 | `~` | your own trail — retracing it undoes the bonuses already collected |
 | `S` start, `s` shield, `b` / `B` bomb 3x3 / 5x5, `P` purge | less common cell types |
 | `=` `J` `7` `L` `r` and the vertical bar | two-way directional cells |
@@ -731,6 +842,18 @@ shortest path: a longer winding route through more `O`/`A` nodes is better, as
 long as it ends on `G` and never steps on `#`, `d`, `X`, or `~`. Collect nodes
 by passing *through* them going forward — detouring out and back retraces the
 trail and undoes them.
+
+**Grids that are not forced.** Some enemies' grids cannot be hacked yet, and
+the mod sends a spoken context line instead of a force:
+
+- all of an enemy's red blocks are up (they are removed one at a time by
+  shooting the enemy's antennas, top-left first; `hack_block_gate`);
+- a corrupted enemy's grid is larger than `hack_corruption_max_cells` (30)
+  cells: the corruption has to be purified first (`hack_corruption_gate`; not
+  in Experimental Pragmatics, which comes before purification is unlocked).
+
+Smaller corrupted grids are forced with the `c` cells drawn; the mod waits out
+each stun.
 
 One boss blows up whole rows of its grid. These are **not drawn**: they are
 short-lived, can start partway through a hack, and would cover the goal and
@@ -778,19 +901,43 @@ Useful to other RE Engine modders; all derived from in-game captures.
 ## The other hacking puzzles
 
 `pragmata_enemy_hack_plan` covers the cursor-routing grid that appears on enemies. The
-game has four more hacking minigames, used on environmental interactables —
+game has two more hacking minigames, used on environmental interactables —
 switches, doors, elevators. They are entered the same way, use the same
 controls, and produce the same outcome, and each has its own action.
 
 Why one action per family rather than one polymorphic action: the mechanics have
-nothing in common — turn a piece, press a sequence, slide a tile — so a shared
+nothing in common — turn a piece, press a sequence — so a shared
 schema would be a union of unrelated fields with a description that contradicted
 itself most of the time. The observer only ever offers the one action that
 matches the puzzle in front of the player, so the peer is never choosing.
 
-All four are auto-forced on start, exactly like the grid, and all four **defer**
+Both are auto-forced on start, exactly like the grid, and both **defer**
 their result: the tool result reports what the hack actually did, not that a
 plan was accepted.
+
+#### Offered instead of forced
+
+With `mod_config.hacking_auto_force = false` none of them is forced. The board
+goes out once as a silent context message instead: **the board only**, i.e. what
+the puzzle looks like (the circuit's connector lines, the sequence's drawing or
+list), without the instructions a force carries. Those are in
+the action's description. The reading key (the sequence hack's reading steps and
+worked example, the compass key) is added with
+`mod_config.hacking_context_legend = true`. The board comes after the line
+
+```
+<Subject> is up. You are not asked to solve it; if you decide to, call <action> with the answer for this board while it is up.
+```
+
+It is sent once per board; when a hack ends (completed, failed or reset) the
+next board is sent again. A call of that action made then (no force out) is
+taken as the answer to that board and runs like a forced one. Its result is
+final, because there is no server retry outside a force. If the hack is no longer in front
+of Hugh or not taking input, the call fails with `Nothing was done: …`. If the
+board changed since it was sent, the call fails with the board as it is now:
+*"The board changed since you saw it, so nothing was done. Answer this board
+instead if you still want to solve it: …"*. `"not_open"` affects only the enemy
+grid; these two are forced as with `true`.
 
 ### `pragmata_enviro_hack_rotate` — circuit hack
 
@@ -817,7 +964,7 @@ presses to give it, 1 to 3; each press is a quarter turn and four is back where
 it started, so 4 or more is refused without pressing anything. Connectors left
 out of the answer are left alone.
 
-The render no longer promises which way a press turns. Which way it turns is a
+The render does not promise which way a press turns. Which way it turns is a
 fact about the board's own frame — a mirrored one runs the other way — so it
 is measured from the first press that moves an elbow, and the openings listed
 beside every press count are computed from the measured direction. The peer
@@ -842,20 +989,18 @@ inheriting the old answer.
 Solving the board whole is what makes a connector sitting NEXT TO another
 connector answerable at all. The per-connector rule cannot speak for one: what
 the neighbour will end up opening onto is not settled, so no number could be
-stood behind. In the 2026-09-08 capture that case carried 103 of 138 forces.
+stood behind. In one recorded session that case carried 103 of 138 forces.
 
-The render draws no board: the player sees rows, not a grid, and the ASCII board
-the mod used to send was both unlike the screen and — because the side labels
-came from raw grid offsets — liable to name the wrong side entirely.
+The render draws no board: the player sees rows, not a grid, and an ASCII board
+would be unlike the screen.
 
 **The names are measured, not deduced.** Before the force goes out the mod
 presses each direction once and records which connector moved; that pairing is
 what `piece` means. The four presses cost a quarter turn each and are taken
 before the peer is shown anything, so the state block always describes the board
 as it is after them. Where a button turns nothing, no connector is offered under
-that name. Earlier versions worked the side out from the grid's orientation and
-could be confidently wrong, which showed up as answers being applied to a
-connector the peer had never described.
+that name. Working the side out from the grid's orientation instead can be
+confidently wrong.
 
 Sample render:
 
@@ -874,7 +1019,7 @@ lined up. Pointing at the centre is not enough.
 
 **The answer is re-checked against the board before it is pressed.** This puzzle
 is driven by the same buttons as player movement, so the board can move while
-the peer is thinking — and in the 2026-09-08 capture it did, forty-six times,
+the peer is thinking — and in one recorded session it did, forty-six times,
 each one costing a retry as the mod pressed a connector that had already reached
 the orientation the answer was asking for. A press count plus the openings it
 was read against name one absolute orientation, so the mod re-expresses the
@@ -892,7 +1037,7 @@ asked for, so nothing was pressed"* — and it comes with a fresh state block; i
 means the drift above went the whole way, not that the answer was wrong.
 
 **A board with nothing to press is not forced at all.** A force is a question,
-and 28 of the 79 circuit forces in the 2026-09-08 capture asked one while telling
+and 28 of the 79 circuit forces in one recorded session asked one while telling
 the peer to leave every connector alone. When the mod can see no press worth
 making it waits instead, and says once, quietly, that the board reads as already
 correct. If such a board still has not completed a few seconds later the mod's
@@ -925,14 +1070,7 @@ follow the group, so a peer always sees one consistent format.
 | 4 | `list+compass` | compass points, in order | `order` |
 | 5 | `list` | the original list | `order` |
 
-The group can be switched for the session in the REFramework menu under
-**Pragmata Puzzle Debug → Sequence hack group**. The switch is not saved. It
-re-registers the action: `actions/unregister` for `pragmata_enviro_hack_sequence`, then
-`actions/register` with the full action list, carrying the new description and
-schema (the other actions are already registered, so a Neuro-SDK peer ignores them;
-a peer that treats each register as the whole catalogue keeps them). A switch is refused
-while a sequence force is waiting for its answer, because that answer would come
-in the old format.
+The group is set by `mod_config.puzzle_sequence_group` and read at launch.
 
 #### The drawn groups (1 and 2)
 
@@ -1025,9 +1163,7 @@ press was asked for, as shown: `up(asked north) left(asked east)`.
 #### All groups
 
 The order is read from the puzzle's own button list, the one it checks presses
-against. Until 2026-09-11 it was read from the GUI's copy, which came back
-undecodable, so every force said `1.?  2.?  3.?` and the peer could only guess.
-**A sequence the mod cannot read is not forced at all**: a guess fails the hack
+against (the GUI's copy cannot be decoded). **A sequence the mod cannot read is not forced at all**: a guess fails the hack
 on its first wrong press. The peer is told once, quietly, that the directions
 could not be read and the player can enter them.
 
@@ -1037,45 +1173,12 @@ part of the sequence is already entered, give the whole sequence anyway; the
 mod skips the steps that are done. If the game rejects a press, the remaining
 presses are cancelled and the tool result says after which press it failed.
 
-### `pragmata_enviro_hack_slide` — pipe hack
-
-Sliding tiles with one empty space; complete an unbroken pipe from source to
-goal.
-
-```json
-{"moves": ["up", "left", "left", "down"]}
-```
-
-Each move names the direction the **empty space** travels, so `"up"` pulls the
-tile above the gap down into it. A move that would push the gap off the board
-does nothing.
-
-### `pragmata_enviro_hack_path` — path hack
-
-Turn pieces until a path runs across the board.
-
-```json
-{"rotations": [{"column": 2, "steps": 1}]}
-```
-
-Pieces are addressed by column, numbered from 0 at the left; the render says
-which columns can be turned. The selection is walked to each column for the
-peer, so the entries can be listed in any order.
-
-### Availability
-
-`pragmata_enviro_hack_slide` and `pragmata_enviro_hack_path` cover two families that have not
-yet been seen in a live capture — their readers and input mapping are written
-from the type dump. They are **off by default** (`mod_config.puzzle_kinds`) and
-are not registered until enabled. With them off, those puzzles are still
-detected and narrated; they just aren't offered to the peer.
-
 ---
 
 ## Context messages emitted by the mod
 
-Sent as Neuro-SDK `context` messages with `silent: true`. Every example below is
-verbatim from a real session.
+Sent as Neuro-SDK `context` messages with `silent: true` unless noted. Examples
+are verbatim from real sessions except where marked as illustrative.
 
 ### Dialogue
 
@@ -1089,8 +1192,8 @@ Format is `Dialogue: [<Type>] <Speaker> says "<text>"`, or
 dialogue category from the engine's `MessageInfo`. Multi-line wrapped subtitles
 are combined, so each utterance is forwarded once.
 
-Collectible documents, when `mod_config.archive_gui_path` is configured, arrive
-as `Collectible document text: "…"`.
+A collectible document is announced by the Archive's "New Archive entry" line
+and read with `pragmata_archive_info`.
 
 ### Ability state
 
@@ -1100,10 +1203,9 @@ as `Collectible document text: "…"`.
 | Auto-Hack upgrade unlocks | `Auto-Hack upgrade is now available.` |
 | Scan results resolve (scans the player makes; the peer's own come back as its result) | `Diana scanned: 1x escape hatch (32 m), 1x Upgrade Components (49 m).` |
 
-The gauge's 25 / 50 / 75 % steps are no longer sent (until 2026-10-11 they were,
-as `Hacking gauge: 75%`): a stream of small updates is what BEST_PRACTICES.md
-asks integrations not to send, and readiness is the one that changes what the
-peer can do.
+Gauge percentages are not sent: a stream of small updates is what
+BEST_PRACTICES.md asks integrations not to send, and readiness is what changes
+what the peer can do.
 
 ### Hack lifecycle
 
@@ -1167,21 +1269,37 @@ announces neither the whole arsenal nor a drop from full health.
 
 Silent context when a [catalog](#catalogs) gains an entry, sent **only while
 in the Shelter**. A gain made outside it moves the baseline quietly, so it is
-not announced later either. Wording is fixed; the names are examples (these
-lines have not yet been captured from a live session).
+not announced later either. Each line ends with the exact
+`pragmata_archive_info` call that reads the new entries. Wording is fixed; the
+names are examples (these lines have not yet been captured from a live
+session).
 
 | Trigger | Example | Switch |
 |---|---|---|
-| A Data Library entry is found | `New Data Library entry: 'Cradle Infiltration Log - Day 1' in Secrets.` | `catalog_push_library` |
-| A Bot Database figure is collected | `New Bot Database figure: Walker.` | `catalog_push_bot_database` |
-| A Training Simulation becomes available | `New Training Simulation available: Lightning Speed.` | `catalog_push_simulations` |
-| An Earth Memory is obtained | `New Earth Memory: Globe.` | `catalog_push_earth_memories` |
-| An Earth Memory is placed (Diana's cutscene) | `Earth Memory placed in the Shelter: Globe.` | `catalog_push_earth_memories` |
+| A Data Library entry is found | `New Data Library entry: 'Cradle Infiltration Log - Day 1' in Secrets. Read it with pragmata_archive_info {"catalog":"library","names":["Cradle Infiltration Log - Day 1"]}.` | `catalog_push_library` |
+| A Bot Database figure is collected | `New Bot Database figure: Walker. Read it with pragmata_archive_info {"catalog":"bot_database","names":["Walker"]}.` | `catalog_push_bot_database` |
+| A Training Simulation becomes available | `New Training Simulation available: Lightning Speed. Read it with pragmata_archive_info {"catalog":"simulations","names":["Lightning Speed"]}.` | `catalog_push_simulations` |
+| An Earth Memory is obtained | `New Earth Memory: Globe. Read it with pragmata_archive_info {"catalog":"earth_memories","names":["Globe"]}.` | `catalog_push_earth_memories` |
+| An Earth Memory is placed (Diana's cutscene) | `Earth Memory placed in the Shelter: Globe. Read it with pragmata_archive_info {"catalog":"earth_memories","names":["Globe"]}.` | `catalog_push_earth_memories` |
 
 Several gains at once are joined with `; `. The collections are compared about
 every two seconds, and a change must hold for two readings. More than six new
 entries at once is taken as a save load, not an unlock, and is not announced;
-loading screens reset the baselines. The Archive has no push.
+loading screens reset the baselines.
+
+### Archive (anywhere)
+
+The Archive is in the pause menu, so a new document is announced **wherever it
+is found**, with its category and the exact call that reads it. The title is
+exactly as `pragmata_archive_list` lists it. Same polling and
+load rules as the catalogs above; switch `catalog_push_archive`. This includes
+the Help category: the tutorial notes that pop up and pause the game. The first
+document of a new game is announced too.
+
+| Trigger | Example |
+|---|---|
+| One new document | `New Archive entry: 'Cradle Infiltration Log - Day 1' in Documents. Read it with pragmata_archive_info {"names":["Cradle Infiltration Log - Day 1"]}.` |
+| Several in one reading | `New Archive entries: 'A' in Documents; 'B' in Records. Read them with pragmata_archive_info {"names":["A","B"]}.` |
 
 ### Autonomy nudges (opt-in)
 

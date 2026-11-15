@@ -2,12 +2,11 @@
 -- Hash -> readable name resolution for engine object/icon identifiers.
 --
 -- The engine identifies almost everything by a UInt32 name hash. Scan results,
--- in particular, are pure hashes (`objectIDHash`, `iconTypeHash`), which is why
--- the AI used to be told things like "hash:1984889503". Every one of those
--- hashes IS resolvable from the running game; this module is the single place
--- that does it.
+-- in particular, are pure hashes (`objectIDHash`, `iconTypeHash`). Every one
+-- of those hashes is resolvable from the running game; this module is the
+-- single place that does it, so the AI is never told a bare hash.
 --
--- Engine layout (verified against the IL2CPP dump):
+-- Engine layout:
 --
 --   app.ScanIconType : app.EnumLikeArrayBase
 --     - getName(System.UInt32) -> System.String
@@ -500,26 +499,6 @@ end
 -- ---------------------------------------------------------------------------
 -- Diagnostics
 -- ---------------------------------------------------------------------------
-
--- Snapshot for the abilities debug panel. Cheap to call every frame.
-function M.debug_status()
-    icon_init()
-    variety_init()
-    return {
-        icon_resolver_ok  = _icon.get_name ~= nil,
-        object_ids_state  = _objects.state,
-        object_ids_count  = _objects.count,
-        object_ids_scanned = _objects.scanned,
-        object_ids_total  = _objects.fields and #_objects.fields or _objects.scanned,
-        variety_count     = _variety.count,
-        variety_kind_ok   = _variety.get_kind_hash ~= nil,
-        display_singleton = safe(function()
-            return sdk.get_managed_singleton("app.GuiDataManager")
-        end) ~= nil,
-        placeholder_rejected = _display.placeholder_rejected or 0,
-        last_placeholder     = _display.last_placeholder,
-    }
-end
 
 -- True once app.ObjectIDs has finished building (or has been ruled out).
 function M.is_ready()

@@ -29,12 +29,6 @@ local sequence_action = require("pragmata.sequence_action")
 -- and forwards each new line to the AI as a silent context message.
 require("pragmata.dialogue")
 
--- Collectible-document ("Archive") capture. Forwards the text of a document
--- as a silent context message when one is opened/read, so the AI peer can be
--- asked to read or recall it. Idle until mod_config.archive_gui_path is set (see the
--- discovery instructions in archive.lua / mod_config.lua).
-require("pragmata.archive")
-
 -- Ability state emitters. Polls binding state each frame; emits gauge/scan/
 -- overdrive/auto-hack-unlock edges as context updates with appropriate lanes.
 require("pragmata.ability_state")
@@ -63,56 +57,16 @@ require("pragmata.autonomy")
 -- that catches a hack finishing while the player has already looked away.
 require("pragmata.hacking_observer")
 
--- Hacking debug panel (ImGui). Renders under "Pragmata Hacking Debug" in
--- the REFramework menu; shows real-time binding state, trigger field
--- values, instance-cache status, and provides a "send synthetic test grid"
--- button for end-to-end pipeline verification.
-require("pragmata.hacking_debug")
-
--- Puzzle debug panel (ImGui). Renders under "Pragmata Puzzle Debug": switches
--- the sequence hack's group for the session, shows the text the peer is sent
--- for the live non-grid puzzle, and toggles puzzle families.
-require("pragmata.puzzle_debug")
-
 -- Auto-hack on-screen overlay. Draws a banner over the game while the AI peer
 -- is planning/executing a hack so it's clear the AI (not the player) is
 -- driving the cursor. Peer name shown comes from mod_config.display_name.
 -- Toggle via mod_config.hacking_show_overlay.
 require("pragmata.hacking_overlay")
 
--- Abilities debug panel (ImGui) and the manual ability triggers. Renders under
--- "Pragmata Abilities Debug"; shows live Scan / Overdrive binding state
--- (singleton + driver capture, gauge, scan inventory) and binds F6 / F7 / F8 to
--- Scan / Auto-Hack / Overdrive for in-game verification. Each key calls exactly
--- the binding function the AI peer's action calls, so a working key proves the
--- peer's route rather than a parallel one.
-require("pragmata.abilities_debug")
-
--- Game-state debug panel (ImGui). Renders under "Pragmata State Debug"; shows
--- the raw binding state and the exact peer text for each state action, with
--- F9 snapshotting all of them into a history.
-require("pragmata.state_debug")
+-- The mod's entry in the REFramework menu: status and recovery buttons.
+require("pragmata.mod_menu")
 
 log.info("booting")
-
--- --------------------------------------------------------------------
--- Sanity check
--- --------------------------------------------------------------------
-
--- Developer-only: it does nothing in the game, so the peer does not see it
--- unless mod_config.debug_actions is on.
-if config.debug_actions then
-    dispatcher.register("pragmata_ping", {
-        description = "Sanity check. Confirms the mod, sidecar, and bridge are wired up. Returns 'pong' as the result message.",
-        -- Empty Lua tables encode ambiguously in some JSON encoders ([] vs {}).
-        -- Plain {type = "object"} avoids that without losing meaning here.
-        schema = { type = "object" },
-        handler = function(_args)
-            log.info("pragmata_ping called")
-            return true, "pong"
-        end,
-    })
-end
 
 -- --------------------------------------------------------------------
 -- Diana abilities
@@ -200,11 +154,11 @@ dispatcher.register("pragmata_status", {
     end,
 })
 
--- Shelter menus and catalogs, behind two stable actions: pragmata_menu_list
--- and pragmata_menu_info, with the menu as an enum argument
--- (menu_actions.lua). Each module adds its menus -- formatting, gate and, for
--- the printer, its tab cache stay in the module -- and the two actions are
--- registered once all of them have, since the enum is built from them.
+-- Shelter menus, behind two stable actions that read the menu open on
+-- screen: pragmata_menu_list and pragmata_menu_info (menu_actions.lua). Each
+-- module adds its menus -- formatting and, for the printer, its tab cache
+-- stay in the module -- and the two actions are registered once all of them
+-- have. menu_observer.lua tells the peer when one opens or closes.
 local menu_actions = require("pragmata.menu_actions")
 
 -- Firmware Updater, Unit Printer, train mod menu: readable while open.
@@ -221,32 +175,32 @@ if stamp_actions ~= nil then
     stamp_actions.register(menu_actions, gates, stamp_club_bind)
 end
 
--- Catalogs (Data Library, Archive, Bot Database, Training Simulations, Earth
--- Memories): readable anywhere in the Shelter (the Archive everywhere), plus
--- the Shelter-only "new entry" pushes.
+-- Catalogs (Archive, Data Library, Bot Database, Training Simulations, Earth
+-- Memories): pragmata_archive_list / _info with a `catalog` choice, always
+-- registered. The Archive answers anywhere, the others in the main Shelter.
+-- Plus the "new entry" pushes.
 local catalogs_bind = load_binding("pragmata.bindings.catalogs")
 local catalog_actions = load_binding("pragmata.catalog_actions")
 if catalog_actions ~= nil then
-    catalog_actions.register(menu_actions, gates, catalogs_bind)
+    catalog_actions.register(dispatcher, gates, catalogs_bind)
 end
 
--- Train sector selection: readable while that screen is open (State Debug
--- F11 also dumps its data).
+-- Train sector selection: readable while that screen is open.
 local sectors_bind = load_binding("pragmata.bindings.sectors")
 local sector_actions = load_binding("pragmata.sector_actions")
 if sector_actions ~= nil then
     sector_actions.register(menu_actions, gates, sectors_bind)
 end
 
-menu_actions.register(dispatcher)
+menu_actions.register(dispatcher, gates)
+local menu_observer = load_binding("pragmata.menu_observer")
+if menu_observer ~= nil then menu_observer.register(gates, menu_actions) end
 
 dispatcher.register("pragmata_enemy_auto_hack", {
     description = "Enemies only: have Diana auto-hack the enemy she is currently locked on to. Consumes part of the hacking gauge to bypass the manual hacking minigame. Requires the Auto-Hack upgrade (unlocked mid-game from the Unit Printer). Takes no arguments: the engine's start call has no target parameter, so the lock-on decides the target. Success means the game entered Auto-Hack, not merely that preconditions passed.",
     short = "Enemies only: have Diana auto-hack the enemy she is locked on to, spending part of the hacking gauge. Needs the Auto-Hack upgrade; takes no arguments.",
-    -- No target selector. startAutoHack() takes no parameters; the target_id
-    -- this used to advertise was resolved and then discarded, so a peer that
-    -- sent one got no choice of target AND skipped the "is anything locked on"
-    -- refusal.
+    -- No target selector: startAutoHack() takes no parameters, so the
+    -- lock-on decides the target.
     schema = { type = "object" },
     available = gates.abilities_available,
     handler = function(_args, ctx)
@@ -310,6 +264,13 @@ local NOT_APPLIED_REASONS = {
 
 local function plan_reply(name, ctx, applied, info, what)
     if not applied then
+        -- A refusal the peer can fix by answering again (an unforced plan made
+        -- against an offered grid that has since changed); the message carries
+        -- the grid as it is now.
+        if type(info) == "table" and type(info.refused) == "string" then
+            log.info(name .. ": " .. what .. " refused (offered grid changed)")
+            return false, info.refused
+        end
         log.info(name .. ": " .. what .. " not applied (" .. tostring(info) .. ")")
         if info == "plan rejected by the puzzle" then
             -- The binding already sent the reason as the result.
@@ -439,12 +400,12 @@ dispatcher.register("pragmata_enemy_hack_plan", {
 -- --------------------------------------------------------------------
 -- The other hacking puzzles
 -- --------------------------------------------------------------------
--- The enemy grid above is one of five hacking minigames; the rest are on
+-- The enemy grid above is one of three hacking minigames; the rest are on
 -- switches, doors and elevators. They share the entry point, the controls and
 -- the outcome, and until now the mod could not see them at all.
 --
 -- One action per family rather than one polymorphic action: the mechanics have
--- nothing in common (turn a piece / press a sequence / slide a tile), so a
+-- nothing in common (turn a piece / press a sequence), so a
 -- shared schema would be a union of unrelated fields with a description that
 -- contradicted itself half the time. The observer only ever offers the peer the
 -- one action that matches the puzzle actually in front of it.
@@ -456,8 +417,7 @@ dispatcher.register("pragmata_enemy_hack_plan", {
 local function register_puzzle_action(name, kind, payload_key, description, schema, short)
     -- Don't advertise an action for a family this install has switched off: the
     -- observer would never force it, so a peer calling it could only ever be
-    -- told there was nothing to plan. `slide` and `path` ship off, which is why
-    -- this matters rather than being theoretical.
+    -- told there was nothing to plan.
     local kinds = config.puzzle_kinds or {}
     if kinds[kind] == false then
         log.info("skipping " .. name .. " (mod_config.puzzle_kinds." .. kind .. " is off)")
@@ -538,67 +498,11 @@ register_puzzle_action("pragmata_enviro_hack_rotate", "circuit", "rotations",
     },
     "Solve the active circuit hack, an environment hack (a door, switch or elevator), by giving connectors presses, named as the state field names them.")
 
--- The description, the schema and even the payload key follow the active
--- group (mod_config.puzzle_sequence_group), which the puzzle debug panel can
--- switch for the session; sequence_action.lua owns both the definition and
--- the re-registration a switch needs.
+-- The description, the schema and even the payload key follow the group
+-- (mod_config.puzzle_sequence_group); sequence_action.lua builds them.
 local sequence_def = sequence_action.definition()
 register_puzzle_action(sequence_action.ACTION_NAME, "buttons", sequence_action.answer_field,
     sequence_def.description, sequence_def.schema, sequence_def.short)
-
-register_puzzle_action("pragmata_enviro_hack_slide", "slide", "moves",
-    "Solve the active pipe hack, an environment hack (a door, switch or elevator). Tiles slide into a single empty space; the hack "
-    .. "completes when an unbroken pipe runs from the source S to the goal O.\n"
-    .. "Each move names the direction the EMPTY SPACE travels, so 'up' pulls the "
-    .. "tile above the gap down into it. (0,0) is TOP-LEFT: x runs left to "
-    .. "right, y runs top to bottom. A move that would push the empty space off "
-    .. "the board does nothing, so keep every move inside the grid and track "
-    .. "where the gap ends up after each one.",
-    {
-        type = "object",
-        required = { "moves" },
-        properties = {
-            moves = {
-                type = "array",
-                minItems = 1,
-                maxItems = 24,
-                items = { ["enum"] = DIRECTION_ENUM },
-                description = "directions the empty space travels, in order",
-            },
-        },
-    },
-    "Solve the active pipe hack, an environment hack (a door, switch or elevator): move the empty space until a pipe runs from S to O.")
-
-register_puzzle_action("pragmata_enviro_hack_path", "path", "rotations",
-    "Solve the active path hack, an environment hack (a door, switch or elevator). Pieces on a board are turned until an unbroken "
-    .. "path runs across it.\n"
-    .. "Pieces are addressed by COLUMN, numbered from 0 at the left; the state "
-    .. "field says which columns can be turned. `steps` is how many QUARTER "
-    .. "TURNS to give that column's piece: 1, 2 or 3. The selection is walked to "
-    .. "each column for you, so list them in whatever order makes sense.",
-    {
-        type = "object",
-        required = { "rotations" },
-        properties = {
-            rotations = {
-                type = "array",
-                minItems = 1,
-                maxItems = 12,
-                items = {
-                    type = "object",
-                    required = { "column", "steps" },
-                    properties = {
-                        column = { type = "integer", minimum = 0, maximum = 15,
-                                   description = "column index, 0 at the left" },
-                        steps  = { type = "integer", minimum = 1, maximum = 3,
-                                   description = "quarter turns" },
-                    },
-                    __keyorder = { "column", "steps" },
-                },
-            },
-        },
-    },
-    "Solve the active path hack, an environment hack (a door, switch or elevator), by giving columns quarter turns until a path runs across the board.")
 
 
 -- --------------------------------------------------------------------
@@ -654,8 +558,7 @@ re.on_frame(function()
     --
     -- It also counts down the window in which those puzzles are made to read
     -- the command layer at all: on mouse + keyboard they otherwise take a
-    -- branch that asks nothing. Unconditional, not only while a press is
-    -- queued, because the debug probe queues presses of its own.
+    -- branch that asks nothing.
     pcall(puzzle_input.tick)
 
     -- Drive the puzzle-snake plan dispatcher. Pulls moves off the queue,

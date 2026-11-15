@@ -59,7 +59,7 @@ local MAX_LISTED = 20
 
 -- success, text: detail_fn(entry) for each match, the refusals in between.
 -- When not one name matches, the call fails and lists names that would have,
--- so the peer's next try can succeed (BEST_PRACTICES.md: actionable errors).
+-- so the peer's next try can succeed.
 function M.info_reply(entries, args, detail_fn, sep)
     local names, err = M.names_arg(args)
     if names == nil then return false, err end

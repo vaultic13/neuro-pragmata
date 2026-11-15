@@ -13,10 +13,8 @@
 -- each frame collect all visible non-empty messages in display order, join
 -- them into a single string, and forward as one context message when the
 -- combined string is new. Dedup on the combined string so the same on-screen
--- state doesn't re-fire frame after frame.
---
--- Speaker name is NOT captured yet — it lives somewhere else (probably
--- ui7000/ui7200) and uses a different mechanism. TODO follow-up.
+-- state doesn't re-fire frame after frame. The speaker's name comes from
+-- dialogue_speaker.lua.
 
 local M = {}
 local log = require("pragmata.util.log")

@@ -90,4 +90,32 @@ function M.recv()
     return parsed
 end
 
+-- Empty both mailbox files (the mod menu's "Clear bridge files"). The sidecar
+-- notices the outbox shrinking and reads it from the start again; the inbox is
+-- read from its new start. Returns true when both were emptied.
+function M.clear()
+    local ok = true
+    for _, path in ipairs({ OUTBOX_PATH, INBOX_PATH }) do
+        local f = io.open(path, "w")
+        if f then f:close() else ok = false end
+    end
+    _inbox_offset = 0
+    log.info("mailbox: both files cleared from the mod menu")
+    return ok
+end
+
+-- Sizes of the two files in bytes (nil when one cannot be opened).
+function M.sizes()
+    local function size(path)
+        local f = io.open(path, "r")
+        if f == nil then return nil end
+        local n = f:seek("end")
+        f:close()
+        return n
+    end
+    return size(OUTBOX_PATH), size(INBOX_PATH)
+end
+
+function M.is_ready() return _ready end
+
 return M

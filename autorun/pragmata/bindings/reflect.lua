@@ -89,8 +89,8 @@ function M.field(obj, name)
 end
 
 -- Dictionary lookup that never throws inside the game: get_Item on a missing
--- key raises KeyNotFoundException, which REFramework logs every time (the
--- 2026-10-01 log had them on every location read). Nil when absent.
+-- key raises KeyNotFoundException, which REFramework logs every time. Nil
+-- when absent.
 function M.dict_get(dict, key)
     if dict == nil or key == nil then return nil end
     if M.safe(function() return dict:call("ContainsKey", key) end) ~= true then return nil end
@@ -130,11 +130,10 @@ end
 -- Walk a managed array (T[]) or List<T> into a plain Lua array, raw elements.
 -- Unreadable elements are skipped, never turned into holes.
 --
--- Bounded. 2026-10-01: entering the train elevator froze the game while
--- REFramework logged ~9.7 million System.Array.GetValue
--- ArgumentOutOfRangeExceptions -- a walk was handed a collection whose
--- reported size was far larger than what it held (a container torn down
--- mid-transition). So a size beyond MAX_ELEMENTS is refused outright, and a
+-- Bounded. During a load a container can report a size far larger than what
+-- it holds (torn down mid-transition), and walking it logs one exception per
+-- index -- enough to freeze the game at the train elevator. So a size beyond
+-- MAX_ELEMENTS is refused outright, and a
 -- walk that keeps hitting unreadable indexes stops instead of trying every
 -- remaining one.
 M.MAX_ELEMENTS = 4096

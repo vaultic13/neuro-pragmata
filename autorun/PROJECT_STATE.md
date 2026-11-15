@@ -1,117 +1,68 @@
 # PRAGMATA AI Mod — Project State
 
-The current state of the deployed mod. **The code is the authority**: where this
-document and a `.lua` file disagree, the file is right and this document is a
-bug. It replaces `PROJECT_ANALYSIS.md`, `RUNTIME_DATA_COLLECTION.md` and
-`plan.md`, all of which described a discovery phase that is now finished.
+What the deployed mod does, and why it does it that way. **The code is the
+authority**: where this document and a `.lua` file disagree, the file is right
+and this document is a bug.
 
-A player-facing overview lives in `../neuro-pragmata-main/README.md`; the wire
-surface an AI peer sees is in `../neuro-pragmata-main/ACTIONS.md`.
+| Document | Covers |
+|---|---|
+| `CLAUDE.md` | how to work on the mod: layout, transport, rules, engine facts, verification |
+| this file | what each subsystem does, what was measured, what is still open |
+| `../neuro-pragmata-main/ACTIONS.md` | the wire surface an AI peer sees (schemas, replies, context) |
+| `../neuro-pragmata-main/README.md` | the player-facing overview and install guide |
 
-## What it is
+## Contents
 
-A REFramework Lua mod for Pragmata (IL2CPP RE Engine) that lets an AI peer act
-as Diana. It exposes four gameplay capabilities — Scan, Auto-Hack, Overdrive,
-and playing the hacking minigames — and streams game state back as context.
+1. [Tested platforms](#tested-platforms)
+2. [Per-frame work](#per-frame-work)
+3. [Diana's three abilities](#dianas-three-abilities)
+4. [Scene prompts](#scene-prompts)
+5. [Scan reporting](#scan-reporting)
+6. [Hacking](#hacking)
+7. [Shelter, menus and catalogs](#shelter-menus-and-catalogs)
+8. [Context emitted](#context-emitted)
+9. [The mod menu](#the-mod-menu)
+10. [Configuration](#configuration)
+11. [Open items](#open-items)
 
-How to work on it is in `CLAUDE.md`.
+## Tested platforms
 
-Lua talks to the game only through REFramework's `sdk` reflection and hooks;
-there are no native offsets, no injected DLL, no virtual input device, and no
-OS-level key synthesis.
+The mod has been played and tested only on **Windows, with mouse and
+keyboard**. It has **not** been tested on Linux (Proton / Steam Deck) or with a
+controller. Both can cause input problems:
 
-## Layout
+- **Controller.** The puzzles read input on one of two branches, chosen by the
+  input scheme (`PuzzleBase.getMouseMoveMode()`; see
+  [The environmental hacks](#the-environmental-hacks)). The mod forces the
+  pad branch for the frames a press is in flight. That is the branch a
+  controller uses natively, but it has never been exercised with a real pad
+  connected, so a pad's own stick and button input may compete with injected
+  presses. Scan's injected command and the scene-prompt press have the same
+  gap.
+- **Linux.** REFramework, the file mailbox under `reframework/data/` and the
+  Python sidecar all run under Proton untested. Paths and file locking between
+  the game and a native sidecar are the likely trouble spots.
 
-```
-autorun/
-  pragmata_main.lua          entrypoint: boots the mailbox, registers actions,
-                             pumps the inbox and the two per-frame tickers
-  pragmata/
-    dispatcher.lua           action registry + deferred-result plumbing
-    bridge_mailbox.lua       JSONL transport under reframework/data/
-    mod_config.lua           every user-tunable setting, commented in place
-    ability_actions.lua      deferred confirmation windows for the 3 abilities
-    scan_memory.lua          last scan's time / place: scan again or use cache
-    ability_state.lua        gauge / readiness / unlock / scan-result emitters
-    world_state.lua          scene, checkpoint, combat edges
-    autonomy.lua             optional in-combat ability hints
-    dialogue.lua             subtitle capture     dialogue_speaker.lua  speaker
-    archive.lua              collectible-document capture
-    hacking_observer.lua     puzzle lifecycle -> actions/force, for every kind
-    hacking_overlay.lua      on-screen "<peer> is hacking" banner
-    abilities_debug.lua      ImGui panel + the F6/F7/F8 manual triggers
-    hacking_debug.lua        ImGui panel + the only remaining file dump
-    puzzle_debug.lua         ImGui panel: sequence-hack group switch, peer view
-    game_state.lua           the read-only state actions: pragmata_status
-                             (health, location, weapons, mods, inventory);
-                             describe_upgrades for State Debug only
-    game_state_observer.lua  area / low-HP / equip context pushes
-    action_gates.lua         which actions are offered now (Shelter, prompts)
-    menu_actions.lua         pragmata_menu_list / _info: every menu below,
-                             by a `menu` enum, always registered
-    shelter_menu_actions.lua Firmware Updater, Unit Printer, train mod menu
-    stamp_actions.lua        the Stamp Club board
-    catalog_actions.lua      Data Library, Archive, Bot Database, Training
-                             Simulations, Earth Memories + Shelter-only pushes
-    sector_actions.lua       the tram's sector selection
-    state_debug.lua          ImGui panel for all of the above (F9 / F10 / F11)
-    bindings/                everything that names real game types
-    util/                    log, emit, json, snake_render, puzzle_render,
-                             name_match
-```
+The published README carries the same warning.
 
-## Shelter and menu actions
+## Per-frame work
 
-Read-only actions about the player and the game's menus, each answering from
-live game data. Their wire format and examples are in `ACTIONS.md`.
+The transport (file mailbox + Python sidecar) is described in `CLAUDE.md`.
+Each frame after startup `pragmata_main` drains the inbox (at most 8 lines),
+then calls:
 
-- **Two stable actions.** Every menu and catalog is a `menu` value of
-  `pragmata_menu_list` / `pragmata_menu_info` (`menu_actions.lua`), registered
-  once and never hidden: the Shelter's menus open and close constantly, and
-  every change to the action set slows the peer down (BEST_PRACTICES.md). Each
-  menu keeps its gate (`mod_config.menu_gui` maps menus to screen codes), and a
-  call while it is closed is refused with the gate's reason. Until 2026-10-11
-  these were nineteen actions, each announced only while its screen was open.
-- **Gating** remains for the abilities and hacking actions: `action_gates`
-  polls about five times a second and the dispatcher re-announces the set when
-  it changes. In the Shelter the abilities and hacking actions go away.
-- **Menus read their own screen** (Firmware Updater, Unit Printer, train mod
-  menu, Stamp Club, tram sector selection), so values match what is shown. The
-  printer rebuilds the tabs not on screen from the same data.
-- **Catalogs read game data** (Data Library, Archive, Bot Database, Training
-  Simulations, Earth Memories), so they answer anywhere in the Shelter; the
-  Archive anywhere at all. A gain is pushed as silent context only while in
-  the Shelter.
-- **`pragmata_mods`** reports only equipped mods, each with what it does.
+- `command_input.tick()` — Scan's injected-command queue;
+- `puzzle_input.tick()` — the other puzzles' paced and gated presses;
+- `puzzle_snake.tick_plan()` — the grid move dispatcher;
+- the `tick_plan` of every other puzzle family.
 
-`bindings/` is the only place internal type and method names appear. Its public
-functions return neutral values, so the rest of the mod reads without spoilers.
-
-## Data flow
-
-```
-game frame
-  -> bindings read/hook managed state, dispatch actions
-  -> observers turn state transitions into context or actions/force
-  -> bridge_mailbox appends to data/pragmata_mailbox/lua_to_bridge.jsonl
-  -> Python sidecar tails it and speaks Neuro-SDK over a WebSocket
-  <- sidecar appends replies to bridge_to_lua.jsonl; Lua drains <=8 per frame
-```
-
-REFramework's Lua sandbox cannot open sockets, which is the whole reason the
-file mailbox and the sidecar exist.
-
-Each frame after startup `pragmata_main` drains the inbox, then calls
-`command_input.tick()` (Scan's injected-command queue), `puzzle_input.tick()`
-(the other puzzles' paced/gated presses), `puzzle_snake.tick_plan()` (the grid
-move dispatcher) and the `tick_plan` of every other puzzle family loaded so
-far.
+`action_gates` polls about five times a second (every 12 frames) and the
+dispatcher re-announces the action set when it changes.
 
 ## Diana's three abilities
 
-All three are runtime-confirmed and each has exactly one dispatch path. The
-route-selection machinery that existed while they were being found is gone —
-along with any way to reintroduce a fallback that would fire an ability twice.
+All three are confirmed in game, and each has exactly one dispatch path. There
+is no fallback route, so nothing can fire an ability twice.
 
 | Ability | Dispatch | Confirmed by | Window |
 |---|---|---|---|
@@ -119,69 +70,20 @@ along with any way to reintroduce a fallback that would fire an ability twice.
 | Auto-Hack | `AutoHackWorkUnit.startAutoHack()` on the live work unit | `get_IsAutoHacking()` rising | 120 frames |
 | Overdrive | `app.PlayerDeathblowDriver.tryDeathblow()` | a `DeathblowStatus` start flag, or a real gauge spend | 180 frames |
 
-None of the three takes arguments. `startAutoHack()` has no target parameter, so
-the lock-on decides the target; the binding resolves it only to refuse early
-when nothing is locked on.
+None of them takes arguments. `startAutoHack()` has no target parameter, so the
+lock-on decides the target; the binding resolves it only to refuse early when
+nothing is locked on. Abilities are hidden until `GuiManager.getSafeRoomLevel`
+reads at least `abilities_min_shelter_level` (the Cradle opening has none), and
+in the Shelter's sector.
 
 **Scan** injects at the input layer: `command_input.lua` hooks
 `app.PlayerInputDriver.isTrigger` / `isDown` / `isRelease` and answers true for
-the Scan command hash for a few frames. That is why it produces the real scan
-with its full presentation. `requestScan(bool)` is resolved and *hooked* but
-never called — the hook is how `request_progressed()` learns the engine got
-there. Calling it directly works but skips the action-driver chain that draws
-the scan. Requests are debounced 8 frames locally.
+the Scan command hash for a few frames, which produces the real scan with its
+full presentation. `requestScan(bool)` is hooked, never called: the hook is how
+`request_progressed()` learns the engine got there. Calling it directly works
+but skips the chain that draws the scan. Requests are debounced 8 frames.
 
-**Scene prompts** (`bindings/cutscene_prompt.lua`, `cutscene_prompt_observer.lua`).
-Some scripted scenes stop on the Overdrive button icon. The scene is run by
-`app.EventActionDeathBlowUnlock_PLWrapperd` (subclasses: the Ch14500 boss and
-the Filament Remover). A hook on its `update()` finds the live ones.
-
-The 2026-10-09 trace of a manual press (boss scene) showed the sequence
-`Wait → AddGauge → icon.requestOpen → WaitGaugeFullEffect`. The scene waits
-there, and a press runs the action's `onSpecialMove()`, which closes the icon.
-The next frame the state is `StartedDeathBlow`. `tryDeathblow()` is not
-involved, and no command reader is asked for the press: injecting SpecialMove
-+ FinishBlow on all three readers did nothing.
-
-So the prompt counts as up while the action is in `WaitGaugeFullEffect` or
-`WaitStartDeathBlowButton` and the icon is open. The icon state is latched
-from hooks on `FinishBlowGuiMediator.requestOpen` / `requestClose`. The
-observer forces `pragmata_overdrive`, and while a prompt is up
-`ability_actions` routes that action to `cutscene_prompt.press()`. A press
-counts as confirmed when the scene leaves the waiting state.
-
-**Confirmed end to end on 2026-10-10.** The prompt was detected and the force
-sent. Neuro's `pragmata_overdrive` pressed it and the scene continued, with the
-result `"pressed the scene's Overdrive prompt; the scene continued
-(StartedDeathBlow)"`. `press()` therefore calls the action's own
-`onSpecialMove()`, and that is its only route. The command-injection and
-`tryDeathblow` routes, the extra command readers they needed and the F3 press
-trace were removed on 2026-10-11 once all three scene kinds worked; recover them
-from git history if a patch changes how a scene reads the press.
-
-The Filament Remover scene, traced on 2026-10-11, behaves the same way: in
-`WaitGaugeFullEffect`, a press runs `onSpecialMove()`, which runs
-`onStartDeathBlow()` → `startDeathBlow()`, and the state goes to
-`StartedDeathBlow`. It asks for the filament-cleaning button, so it is offered
-as its own action, `pragmata_purify`
-(`cutscene_prompt_buttons.filament = "purify"`). That action is announced only
-while its prompt is up, and the observer syncs the action set before forcing
-it.
-
-**First boss (Solar Power Plant).** Pressing that scene's prompt ends the
-cutscene, but the boss still has to be finished with a normal Overdrive.
-Delaying the press did not help (that setting was removed).
-Instead, `cutscene_prompt_followup_overdrive` (2 s there) makes the observer
-do the following after the prompt clears:
-1. wait until the scene action stops updating (`cutscene_prompt.scene_running()`);
-2. wait 2 s;
-3. call `overdrive.trigger()`, the same call as F8, retrying every 0.5 s for up
-   to 10 s until the game confirms Overdrive started.
-
-Confirmed in game on 2026-10-11. The log line "prompt N up" names each
-prompt's sector, which is what that setting is keyed on.
-
-**Overdrive** was the hard one, and two entry/exit captures settled it:
+**Overdrive** was settled by two entry/exit captures:
 
 ```
 f15046  ENTER tryDeathblow()        depth 0
@@ -193,383 +95,420 @@ f15050  cleared CanDeathblow|Request, raised Play|Start ; gauge 126.65 -> 26.65
 f15133  cleared Play  (ability ends, ~87 frames after dispatch)
 ```
 
-- `tryDeathblow()` **wraps** `startDeathBlow()`. They are one call, so chaining
-  them as a "fallback" would be a second activation, not a retry.
-- Dispatch is on the driver, **not** the command layer: `command_diff` was `0`
-  across both entire captures. No `PlayerInputCommand` changes state, which is
-  why the command-publish approach never worked and why `player_command.lua`
-  was deleted.
-- The cost is a fixed **-100.0 of 150**, twice — a spend, not a reset, and not
-  a "gauge full" requirement.
-- Readiness is **`DeathblowStatus.CanDeathblow`**. While the ability was
-  usable, `DeathblowStatus` read `36` (`CanDeathblow|FindTarget`) and
-  `FinishBlowStatus`/`PuzzleStatus` both read `0` — the flags the binding used
-  to check would have called a usable ability "not ready". `FindTarget` is
-  deliberately not treated as readiness: a target in range is a precondition,
-  not permission.
-- Activation is not instantaneous. The driver call raises `Request` and the
-  state machine consumes it four frames later, hence the 180-frame window.
+- `tryDeathblow()` **wraps** `startDeathBlow()`; chaining them as a "fallback"
+  would be a second activation.
+- Dispatch is on the driver, **not** the command layer: no
+  `PlayerInputCommand` changed state in either capture.
+- The cost is a fixed **-100 of 150**, a spend, not a "gauge full" requirement.
+- Readiness is **`DeathblowStatus.CanDeathblow`**. A usable ability read `36`
+  (`CanDeathblow|FindTarget`) while `FinishBlowStatus` / `PuzzleStatus` read
+  `0`. `FindTarget` is a precondition, not permission, and is not used.
+- The driver raises `Request` and the state machine consumes it four frames
+  later, hence the 180-frame window.
+- `requestWideFinishBlow`, `execWideFinishBlow`, the Override requests and gauge
+  clearing were not called in either capture; nothing resolves them.
 
-`requestWideFinishBlow(Int32)`, `execWideFinishBlow()`, the Override requests
-and gauge clearing were **not** called in either capture, so nothing resolves
-them any more.
+## Scene prompts
+
+`bindings/cutscene_prompt.lua`, `cutscene_prompt_observer.lua`.
+
+Some scripted scenes stop on the Overdrive button icon. They are run by
+`app.EventActionDeathBlowUnlock_PLWrapperd` (subclasses: the Ch14500 boss and
+the Filament Remover); a hook on its `update()` finds the live ones.
+
+A traced manual press showed `Wait → AddGauge → icon.requestOpen →
+WaitGaugeFullEffect`. The scene waits there, and a press runs the action's
+`onSpecialMove()`, which closes the icon; the next frame the state is
+`StartedDeathBlow`. No command reader is asked for the press, and
+`tryDeathblow()` is not involved.
+
+- The prompt counts as up while the action is in `WaitGaugeFullEffect` or
+  `WaitStartDeathBlowButton` and the icon is open (latched from hooks on
+  `FinishBlowGuiMediator.requestOpen` / `requestClose`).
+- The observer forces `pragmata_overdrive`; while a prompt is up,
+  `ability_actions` routes that action to `cutscene_prompt.press()`, which calls
+  `onSpecialMove()`. A press is confirmed when the scene leaves the waiting
+  state.
+- The Filament Remover asks for the filament-cleaning button, so it gets its own
+  action, `pragmata_purify` (`cutscene_prompt_buttons.filament = "purify"`),
+  announced only while its prompt is up.
+- **First boss (Solar Power Plant).** Pressing that prompt ends the cutscene, but
+  the boss still needs a normal Overdrive. `cutscene_prompt_followup_overdrive`
+  waits until the scene action stops updating, waits 2 s, then calls
+  `overdrive.trigger()` every 0.5 s for up to 10 s until the game confirms it.
+  The log line "prompt N up" names the prompt's sector, which is what that
+  setting is keyed on.
+
+All three scene kinds are confirmed in game.
 
 ## Scan reporting
 
-`pragmata_scan` is both the scan and the re-read. `scan_memory.lua` decides:
-a new scan only once the last one (the peer's or the player's) is
-`scan_cache_seconds` (7) old; otherwise the held results, labelled as cached
-with their age. A "Hugh has moved 5 m" condition was tried and removed on
-2026-10-12: the position read through handle `_Core` -> `_Updater` ->
-GameObject -> Transform never returned anything. A new scan's result waits for the list to
-settle and carries the findings, and that scan is left out of the context
-stream.
-
-A player-made scan produces one narrative line naming what the engine can
-actually place:
+`pragmata_scan` is both the scan and the re-read. `scan_memory.lua` makes a new
+scan only once the last one (the peer's or the player's) is `scan_cache_seconds`
+(7) old; otherwise it returns the held results, labelled as cached with their
+age. A new scan's result waits for the list to settle and carries the findings;
+that scan is left out of the context stream. A scan the player makes produces
+one context line:
 
 ```
 Diana scanned: 3x escape hatches (8 / 44 / 97 m), 2x Upgrade Components (34 / 67 m).
 ```
 
 The leading count is the number of **located** instances and always equals the
-number of distances after it. Getting there involves several stages, all
-visible in the abilities panel:
+number of distances after it. The stages:
 
-- **Naming.** `object_names.lua` resolves hashes through the game's own catalogs
-  (`GuiDataManager` / ObjectIDs / Variety / ScanIconType). Markers the catalogs
-  do not name are described by what they are — objective marker, escape hatch,
-  point of interest. A marker named **(from contents)** was named by the item
-  its container holds. No hash ever reaches the peer.
-- **Liveness filters** (`mod_config.scan_filters`) each answer *dead*, *live*,
-  or *no evidence*. A marker is dropped **only** on a definite dead, so a
-  broken layer cannot empty the report. `filter_bypassed` marks the case where
-  everything was filtered and the cut was abandoned instead.
+- **Naming.** `object_names.lua` resolves hashes through the game's catalogs
+  (`GuiDataManager` / ObjectIDs / Variety / ScanIconType). Unnamed markers are
+  described by kind (objective marker, escape hatch, point of interest). A
+  marker named **(from contents)** was named by the item its container holds. No
+  hash reaches the peer.
+- **Liveness filters** (`scan_filters`) each answer *dead*, *live* or *no
+  evidence*. A marker is dropped only on a definite dead, so a broken layer
+  cannot empty the report. `filter_bypassed` marks a scan where everything was
+  filtered and the cut was abandoned.
 - **Join.** Distances come from `ScanCandidateUnit`, matched per instance where
-  possible. `join: ctx=… pair=… none=…` in the panel reports how well that
-  worked; `ctx=0` with a non-zero `pair` means the per-instance hypothesis is
-  wrong and distances degrade to per-type. Pair-joined pings consume distinct
-  candidate records, which is what fixed reports like `51 / 51 / 51 m`.
-- **Dedupe.** Same object id + icon within `scan_dedupe_radius` metres collapse.
-  Where a candidate has no world position the *distance* is used as identity,
-  which will merge two same-type objects at equal range in different
-  directions. Both survivors and casualties appear in the **Filtered out** tree.
-- **Located-only cut.** Only markers with a distance are reported. If nothing at
-  all has one, the cut is abandoned for that scan (`distance_bypassed`) rather
-  than claiming an empty area.
-- **Pickability.** `cannot be taken yet` / `some cannot be taken yet` come from
-  `RestrictInteractData.IsRestrict` — the game refusing interaction *right now*
-  (cutscene, locked phase). It means "not yet", not "never", which is why it is
-  reported rather than filtered. The partial case carries no number on purpose:
-  the flag is counted across the whole group while the row lists only its
-  located instances, so a count there could contradict the count beside it.
+  possible. The inventory's `join` counters (`context` / `pair` / `none`) show
+  how well; `context = 0` with a non-zero `pair` means distances have degraded
+  to per-type.
+- **Dedupe.** Same object id + icon within `scan_dedupe_radius` m collapse.
+  Without a world position the distance is the identity, which can merge two
+  same-type objects at equal range.
+- **Located-only cut.** Only markers with a distance are reported; if none has
+  one, the cut is abandoned (`distance_bypassed`) and the line degrades to names
+  and counts.
+- **Pickability.** `cannot be taken yet` comes from `RestrictInteractData.IsRestrict`
+  (the game refusing interaction right now). The partial case carries no number,
+  because the flag is counted over the whole group and the row lists only
+  located instances.
 
-The report deliberately carries **no marker totals**. Counts the peer cannot act
-on — unlocated instances, markers at unknown range, the grand total — were
-removed; each would have contradicted the rows printed next to it. They are all
-still in `get_inventory()`, the log, and the panel trees.
-
-When distances are unavailable wholesale the line degrades gracefully to names
-and counts only:
-
-```
-Diana scanned: 12x Upgrade Components, 3x Lunafilament, 1x Mods, 1x Pure Lunum,
-24x sub-objective markers, 15x markers (some cannot be taken yet),
-4x escape hatches, 3x objective markers (+1 more marker type).
-```
+The report carries no marker totals: counts the peer cannot act on contradicted
+the rows beside them. They are still in `get_inventory()`.
 
 ## Hacking
 
-The most complete subsystem. Five minigames, one loop — see **The other puzzle
-families** below for the four that are not the enemy grid.
+Three minigames, one loop (`hacking_observer.lua`): the enemy grid and two
+environmental families. They share `app.PuzzleBase`. Only one `actions/force` is
+outstanding at a time; each carries a `priority` (`puzzle_force_priority`: the
+enemy grid `high`, the rest `low`), which is advice to the peer, not
+arbitration here.
 
 ### The enemy grid (PuzzleSnake)
 
-The most complete of the five. `bindings/puzzle_snake.lua` hooks `app.PuzzleSnake`
-instances, keeps a record per live puzzle, and matches the visible one against
-`HackingManager.LastHackingTarget` so an old plan cannot land on a new target.
-
-The reader pulls the grid from `GridAccessor._GridController` / `_ActualGrid`,
-compacts skipped rows and columns, tracks the trail, and reads the dynamic
-blockers. `hacking_observer.lua` sends an `actions/force` with the rendered grid
-the moment `_StartTrg` goes true, and only one force may be outstanding. Every
-force carries a `priority` (`mod_config.puzzle_force_priority`): the enemy grid
-goes out as `high` because it is nearly always mid-combat, the environmental
-hacks as `low`. That is advice to the peer, not arbitration here — the
-one-at-a-time rule is unchanged and stays first-come.
+`bindings/puzzle_snake.lua` keeps a record per live puzzle and matches the
+visible one against `HackingManager.LastHackingTarget`, so an old plan cannot
+land on a new target. The reader takes the grid from
+`GridAccessor._GridController` / `_ActualGrid`, compacts skipped rows and
+columns, tracks the trail and reads the dynamic blockers.
 
 Moves are dispatched by writing the next absolute cell into
-`PuzzleSnake._NextMovePosition` (`via.Int2`, offset `0x1ac`) at ~130 ms a cell.
-That routes through the engine's own `updateInput -> updateNextPosition ->
-updatePuzzleMovement -> onEnterGrid` pipeline, so walls block, gates enforce,
-trail flags update, bonus and skill cells fire, `EraseCode` traps fire, and goal
-arrival auto-completes the puzzle. `Unit.move(via.Int2)` *teleports* and
-bypasses all of that, so it survives only behind the debug panel's poke buttons.
+`PuzzleSnake._NextMovePosition` (`via.Int2`) at ~130 ms a cell. That runs the
+engine's own `updateInput -> updateNextPosition -> updatePuzzleMovement ->
+onEnterGrid`, so walls block, traps fire and the goal completes the puzzle.
+`Unit.move(via.Int2)` would teleport instead, and is not used.
 
-Engine findings worth keeping:
+Findings:
 
-- **Sticky-bomb row/column removal never changes the grid dimensions.** Removed
-  rows are flagged per cell and listed on `GridAccessor` (`get_SkipRow()` /
-  `get_SkipCol()`), then restored by `expansionRow()`/`expansionCol()`.
-  `GRID_ACTUAL_SIZE_X/Y` keeps reporting the full size, so a reader ignoring
-  the skip flags renders rows that no longer exist.
-- **The red error nodes are not a `_GridType`.** They read as `None`; the live
-  marker is `Grid._ObstacleReasons`, a bitmask of `ObstacleReason`
-  (`ObstacleGrid=1` verified in-game, plus `DeadFilament`, `Ch16092`,
-  `Ch14100`, `AllPassed`). The engine sets and clears bits mid-fight, so it is
-  dynamic state, not authored layout. They render as `d`, distinct from walls
-  `#`, because entering one **resets the whole hack** while a wall merely stops
-  the cursor.
-- **Polled fields propagate; one-frame `*Trg`/`*Trigger` fields silently drop
-  writes.** Value-type fields must be mutated on an engine-supplied wrapper —
-  a fresh `sdk.create_instance("via.Int2")` exposes no writable fields on the
-  builds tested.
-- **`_IsGoldenPath` is deliberately not rendered.** It marks the engine's own
-  auto-hack route and floods most walkable cells; showing it would bury the
-  real bonuses and hand the peer a pre-solved path. Debug dump only.
+- **Sticky-bomb removal never changes the grid dimensions.** Removed rows and
+  columns are flagged per cell and listed on `GridAccessor` (`get_SkipRow()` /
+  `get_SkipCol()`), then restored by `expansionRow()` / `expansionCol()`.
+  `GRID_ACTUAL_SIZE_X/Y` keeps the full size.
+- **Red error nodes are not a `_GridType`.** They read `None`; the marker is
+  `Grid._ObstacleReasons`, a bitmask of `ObstacleReason` (`ObstacleGrid=1`,
+  `DeadFilament=2`, `Ch16092=4`, `Ch14100=8`, `AllPassed=16`). Bits change
+  mid-fight. They render as `d`, distinct from walls `#`, because entering one
+  resets the whole hack.
+- **`_IsGoldenPath` is not rendered.** It is the engine's auto-hack route and
+  would hand the peer a solved path.
+- **A plan into a wall runs** like a player's input would; the peer gets the
+  outcome as the tool result and the grid again. Only plans into red blocks are
+  refused up front (`hack_block_refuse_plan`).
 
-### The other puzzle families
+### Enemy grid modifiers
 
-The other four hacking minigames sit on environmental interactables — switches,
-doors, elevators. They share `app.PuzzleBase` with the grid, which is what makes
-one observer able to drive all five.
+Read by `bindings/puzzle_snake_modifiers.lua`, field reads only (method calls
+every frame locked the game on the final boss). All three were tested in game.
 
-| Family | Types | Mechanic | Action |
+**Red blocks** (`app.ch16092PuzzleSnake`; the jamming-panel enemies ch14100 /
+ch16200 use the same rectangle shape). Large rectangles that fail the hack on
+contact, removed one at a time by shooting the enemy's antennas, top-left
+first; they can grow back.
+
+- Read from `ObstacleGridUnit.<ManagedObstacleGridList>`: each block has
+  `<GridPosition>{StartPoint, EndPoint}` (**EndPoint is inclusive**) and
+  `<IsActive>`. Bit 4 marks exactly the covered cells. Index 0 is top-left.
+- `get_isProgressImpossibleGrid()` reads **false even with all 4 up**, so the
+  gate counts blocks instead.
+- Cells render as `R` and are part of the structure signature, so a block
+  appearing or going replans.
+- **Gate** (`hack_block_gate`): with all blocks up, no force; one spoken notice
+  per puzzle per block count, "sealed … shoot the antennas … top-left first".
+- The start cell can sit inside a block.
+
+**Corruption** ("dead filament"). Dithered cells that stun the cursor for a
+moment without failing the hack; the player clears them with filament
+purification.
+
+- A cell is corrupted with `_DeadFilamentType` Random/Fixed, ObstacleReason bit
+  2, or type `DeadFilament`. Corruption is decided by the cells alone.
+- Rendered as `c` (walkable, avoid when a clean route exists).
+- **Gate** (`hack_corruption_gate`): a corrupted grid over
+  `hack_corruption_max_cells` (30, compacted size) is not forced; one spoken
+  "purify the corruption first". The cells flicker, so a large grid stays gated
+  `hack_corruption_hold_seconds` (3) after the last look that had one. An
+  unsettled gate answer is never cached.
+- `hack_corruption_gate_skip_sectors` exempts Experimental Pragmatics, whose
+  corrupted enemies come before the scene that unlocks purification. Matching is
+  by the map's sector name (language-dependent; a sector hash also works).
+- **Dispatch.** While `_MoveBlockReasonFlag ~= 0` the queue holds (capped at
+  5 s). A move eaten by a stun is retried, at most 3 times, and only if the move
+  block was seen in the last 0.6 s: `_LastUnitMoveResult` stays `Stun` long
+  after the stun ends, so it cannot be used.
+
+**Exploding rows** (final boss, `app.ch14500PuzzleSnake`;
+`<attackController>.<AttackUnitList>`). Whole rows pulse (Sign, 1.2 s) and
+explode (Attack, 0.2 s); a cursor on one fails the hack.
+
+- **Not rendered** (they are short-lived and would cover the goal and bonuses).
+- `_explosion_gate` simulates the queue at `hack_explosion_move_seconds` with
+  `hack_explosion_margin_seconds` margins: go, hold on a safe cell, or step to a
+  safe neighbour and back. A hold over 4 s moves on anyway.
+- `_guard_idle` covers the time no plan runs, which is when the cursor actually
+  got caught: it steps off a pulsing row and back.
+- A reset within 1 s of an explosion is reported as "An exploding row caught the
+  cursor". Switch: `hack_explosion_guard`.
+
+**Grids offered instead of forced.** With `hacking_auto_force = false` every
+enemy grid, and with `"not_open"` a grid on an enemy already open from the last
+hack, goes out as one silent context message (`force_blocked` returns it)
+instead of a force: the grid only (`snake_render.render_grid_only`; legend with
+`hacking_context_legend`), once per layout per enemy (`rec.offer`). The peer
+decides: an unforced `pragmata_enemy_hack_plan` is adopted for that grid
+(`unforced_offer_id` / `adopt_offer`; refused with the current grid if the
+cursor or board moved since the offer) and its failures resolve directly,
+since the server retries only forced actions. A hack ending clears `rec.offer`
+(`resolve_plan` and the completion claims), because the game puts the same layout
+back for the next hack.
+
+The environment families get the same treatment from the observer itself
+(`hacking_observer` `send_offer` / `_adopt_offer`), with `hacking_auto_force =
+false` only: where `_reconcile` would force, it sends the family's
+`render_state(id, { board_only = true, legend = hacking_context_legend })` as
+silent context (the board without the instructions; `puzzle_render` drops the
+answer format, how-to-solve text and, without `legend`, the reading key) and
+takes the force snapshot (so
+`needs_force` stays false until the board changes, and the circuit's
+`forced_view` reconciles the answer). An unforced call of the family's action is
+adopted for that board, or refused when the hack is gone or not taking input, or
+refused with the current render when `needs_force` says the board changed.
+
+**Checked plans.** `set_plan` (or the first dispatch of a parked plan) walks
+the plan with `snake_render.check_plan`: on the board, plain walkable cells
+only, never the trail, ends on G. A checked plan interrupted from outside
+resolves `success: true` saying why: the player stopping aiming or turning to
+another target (20-frame grace), the layout changing (`tick_plan`'s structure
+check, or the observer's `discard_plan` on a grid-change edge), the enemy dying
+(sweep; not kept). Only then is it stored in `_plan_store` (at most
+`hack_plan_store_max`, 3, across enemies; oldest dropped). `replay_cached`
+reruns a stored plan once, without asking, when the same record shows the same
+layout with the cursor at the plan's start, and removes it as it starts; a
+replay is not stored again. The observer asks it before forcing or offering.
+`resolve_plan` (reset, failed, completed) and the sweep drop that record's
+plans. Storing at check time (the first version) replayed a completed plan on
+the reset grid several times in a row.
+
+**Enemies already open.** A successful hack leaves the enemy open for a while.
+`force_blocked` reads
+`_TargetPuzzleUnit` → `_EnemyUpdater` → `<HackingDriver>k__BackingField` →
+`EnemyHackingDriver.get_InHackingMode()` (a method call, at most every 0.25 s,
+only while the grid is interactive). An unreadable answer counts as not open. If the window ends
+while the grid is still up, the peer is asked. `InHackingMode` reading as
+"open" is confirmed in game.
+
+**The finale.** The final boss's last hack is five fixed stages, identical
+across runs (`FINALE_STAGES` at the end of `puzzle_snake.lua`, keyed by
+`snake_render.layout_fingerprint`, i.e. what the peer sees). Stage 5 opens with
+a ~14 s scripted "optimizing hacking matrix" sequence during which the puzzle
+reads as playable field for field; solving it then cut the animation and
+soft-locked the game. No engine flag distinguishes it, so the mod holds stage 5
+for `hack_finale_hold_seconds` (16) from first sight. All five stages are forced
+with `ephemeral_context = false` (`hack_finale_keep_context`).
+
+### The environmental hacks
+
+| Family | Types | Action | State |
 |---|---|---|---|
-| Circuit | `PuzzleCircuit` (+ `WithTimer`, `Advanced`, level reskins) | rotate 1-3 pieces until each reaches the centre | `pragmata_enviro_hack_rotate` |
-| Buttons | `PuzzleButtonTimingNoRotate`, `PuzzleButtonTiming` | press the directions in order, with or without a timing dial | `pragmata_enviro_hack_sequence` |
-| SlidePipe | `PuzzleSlidePipe` | slide tiles to complete a pipe run | `pragmata_enviro_hack_slide` |
-| ThroughThePath | `PuzzleThroughThePath` | turn columns to open a route | `pragmata_enviro_hack_path` |
+| Circuit | `PuzzleCircuit` (+ `WithTimer`, `Advanced`, level reskins) | `pragmata_enviro_hack_rotate` | played in game |
+| Buttons | `PuzzleButtonTimingNoRotate`, `PuzzleButtonTiming` | `pragmata_enviro_hack_sequence` | played in game |
 
-Findings worth keeping:
+- **Discovery needs no hooks.** `HackingManager.LastHackingTarget` →
+  `PuzzleUnit.get_MyPuzzle()` → walk the type's parent chain to the family (so
+  `AdvancedPuzzleCircuit` and the `chNNNNN` reskins resolve).
+  `PuzzleUnit.IsGimmick` tells environmental from enemy (`_TrailTargetType` is
+  the fallback).
+- **Lifecycle is polled**, from `PuzzleBase` fields that sit at the same offsets
+  on every family (`_State`, `_OpenStatus` / `_CloseStatus`, `_InitTrg`).
+- **Input goes through the command layer, on one of two branches.** The puzzles
+  query `PuzzleUp/Down/Left/Right` only while `PuzzleBase.getMouseMoveMode()` is
+  false (pad). On mouse + keyboard it is true and they ask nothing, filling
+  `_TrgUp`… from `PlayerCommandUpdater.getVec2("Move")` instead.
+  `puzzle_mouse_mode.lua` reports false for the frames a press is in flight
+  (`puzzle_force_button_mode`, `puzzle_force_button_frames`). `puzzle_input.lua`
+  paces presses by the game's `_InputEnableInterval`. `_Trg*` fields are read as
+  confirmation, never written.
+- **GUI parameter objects are the read surface.** `app.gui.ui3510.OpenParam.Lines`
+  for the circuit; the sequence comes from the puzzle's own button list (the GUI
+  copy, `ui3500.OpenParam`, came back undecodable).
+- **The peer plans; the mod times.** The timed sequence's window is a few frames
+  wide; `puzzle_input` fires each press on a frame the engine's `_Inside` flag
+  accepts.
+- **What is rendered is what the player sees.** The button ring is on screen, so
+  it is transcribed. The circuit's solution is computed (the press counts) only
+  after the mod's wiring model reproduced the engine's connection flags on that
+  board; connector names are measured by pressing each direction once before
+  the force.
+- A disabled family (`puzzle_kinds`) is still detected and narrated, but its
+  action is not registered and it is never forced.
 
-- **Discovery needs no hooks.** `HackingManager.LastHackingTarget` gives a
-  `PuzzleUnit`; `get_MyPuzzle()` gives the live puzzle; walking its type's parent
-  chain gives the family. Walking the chain is what makes `AdvancedPuzzleCircuit`
-  and the `chNNNNN` reskins resolve instead of falling through as unknown.
-- **Do not hook `PuzzleBase.success` / `onFailed` / `startPuzzle`.** They are
-  virtuals that most concrete puzzles override, so a hook on the base
-  implementation only ever sees the families that don't override them. The base
-  *fields* (`_State`, `_OpenStatus`/`_CloseStatus`, `_InitTrg`) sit at the same
-  offsets on every family and are polled instead.
-- **`PuzzleUnit.IsGimmick` is the environmental-vs-enemy discriminator**
-  (`_TrailTargetType` = `Prop` | `Enemy` is the fallback).
-- **Input is the game's own command layer -- but only on one of two branches.**
-  `app.hid.PlayerInputCommand` declares `PuzzleUp` / `PuzzleDown` / `PuzzleLeft`
-  / `PuzzleRight`, and `command_input.lua` answers those queries by the same
-  route Scan uses. The catch, found the hard way in-game, is that the puzzles
-  only ask when `PuzzleBase.getMouseMoveMode()` is false. On mouse + keyboard it
-  is true, and the puzzle asks nothing at all: it fills in its own
-  `_TrgUp`/`_TrgLeft`/`_TrgRight`/`_TrgDown` from the movement vector
-  (`PlayerCommandUpdater.getVec2("Move")`, thresholded at ±0.5) and reads those
-  back. `puzzle_mouse_mode.lua` flips that branch for the few frames a press is
-  in flight, which is what makes the command route reach every family.
-  `puzzle_input.lua` adds pacing (from the game's own
-  `PuzzleCommonSettingUserdata._InputEnableInterval`) and gating on top. The
-  `_TrgUp`/`_TrgDown`/... fields are read as confirmation and never written:
-  one-frame `*Trg` fields drop writes.
-- **There is more than one command reader.** `PlayerInputDriver` answers
-  `isTrigger`, but `isDown` / `isRelease` / `getVec2` / `getFloat` bypass it
-  entirely for `app.PlayerCommandUpdater`. A hook on `PlayerInputDriver` is
-  invisible to those. `PuzzleUpForKeyboard` and its three siblings, and
-  `PuzzleDecide`, are declared but read by nothing in the game -- the mod no
-  longer offers them.
-- **The GUI parameter objects are the cleanest read surface.**
-  `app.gui.ui3510.OpenParam.Lines` gives the circuit's pieces with their
-  rotation and connection state; `app.gui.ui3500.OpenParam` gives the button
-  sequence, the current step, the needle angle, `IsInside`, and `NoRotateMode`
-  (which distinguishes the timed variant from the untimed one at runtime).
-- **The peer plans; the mod times.** The timing variant's window is a few frames
-  wide, which no peer can hit over a websocket. The peer supplies the order and
-  `puzzle_input` fires each press on a frame the engine's own `_Inside` flag says
-  would count.
-- **The button sequence IS rendered to the peer.** The whole ring of prompts is
-  drawn on screen for the player, so transcribing it is showing the peer the
-  screen, not handing over a hidden solution. Nothing else the mod can read —
-  the circuit's connectivity solution, a pipe route — is rendered.
-- **SlidePipe and ThroughThePath are unverified.** Neither has appeared in a
-  capture; their readers and input mapping come from the type dump. They ship
-  disabled via `mod_config.puzzle_kinds` and their actions are not registered
-  while disabled.
+### Outcomes, failures and retries
 
-### Outcome reporting
+Outcomes come from the puzzle the player aims at and from a **backstop** on
+`app.player.PuzzleStatus` (`PuzzleSuccess` = 256, `PuzzleFailed` = 512), which
+fires wherever the aim is; the two are de-duplicated within ~1 s. The backstop
+only narrates; it never resolves a deferred result.
 
-Outcomes come from two sources. The per-puzzle edges read whatever the player is
-aimed at. The **backstop** reads `app.player.PuzzleStatus`
-(`PuzzleSuccess` = 256, `PuzzleFailed` = 512), which lives on the player and so
-fires wherever the aim happens to be.
+A `success: false` result to a forced action is retried by the Neuro server, so
+the observer sends no second force. A failure on a still-live hack is held until
+the binding would ask again (`needs_force`), then sent with the current board
+and the force slot kept. A fresh force goes out only after `force_retry_limit`
+failures in a row, no retry within `force_retry_wait_seconds`, or a puzzle that
+does not settle within `force_retry_settle_seconds` (then the failure goes out
+as `success: true`, "nothing to retry"). A plan that ends short without moving
+re-forces, up to 3 times. Refusals in `set_plan` go through
+`puzzle_plan.refuse`. Every deferred result is answered within
+`deferred_result_max_seconds` (12).
 
-The backstop exists because of a measured gap: the capture in
-`data/pragmata_mailbox/lua_to_bridge.jsonl` holds **9 grid-starts, 5 renders and
-3 terminal outcomes**. A hack that finished after the player looked away was
-never reported at all. The two sources are de-duplicated within a ~1s window, so
-one outcome still produces one line. The backstop only narrates — resolving a
-deferred tool result for a puzzle nobody is looking at would be guesswork, and
-the record sweep already covers a puzzle that is genuinely gone.
+## Shelter, menus and catalogs
 
-`bindings/player_status.lua` had reflected these flags for a long time; nothing
-had ever read them.
+Read-only actions about the player and the game's menus. Wire format in
+`ACTIONS.md`; the menu → screen code → data table is in `CLAUDE.md` §3.
 
-### Failures and the server's retry
-
-A `success: false` result to a forced action is retried by the Neuro server
-on its own, so the observer does not send a second force beside it. A failure
-on a hack that is still live (refused, reset, stopped short, grid changed) is
-held until the binding would ask again (`needs_force`), then sent with the
-current render appended and the force slot kept. The mod forces afresh only
-after `force_retry_limit` failures in a row, no retry reply within
-`force_retry_wait_seconds`, or a puzzle that does not settle within
-`force_retry_settle_seconds` (then the failure goes out as `success: true`,
-"nothing to retry"). Early refusals in a binding's `set_plan` go through
-`puzzle_plan.refuse`, which answers the call's own `resolve` and clears the
-snapshot so the retry carries a board.
-
-Every deferred result is answered within `deferred_result_max_seconds` (12):
-past it the dispatcher replies "accepted, still running" and the real outcome
-follows as context. A plan parked on a target the player looked away from is
-answered that way at once.
+- **The main Shelter** is the Shelter's sector once the player is past the
+  opening tutorial (which runs in the same sector). By default it is judged by
+  the Archive's Help note about the Shelter (`shelter_reached_rule = "help"`);
+  the game's Shelter level (`bindings/shelter_progress.lua`) turns true too
+  early.
+- **Two stable actions read the open menu.** `pragmata_menu_list` (no arguments)
+  and `pragmata_menu_info` (`names`) answer for whichever menu is on screen
+  (`menu_actions.lua`; `menu_gui` maps menus to screen codes); the reply's first
+  line names it. They are registered in the main Shelter or while one of the
+  screens is open, not per menu, because every change to the action set slows
+  the peer down. `menu_observer.lua` pushes "<menu> is open / closed" (debounced
+  two polls; nothing during loads).
+- **Menus are read only while open.** Closed-menu readings (game data and
+  snapshots) were tried and gave wrong answers, so buying and mod changes were
+  dropped with them.
+- **Levels are shown up to the stage cap**, the levels the story has opened
+  (`upgrade_level_cap`). The Firmware screen carries its cap
+  (`UnitInfo.UnlockMaxLevel`); the printer uses
+  `ReinforceManager.getMaxLevelWithOutHide(id, false)`.
+- **The Unit Printer lists all three tabs** (Weapon, Attachment, HackingNode):
+  the one on screen, those seen this visit (a per-visit cache, refreshed every
+  ~1 s) and those not viewed yet (rebuilt from game data, under a warning).
+  A tab that rebuilt empty is listed with a "cannot be read" line.
+- **The catalogs are the Archive pair's `catalog` choice.** `pragmata_archive_list`
+  / `_info` (always registered) read the Archive anywhere, and `library`,
+  `bot_database`, `simulations`, `earth_memories` in the main Shelter or with
+  their screen open. A gain is pushed as silent context only in the Shelter,
+  except a new Archive document (Help notes included), which is pushed anywhere.
+  Each push carries the call that reads the new entries. More than six new
+  entries at once is taken as a save load and not announced.
 
 ## Context emitted
 
-All context messages are sent with `silent: true`.
+The full list with examples is in `ACTIONS.md` → *Context messages emitted by
+the mod*. Everything goes through `util/emit.lua`, silent by default.
 
-| Trigger | Message |
-|---|---|
-| Subtitle line | `Dialogue: [Conversation] Diana says "Let's finish this!"` |
-| Collectible document opened | `Collectible document text: "…"` |
-| Overdrive becomes ready | `Overdrive is ready.` |
-| Auto-Hack upgrade unlocks | `Auto-Hack upgrade is now available.` |
-| Scan results resolve (scans the player makes) | `Diana scanned: 1x escape hatch (32 m), 1x Upgrade Components (49 m).` |
-| Scene / area change | `Hugh and Diana entered a new area.` |
-| Checkpoint | `Checkpoint reached.` |
-| Combat edges | `Combat started.` / `Combat ended.` |
-| Hack lifecycle | `Hacking grid started.` / `Hacking grid changed; replanning.` / `Hacking grid was reset.` / `Hack succeeded.` / `Hack failed.` |
-| Environmental hack lifecycle | `Device hack started.` / `Circuit hack started.` / same reset/changed wording, same `Hack succeeded.` / `Hack failed.` |
-| Autonomy nudge (opt-in) | `Combat is active. Available now: … Consider using these abilities if it would help Hugh.` |
+`emit.lua` distinguishes a `narrative` and a `transient` lane, but **the lane
+never reaches the wire**: the line that would add it (`emit.lua:30`) is
+commented out. Whether to enable it is the one open design question in the
+transport.
 
-Scene, area and checkpoint **names** are never sent — only opaque hashes are
-used internally for transition detection.
+Scene, area and checkpoint **codes** are never sent; opaque hashes are used for
+transition detection. The map area's player-facing name is sent with the area
+summary.
 
-`util/emit.lua` distinguishes a `narrative` and a `transient` lane, but
-**the lane never reaches the wire**: the assignment at `emit.lua:30` is
-commented out, so every context line accumulates identically at the peer. The
-lane argument is currently documentation of intent, nothing more. Deciding
-whether to enable it is the one live design question in the transport.
+## The mod menu
 
-## In-game controls
+`mod_menu.lua`, under the REFramework menu (**Insert**) → **Pragmata Neuro**.
+Drawing it reads only the mod's own state; no game call runs while it is open.
 
-Four ImGui panels under the REFramework menu (**Insert**); the fourth,
-**Pragmata State Debug**, covers the state and menu actions and is described
-in `CLAUDE.md`.
+- **Status**: the bridge (mailbox ready, both file sizes, when the last message
+  came in), the actions (registered, held by the peer, when last re-sent), a
+  hack request waiting for an answer, a scene prompt waiting, and the session
+  log's path.
+- **Re-send actions**: `dispatcher.reregister_all()`, exactly as if the server
+  asked: `startup`, the full action list, the startup rules, and the
+  re-register hooks (which free the hack and scene-prompt force slots).
+- **Reset hacking**: `hacking_observer.reset()`: answers a held failure,
+  resolves every live puzzle's pending plan as stopped, discards the plans and
+  snapshots, frees the force slot and drops the offer, so the hack on screen is
+  asked about afresh.
+- **Rescan archive and catalogs**: `catalog_actions.rescan()` (trackers
+  re-baselined, screen caches dropped; nothing already found is announced as
+  new).
+- **Clear bridge files**: `bridge_mailbox.clear()`, two clicks within 5 s:
+  empties both `.jsonl` files and reads the inbox from its new start; the
+  sidecar notices the outbox shrinking.
+- **Setup values**: on a button press, the current sector's name and hash and
+  every held item's internal name (`state_repair_kit_item`, the sector names
+  in part 2 of the config).
 
-**Pragmata Abilities Debug** carries the manual triggers. The hotkeys and the
-button row share one `TRIGGERS` table, so they cannot drift:
+The four developer panels (Abilities / Hacking / Puzzle / State Debug, F4–F11)
+and the `debug_*` readers behind them were removed for release; they are in
+git history.
 
-| Key | Button | Calls |
-|---|---|---|
-| **F6** | `Scan (F6)` | `scan.scan_input()` |
-| **F7** | `Auto-Hack (F7)` | `hacking.auto_hack()` |
-| **F8** | `Overdrive (F8)` | `overdrive.trigger()` |
-| **F4** | `Press scene prompt (F4)` | `cutscene_prompt.press()` |
-
-Each calls **the same binding function the peer's action calls**, so a working
-key proves the peer's route and a failure is a real failure rather than a broken
-harness. The only thing skipped is the deferred confirmation window. Outcomes
-show as `Last: <ability> [F6|button]: <ok> (<message>)` and go to
-`reframework/log.txt`.
-
-Overdrive drives a cinematic pipeline — test on a disposable save. With an empty
-gauge F8 must **refuse with a readiness reason**; a silent success there would
-mean the readiness check is not doing its job.
-
-The rest of the panel is read-only: singleton and driver capture state, gauge
-readouts, the confirmation state machine, the scan inventory tree, the
-**Filtered out** tree, and live (session-only) toggles for each filter layer.
-`markers: N reported / M raw` and `rows: N reported / M built` are the filter
-and the located-only cut at work.
-
-**Pragmata Hacking Debug** shows grid state, a synthetic-grid button, and a
-"Dump cells to log" button, which writes `pragmata_mailbox/hacking_dump.log` on
-demand. The only other file the mod writes is State Debug's F11
-`catalog_dump.log`.
-
-**Pragmata Puzzle Debug** is deliberately small. Its top section switches the
-sequence hack's group (`mod_config.puzzle_sequence_group`) for the session: one
-button per group, the active one marked, and the result of the last switch. A
-switch re-registers `pragmata_enviro_hack_sequence` with the peer and is refused while a
-sequence force is waiting for its answer. Below that it shows which puzzle is
-live and whether a force is outstanding, a **peer view** with the exact state
-text the peer is sent (kept after aim is released, labelled with its age), and
-per-family session toggles.
-
-The input probe (Numpad 8/2/4/6 with a consumed/never-asked history), the
-circuit board dump, the per-family state readouts and the type-resolution table
-mapped these puzzles and were removed on 2026-09-16 once they worked. Recover
-them from git history if a game patch breaks a puzzle's input route or board
-reading.
+Files the mod writes under `reframework/data/`: the mailbox `.jsonl` files
+(append-only, across sessions) and one log per session in
+`pragmata_logs/pragmata_<date>_<time>.log` (delete old ones by hand).
 
 ## Configuration
 
-Everything tunable is in `pragmata/mod_config.lua`, documented in place, re-read
-each game launch. Broad groups: autonomy nudges, hacking render/force options,
-scan reporting detail and caps, scan filter layers, dedupe, pickup checks,
-archive capture, peer display name, and the hacking overlay.
+Everything tunable is in `pragmata/mod_config.lua`, documented in place and
+re-read each launch. Settings worth knowing about:
 
-`puzzle_kinds` enables the non-grid hacking families individually. `slide` and
-`path` ship off because they are unverified; a family that is off is still seen
-and narrated, but its action is not registered and it is never forced.
-`puzzle_path_rotate_command` exists because which button turns a piece in the
-path family is the least certain thing in that binding; it defaults to `"up"`
-since `"decide"` turned out to name a command nothing reads.
-`puzzle_force_button_mode` (default on) is what makes any of these puzzles hear
-an injected press on mouse + keyboard; it is a no-op on a pad, and the only
-reason to turn it off is to reproduce the original failure.
+- `puzzle_kinds`: switch the circuit or the sequence hack off for the AI.
+- `puzzle_force_button_mode` (on): what makes the puzzles hear an injected press
+  on mouse + keyboard; turning it off only reproduces the original failure.
+- `action_descriptions = "short"` sends one-sentence descriptions and moves the
+  long rules into each force's state (`rules_in_force`) or one context message.
 
-`archive_gui_path` is the one setting with no sensible default: it is
-build-dependent and must be discovered with `archive_discover_paths = true`.
-Until it is set, document capture is idle.
+## Open items
 
-## Known gaps
+**Not verified in game** (code written; last recorded as awaiting a test):
 
-- **Context lanes are inert** (`emit.lua:30`), as above.
-- **`archive_gui_path` is unset**, so collectible-document capture does nothing
-  yet, and `archive_discover_paths` is still on.
-- **Directional grid cells** (`OneWay`, `TwoWay*`) exist in the enum but have
-  never been seen in a test grid; `OneWay` renders as a generic `?`.
-- **Dialogue capture is build-sensitive** — it depends on the GUI path
-  `UI/Asset/ui2000/gui/ui2010` continuing to resolve.
-- **The source mirror in `../neuro-pragmata-main/` is stale.** Its `autorun/`
-  tree predates this round of work; only its two markdown files are current.
-- **The environmental puzzles have never played end to end.** Two of the three
-  layers are now confirmed in-game (2026-09-06). The input route works: after
-  `puzzle_mouse_mode.lua`, roughly ninety probes across circuit and buttons came
-  back consumed within a frame. The loader is fixed: those families' bindings
-  had been failing to load entirely, because a `require` first reached at
-  runtime does not resolve (see `CLAUDE.md` §3), so the puzzles had no reader
-  and were never announced to the peer. What is still unproven is the layer
-  above both -- force, peer plan, dispatch, real outcome -- which needs the
-  sidecar running; the last test session had none, and all eighteen forces
-  expired on the watchdog. `UPGRADE_ENV_PUZZLES.md` lists what is left.
-- **Not seen in game yet** (the test save had everything done): the catalog
-  "new entry" pushes firing; an owned but unplaced Earth Memory reading as not
-  placed; a tram station not reached yet being counted rather than listed; a
-  one-page Library / Archive entry no longer repeating its text as `[page 1]`.
-- **Train hub, weapon selection and elevator screens** (ui0071 / ui5112 /
-  ui5113) have no actions; State Debug -> Menu object (F10) dumps them.
+- Shelter: the Archive "new entry" push after its two fixes (first document of a
+  new game, Help notes); the Help-note "main Shelter" rule on a new game;
+  abilities waiting for the Shelter level; the screen-catalog rebuild and sector
+  fallback on a new game; menu open/close pushes; the argument-less menu actions;
+  the printer's three-tab listing, and the Hide filter (if the AI's printer
+  list misses Attachment units the game shows, set
+  `printer_keep_hidden_tabs = { "Attachment" }`).
+- Catalogs: the "new entry" pushes firing; an owned but unplaced Earth Memory
+  reading as not placed; an unreached tram station counted rather than listed;
+  a one-page entry no longer repeating its text as `[page 1]`.
+- Hacking: the corruption-gate fixes in Experimental Pragmatics; the drain fix
+  for a last move that does not land; the exploding-row timing
+  (`hack_explosion_move_seconds`) and idle guard; the finale stage-5 hold.
+- Linux and controller play: see [Tested platforms](#tested-platforms).
 
-## Recovering the discovery rigs
+**Known gaps:**
 
-The trace rigs that found these paths — `ability_diagnostics.lua`,
-`overdrive_probe.lua`, `probe_gui.lua` — and the input layers they exercised —
-`gamepad.lua`, `keyboard_input.lua`, `player_command.lua` — were deleted once
-all three abilities were confirmed. They are all in git history; recover one
-from there if a game patch breaks a path. Nothing in the mod writes a trace file
-any more.
-
-If a new path ever does need mapping, the approach that worked was: resolve the
-candidate methods with `sdk.find_type_definition` + `get_method(signature)`,
-hook them with `sdk.hook` to capture the real `this` and call order during
-**one** manual player action, record entry/exit with a depth counter, and only
-then call the specific route the capture proved. Keep each scenario to a single
-ability — never trace two at once — and treat "the metadata resolved" as no
-evidence at all that invocation will be accepted.
+- Context lanes are inert (`emit.lua:30`).
+- Directional grid cells (`OneWay`, `TwoWay*`) have never been seen in a grid;
+  `OneWay` renders as `?`.
+- Dialogue capture depends on the GUI path `UI/Asset/ui2000/gui/ui2010`.
+- `dialogue.lua` and `dialogue_speaker.lua` call `sdk` directly, outside
+  `bindings/` (CLAUDE.md rule 1); they should move behind a binding.
+- Train hub, weapon selection and elevator screens (ui0071 / ui5112 / ui5113)
+  have no actions.
+- `../neuro-pragmata-main/autorun/` is a stale mirror; sync it as a release step.

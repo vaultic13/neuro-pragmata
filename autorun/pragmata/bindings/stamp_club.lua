@@ -7,7 +7,7 @@
 -- ui5136._ShopUI). Read-only: ui5132.purchase(UInt32) exists and is never
 -- called.
 --
--- Engine layout (il2cpp dump + State Debug "Menu object", 2026-10-06):
+-- Engine layout:
 --
 --   app.gui.ui5132  Stamp Club screen
 --     DispBoardId (UInt32), BoardListIndex
@@ -141,8 +141,8 @@ local function read_cell(g, mgr, m, c, sel_x, sel_y)
         -- Wrappers of one object need not compare equal; the index does.
         selected = (sel_x ~= nil and x == sel_x and y == sel_y) or nil,
     }
-    -- isHideItem stays true after a hidden cell is stamped (test 2,
-    -- 2026-10-06), so only an unstamped hidden cell keeps its cover name; a
+    -- isHideItem stays true after a hidden cell is stamped, so only an
+    -- unstamped hidden cell keeps its cover name; a
     -- stamped one is named by what it gave, as the screen does.
     cell.hide_name = hidden and text(r.call(m.hide_name, mgr, id)) or nil
     if hidden and cell.unlocked ~= true then
@@ -263,34 +263,6 @@ function M.board()
         }
     end
     return out
-end
-
--- For the debug panel: per cell, the three "owned" readings side by side, so
--- the one that matches the screen can be picked.
-function M.debug_lines(b)
-    local lines = {}
-    if b == nil then return { "(Stamp Club not reachable)" } end
-    lines[#lines + 1] = string.format("board %s %q  %sx%s  lines %s/%s  coins %s (id %s)  can_unlock %s",
-        tostring(b.board_id), tostring(b.name), tostring(b.width), tostring(b.height),
-        tostring(b.lines_done), tostring(b.lines_max), tostring(b.cabin_coins),
-        tostring(b.coin_id), tostring(b.can_unlock))
-    for _, cell in ipairs(b.cells) do
-        lines[#lines + 1] = string.format("  (%s,%s) id %s  unlocked %s  sealed %s  screen_unlocked %s  line %s  hidden %s%s  %s",
-            tostring(cell.x), tostring(cell.y), tostring(cell.target_id), tostring(cell.unlocked),
-            tostring(cell.sealed), tostring(cell.screen_unlocked), tostring(cell.on_line),
-            tostring(cell.hidden), cell.selected and "  [selected]" or "", tostring(cell.name))
-    end
-    for _, bo in ipairs(b.bonuses) do
-        lines[#lines + 1] = string.format("  bonus %q -> %s (id %s) kind %s earned %s | IsComplete %s IsUnlocked %s isUnlocked() %s",
-            tostring(bo.header), tostring(bo.reward), tostring(bo.target_id), tostring(bo.kind),
-            tostring(bo.earned), tostring(bo.complete), tostring(bo.unlocked_field), tostring(bo.unlocked_call))
-    end
-    for _, bd in ipairs(b.boards) do
-        lines[#lines + 1] = string.format("  board #%s %s %q available %s%s",
-            tostring(bd.index), tostring(bd.id), tostring(bd.name), tostring(bd.available),
-            bd.shown and " [shown]" or "")
-    end
-    return lines
 end
 
 return M

@@ -16,6 +16,12 @@ and the modifiers on top:
     corrupt c cells, on grids of 30 cells or fewer (the mod's gate turns larger
             corrupted grids away)
     resume  the cursor already partway along a safe route, path drawn as arrows
+    erase   1-3 X erase traps (stepping on one fails the hack)
+    nodes   bomb (b, B), purge (P) and chain (C) nodes, walkable
+    gates   2-5 directional gates (= | J 7 L r), never the only way through
+
+erase, nodes and gates come from the old sim/ harness: cells the mod can draw
+but no recorded force has carried yet, so their shape here is a guess.
 
 Every puzzle is checked solvable (grid_sim.shortest_path) and depends only on
 (category, seed, repeat, index), so every version in a run sees the same ones.
@@ -41,6 +47,9 @@ SIZES = {
     "big": [(8, 8), (9, 9), (9, 9)],
     "nonsquare": [(3, 4), (5, 4), (4, 6), (5, 7), (7, 9), (9, 7)],
     "resume": [(5, 5), (6, 6), (7, 7)],
+    "erase": [(5, 5), (6, 6), (7, 7)],
+    "nodes": [(5, 5), (6, 6), (7, 7)],
+    "gates": [(5, 5), (6, 6), (7, 7)],
 }
 GENERATED = tuple(SIZES)
 
@@ -124,6 +133,12 @@ def make(category: str, rng: random.Random) -> gt.GridPuzzle:
         kw: dict = {}
         if category == "error" or (big and rng.random() < 0.5):
             _scatter(rng, cells, "d", rng.randint(1, 4), keep)
+        if category == "erase":
+            _scatter(rng, cells, "X", rng.randint(1, 3), keep)
+        if category == "nodes":
+            _scatter(rng, cells, "bBPC", rng.randint(2, 4), keep)
+        if category == "gates":
+            _scatter(rng, cells, "=|J7Lr", rng.randint(2, 5), keep)
         if category == "blocks":
             up = rng.randint(1, 3)
             rects = _block_rects(w, h)[4 - up:]

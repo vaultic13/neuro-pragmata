@@ -8,12 +8,9 @@
 --   success -> narrative success, clear the puzzle's plan
 --   failed  -> narrative failure, clear the puzzle's plan
 --
--- This file used to talk to bindings/puzzle_snake.lua by name, which is why
--- every non-enemy hack was invisible: they start, run and finish without any of
--- the code below ever looking at them. It now drives whatever
--- bindings/puzzle_registry.lua says is active, through one interface every
--- family implements. The orchestration is unchanged -- it was never
--- grid-specific -- only who it is pointed at.
+-- It drives whatever bindings/puzzle_registry.lua says is active, through one
+-- interface every family implements, so the enemy grid and the environmental
+-- hacks share one orchestration.
 --
 -- Forcing: each frame a reconciliation step decides whether the puzzle the
 -- player is currently aimed at needs a plan, and if so sends an actions/force
@@ -43,16 +40,6 @@ local GAME = "Pragmata"
 local POLL_INTERVAL = 1
 local _frame = 0
 
--- Cumulative edge hit-counters for the debug panel.
-local _hit_counts = {
-    start_trg       = 0,
-    grid_change_end = 0,
-    reset           = 0,
-    success         = 0,
-    failed          = 0,
-    cancelled       = 0,  -- retained for the debug panel; unused under per-puzzle model
-}
-
 -- The single in-flight force. _inflight_id is the puzzle id we last forced and
 -- are awaiting a plan reply for (nil = slot free), _inflight_kind the family it
 -- belongs to. Keeping at most ONE force outstanding (a) makes reply attribution
@@ -66,10 +53,8 @@ local _inflight_since = 0
 local INFLIGHT_WATCHDOG_FRAMES = 1200   -- ~20s at 60fps
 
 -- Has a plan reply EVER come back? A force that expires is normal once; every
--- force expiring is the signature of a sidecar that is not running, and that
--- looked identical to bad luck in the 2026-09-06 capture -- eighteen forces,
--- seven watchdog expiries, and nothing in the log naming the actual problem.
--- Said once, on the first expiry, and never again.
+-- force expiring is the signature of a sidecar that is not running, which
+-- otherwise looks like bad luck. Said once, on the first expiry.
 local _ever_replied = false
 local _dead_bridge_warned = false
 
@@ -262,8 +247,19 @@ end
 -- Per Neuro-SDK protocol, sending an actions/force prompts the AI peer to pick
 -- exactly one of the listed actions. The state field carries the family's own
 -- render -- the peer reads it to plan.
+local _auto_force_warned = false
+
 local function send_force(binding, active, id)
-    if not config.hacking_auto_force then return end
+    -- true, false, or "not_open" (the enemy-grid binding holds back grids on
+    -- enemies already open, through force_blocked; every other hack is asked
+    -- as with true). Any other string is taken as true.
+    local auto = config.hacking_auto_force
+    if not auto then return end
+    if type(auto) == "string" and auto ~= "not_open" and not _auto_force_warned then
+        _auto_force_warned = true
+        log.warn("hacking_observer: mod_config.hacking_auto_force is '" .. auto
+              .. "', which is not true / false / \"not_open\"; treating it as true")
+    end
 
     -- The peer must hold the action before a force may name it. In the
     -- Shelter-sector tutorial the hacking actions are announced only once a
@@ -337,6 +333,80 @@ local function send_force(binding, active, id)
 end
 
 
+-- ---------------------------------------------------------------------------
+-- Environment hacks offered instead of forced (hacking_auto_force = false)
+-- ---------------------------------------------------------------------------
+-- The enemy grid has its own offer (the snake binding's force_blocked /
+-- adopt_offer). Every other family gets this one: where a force would go out,
+-- the board goes out once as a silent context message instead, and a call to
+-- the family's action with no force out is taken as the answer to that board.
+--
+-- The offer takes the force snapshot exactly as a force does, so needs_force
+-- stays false until the board changes (no resend while it is up), and the
+-- circuit's set_plan reconciles the answer against the board the peer was
+-- shown. A hack ending clears the snapshot, so the next board is offered again.
+-- The server does not retry an unforced action; its failures go back as they
+-- come (see on_plan_received).
+local _offer = nil   -- { id, kind } of the board last offered
+
+-- The board alone, as for the enemy grid: what the puzzle looks like, without
+-- the instructions a force carries (those are in the action's description).
+-- The family's reading key (the sequence hack's reading steps, glyph keys)
+-- only with mod_config.hacking_context_legend.
+local function _offer_board(binding, id, lead)
+    local ok, rendered = pcall(binding.render_state, id,
+        { board_only = true, legend = config.hacking_context_legend == true })
+    if not ok or type(rendered) ~= "string" or rendered == "" then return nil end
+    return lead .. "\n\n" .. rendered
+end
+
+local function send_offer(binding, active, id)
+    -- As for a force: the peer must hold the action the message names.
+    local dispatcher = package.loaded["pragmata.dispatcher"]
+    if dispatcher ~= nil and dispatcher.is_announced ~= nil
+        and not dispatcher.is_announced(binding.action_name) then
+        dispatcher.sync()
+        if not dispatcher.is_announced(binding.action_name) then return end
+    end
+    local subject = _subject(active.kind, active.unit_info and active.unit_info.is_gimmick)
+    local text = _offer_board(binding, id,
+        subject .. " is up. You are not asked to solve it; if you decide to, call "
+        .. tostring(binding.action_name) .. " with the answer for this board while it is up.")
+    if text == nil then return end
+    binding.snapshot_force_target(id)
+    _offer = { id = id, kind = active.kind }
+    emit.narrative(text, { silent = true })
+    log.info("hacking_observer: " .. tostring(active.kind) .. " puzzle " .. tostring(id)
+          .. " offered as context, not forced (hacking_auto_force off)")
+end
+
+-- The offered board a call of `kind`'s action with no force out answers.
+-- Returns the puzzle id; or nil and a refusal (with the board as it is now)
+-- when the board changed since it was shown; or nil, nil when nothing was
+-- offered for that action.
+local function _adopt_offer(binding, kind)
+    local o = _offer
+    if o == nil or o.kind ~= kind then return nil, nil end
+    if binding.current_puzzle_id() ~= o.id or not binding.live_puzzle_ids()[o.id] then
+        return nil, "Nothing was done: that hack is no longer in front of Hugh."
+    end
+    if not binding.is_interactive() or binding.has_plan(o.id) then
+        return nil, "Nothing was done: that hack is not taking input right now."
+    end
+    if binding.needs_force(o.id) then
+        -- The board changed since it was shown: show it again, and keep this
+        -- as the offer, so the next call answers the board just sent.
+        local text = _offer_board(binding, o.id,
+            "The board changed since you saw it, so nothing was done. "
+            .. "Answer this board instead if you still want to solve it:")
+        if text == nil then return nil, "Nothing was done: the board changed since you saw it." end
+        binding.snapshot_force_target(o.id)
+        return nil, text
+    end
+    return o.id
+end
+
+
 -- Called by an action handler when a plan reply arrives. The reply belongs to
 -- the single in-flight force, and `kind` proves it came from the action that
 -- force actually listed -- a reply from a different family's action is a
@@ -364,6 +434,38 @@ function M.on_plan_received(kind, payload, resolve, ctx)
     _inflight_id = nil
     _inflight_kind = nil
     _inflight_since = 0
+
+    -- No force out: a plan the peer chose to make for a grid it was offered
+    -- (an enemy already open, hacking_auto_force = "not_open"). The server
+    -- does not retry an unforced action, so its failures are answered as they
+    -- come instead of being held.
+    local unforced = false
+    if id == nil and kind ~= nil then
+        local b = registry.binding_for(kind)
+        local offer = b and b.unforced_offer_id and b.unforced_offer_id()
+        if offer ~= nil then
+            local ok, why = b.adopt_offer(offer)
+            if not ok then
+                log.info("hacking_observer: unforced plan for puzzle " .. tostring(offer)
+                      .. " refused: the grid changed since it was offered")
+                return false, { refused = why }
+            end
+            id, in_kind, unforced = offer, kind, true
+            log.info("hacking_observer: unforced plan for offered puzzle " .. tostring(offer))
+        elseif b ~= nil and b.unforced_offer_id == nil then
+            -- An environment hack offered by send_offer.
+            local oid, why = _adopt_offer(b, kind)
+            if oid ~= nil then
+                id, in_kind, unforced = oid, kind, true
+                log.info("hacking_observer: unforced answer for offered " .. tostring(kind)
+                      .. " puzzle " .. tostring(oid))
+            elseif why ~= nil then
+                log.info("hacking_observer: unforced answer for " .. tostring(kind)
+                      .. " refused: the offered board is gone or changed")
+                return false, { refused = why }
+            end
+        end
+    end
 
     if id == nil then
         log.info("hacking_observer: plan reply with no in-flight force; ignoring")
@@ -394,7 +496,7 @@ function M.on_plan_received(kind, payload, resolve, ctx)
     local function wrapped(success, message)
         if resolve == nil then return nil end
         if success then _retry_count = 0 end
-        local can_retry = not success and not _terminal and seq == _plan_seq
+        local can_retry = not success and not unforced and not _terminal and seq == _plan_seq
             and (ctx == nil or ctx.pending == nil or ctx.pending())
             and _retry_count < _retry_limit()
         if not can_retry then return resolve(success, message) end
@@ -589,10 +691,8 @@ end
 -- Player-level outcome backstop
 -- ---------------------------------------------------------------------------
 -- Everything above reads the puzzle the player is AIMED AT. That is the right
--- source when there is one, but it has a blind spot the capture in
--- data/pragmata_mailbox made obvious: of nine hacks that started, only three
--- were ever seen to end. A hack that finishes while the player has already
--- looked at something else is simply never observed.
+-- source when there is one, but it has a blind spot: a hack that finishes
+-- while the player has already looked at something else is never observed.
 --
 -- app.player.PuzzleStatus carries PuzzleSuccess / PuzzleFailed on the PLAYER,
 -- not on a puzzle instance, so it fires wherever the aim happens to be and for
@@ -623,7 +723,6 @@ local function _poll_player_outcome()
     local function report(what)
         if _frame - _last_outcome_frame <= OUTCOME_DEDUPE_FRAMES then return end
         _last_outcome_frame = _frame
-        _hit_counts.backstop = (_hit_counts.backstop or 0) + 1
         log.info("hacking_observer: outcome seen on the player status (" .. what
               .. ") with no puzzle edge; reporting it")
         emit.narrative(what == "success" and "Hack succeeded." or "Hack failed.")
@@ -671,6 +770,14 @@ local function _reconcile(binding, active, cur_id)
     if registry.is_jamming() then return end        -- jammer suppresses hacking entirely
     if registry.is_game_paused() then return end    -- don't force while the game is paused
     if binding.has_plan(cur_id) then return end     -- a plan is queued / executing
+    -- A checked plan that was interrupted earlier runs again by itself when its
+    -- grid is back as it was planned (the enemy grid; see the binding).
+    if binding.replay_cached ~= nil and _inflight_id ~= cur_id
+        and binding.replay_cached(cur_id) then
+        emit.narrative("Running your earlier plan again: this hacking grid is back as it was.",
+            { silent = true })
+        return
+    end
     -- A family may need a moment before it can describe its puzzle honestly --
     -- the circuit binding measures which button turns which connector first,
     -- because the peer answers in those names. Families without the method are
@@ -693,7 +800,13 @@ local function _reconcile(binding, active, cur_id)
     local scene_obs = package.loaded["pragmata.cutscene_prompt_observer"]
     if scene_obs ~= nil and scene_obs.inflight() ~= nil then return end
     if binding.needs_force(cur_id) then
-        send_force(binding, active, cur_id)
+        -- Forces off: environment hacks are offered here; the enemy grid never
+        -- gets this far (its force_blocked offers it).
+        if not config.hacking_auto_force and binding.unforced_offer_id == nil then
+            send_offer(binding, active, cur_id)
+        else
+            send_force(binding, active, cur_id)
+        end
     end
 end
 
@@ -733,23 +846,23 @@ re.on_frame(function()
         or { started = false, changed = false, reset = false, success = false, failed = false }
 
     start_track(life.started, function(now)
-        if now then _hit_counts.start_trg = _hit_counts.start_trg + 1; on_start() end
+        if now then on_start() end
     end)
 
     gridchange_track(life.changed, function(now)
-        if now then _hit_counts.grid_change_end = _hit_counts.grid_change_end + 1; on_grid_change() end
+        if now then on_grid_change() end
     end)
 
     reset_track(life.reset, function(now)
-        if now then _hit_counts.reset = _hit_counts.reset + 1; on_reset() end
+        if now then on_reset() end
     end)
 
     success_track(life.success, function(now)
-        if now then _hit_counts.success = _hit_counts.success + 1; on_success() end
+        if now then on_success() end
     end)
 
     failed_track(life.failed, function(now)
-        if now then _hit_counts.failed = _hit_counts.failed + 1; on_failed() end
+        if now then on_failed() end
     end)
 
     -- Runs whether or not a puzzle is aimed at -- that is the entire point.
@@ -822,25 +935,42 @@ re.on_frame(function()
     _reconcile(binding, active, cur_id)
 end)
 
+-- Free the force slot and forget a held failure.
+local function _release_force()
+    if _inflight_id ~= nil then
+        local owner = registry.binding_for(_inflight_kind)
+        if owner ~= nil then pcall(owner.clear_force_snapshot, _inflight_id) end
+    end
+    _inflight_id = nil
+    _inflight_kind = nil
+    _inflight_since = 0
+    _held = nil
+    _retry_count = 0
+end
+
 -- A new connection knows nothing of the old one's force or held failure.
 do
     local dispatcher = require("pragmata.dispatcher")
-    dispatcher.on_reregister(function()
-        if _inflight_id ~= nil then
-            local owner = registry.binding_for(_inflight_kind)
-            if owner ~= nil then pcall(owner.clear_force_snapshot, _inflight_id) end
-        end
-        _inflight_id = nil
-        _inflight_kind = nil
-        _inflight_since = 0
-        _held = nil
-        _retry_count = 0
-    end)
+    dispatcher.on_reregister(_release_force)
 end
 
-
-function M.debug_hit_counts()
-    return _hit_counts
+-- The mod menu's "Reset hacking": stop every plan, answer what is waiting,
+-- free the force slot and drop the offers, so the hack in front of the player
+-- is asked about afresh.
+function M.reset()
+    if _held ~= nil then pcall(_held.resolve, true, _held.message) end
+    _release_force()
+    _offer = nil
+    for _, entry in ipairs(registry.loaded_bindings()) do
+        local b = entry.mod
+        local ok, live = pcall(b.live_puzzle_ids)
+        for id in pairs(ok and live or {}) do
+            pcall(b.resolve_plan, id, true, "The hack was stopped from the mod menu; nothing more will be pressed.")
+            pcall(b.discard_plan, id)
+            pcall(b.clear_force_snapshot, id)
+        end
+    end
+    log.info("hacking_observer: reset from the mod menu")
 end
 
 

@@ -3,10 +3,9 @@
 --
 -- The player's per-frame state is not a pile of booleans: it is a set of
 -- 64-bit flag masks, one per status enum, hanging off the player driver.
--- overdrive.lua used to say these were "informational only" because it had
--- no reflection path to the live mask. It does — this module is it.
+-- This module is the reflection path to the live masks.
 --
--- Engine layout (verified against the IL2CPP dump):
+-- Engine layout:
 --
 --   app.PlayerDriver
 --     - get_Status() -> app.EnumBitDatas
@@ -313,27 +312,10 @@ function M.has(type_name, flag_name, container)
     return bits_set(current, value)
 end
 
--- Every flag currently set on one status enum, as a name list. Used by the
--- probe and the debug panel; not on any hot path.
-function M.set_flags(type_name, container)
-    local current = M.mask(type_name, container)
-    if current == nil then return nil end
-    local map = build_flag_map(type_name).by_name
-    local names = {}
-    for name, value in pairs(map) do
-        if bits_set(current, value) then names[#names + 1] = name end
-    end
-    table.sort(names)
-    return names, current
-end
-
 -- Last mask this module OBSERVED per enum, and the frame it saw it on.
 --
--- Edge detection deliberately does NOT use app.BitData.get_Previous().
---
--- It used to, and it silently reported nothing: a probe capture of an ability
--- that demonstrably changed DeathblowStatus recorded zero edges, while the same
--- masks read correctly when sampled directly. The engine advances Previous to
+-- Edge detection deliberately does NOT use app.BitData.get_Previous(): it
+-- silently reports nothing. The engine advances Previous to
 -- match Current during its own update, so by the time an re.on_frame callback
 -- runs the two are equal again and every edge has already been erased.
 --
@@ -377,50 +359,8 @@ function M.edges(type_name, container)
     return raised, cleared, current
 end
 
--- Drop the observation baseline for every watched enum. Call when starting a
--- recording session so the first sample establishes a fresh baseline instead of
--- diffing against a mask observed minutes ago.
-function M.reset_edges()
-    _seen = {}
-end
-
--- Edges across every watched enum, in one container fetch.
--- Returns a list of { status = <enum>, raised = {...}, cleared = {...} }, only
--- for enums that actually changed.
-function M.watched_edges()
-    local container = M.container()
-    if container == nil then return {} end
-    local out = {}
-    for _, type_name in ipairs(M.WATCHED) do
-        local raised, cleared = M.edges(type_name, container)
-        if raised ~= nil and (#raised > 0 or #cleared > 0) then
-            out[#out + 1] = { status = type_name, raised = raised, cleared = cleared }
-        end
-    end
-    return out
-end
-
 -- ---------------------------------------------------------------------------
 -- Diagnostics
 -- ---------------------------------------------------------------------------
-
-function M.debug_status()
-    M.want_handles()
-    local container = M.container()
-    local per_enum = {}
-    for _, type_name in ipairs(M.WATCHED) do
-        local flags, current = M.set_flags(type_name, container)
-        per_enum[type_name] = {
-            known_flags = build_flag_map(type_name).count,
-            mask = current,
-            set = flags,
-        }
-    end
-    return {
-        container_ok = container ~= nil,
-        handle_driver = _handle_type,
-        enums = per_enum,
-    }
-end
 
 return M

@@ -1,9 +1,8 @@
 -- Peer actions for the Shelter upgrade menus: Firmware Updater, Unit Printer
 -- and the train terminal's mod menu.
 --
--- Each menu is one value of pragmata_menu_list / pragmata_menu_info
--- (menu_actions.lua), readable only while that menu is on screen
--- (action_gates.menu_open):
+-- pragmata_menu_list / pragmata_menu_info answer for whichever of these is
+-- on screen (menu_actions.lua); none of them can be read closed:
 --   list   every entry, one line each
 --   info   full detail for up to 8 named entries
 --
@@ -12,10 +11,21 @@
 -- case-insensitively, exact first, then as a substring; a name that matches
 -- nothing, or several things, is answered as such rather than dropped.
 --
--- The Unit Printer shows one tab at a time. The other tabs are rebuilt from
--- game data by the binding; as a fallback, the entries of every tab the
--- player has looked at are kept while the menu is open (marked as last seen)
--- and dropped when it closes.
+-- The Unit Printer shows one tab at a time, and a tab's values are right
+-- only once it has been shown this visit. Every list names all three tabs
+-- (Weapon, Attachment, HackingNode), each marked:
+--   on screen           read from the grid now;
+--   as seen this visit  the rows kept from when it was on screen (a per-visit
+--                       cache, refreshed about once a second while shown and
+--                       dropped when the printer closes);
+--   not viewed yet      rebuilt from game data by the binding, under a
+--                       warning that levels and costs may be wrong; a tab
+--                       that rebuilt empty says its units cannot be read yet.
+--
+-- Levels: the maximum shown is how far a unit can go at this point of the
+-- game (its stage cap), not its full maximum; the levels the game still
+-- hides are not mentioned at all, and a unit at its cap reads "no further
+-- levels available yet" with no cost.
 
 local M = {}
 
@@ -71,13 +81,14 @@ local NOT_OPEN = "That menu is not open (or could not be read just now)."
 -- Firmware Updater
 -- ---------------------------------------------------------------------------
 
+-- Shown as no further level: maxed, or at this point of the game's cap.
+local CAPPED = ", no further levels available yet"
+
 local function firmware_line(e)
     local name = e.subtitle and (e.name .. " (" .. e.subtitle .. ")") or e.name
-    local s = name .. " - " .. (level_text(e.level, e.level_max) or "level unknown")
+    local s = name .. " - " .. (level_text(e.level, e.level_cap or e.level_max) or "level unknown")
     if e.maxed then return s .. ", fully upgraded" end
-    if e.level_cap ~= nil and e.level ~= nil and e.level_cap <= e.level then
-        return s .. ", cannot be upgraded further yet"
-    end
+    if e.capped then return s .. CAPPED end
     local cost = cost_text(e.next_cost)
     if cost then s = s .. ", next level costs " .. cost end
     return s
@@ -85,22 +96,20 @@ end
 
 local function firmware_detail(e)
     local lines = { firmware_line(e) }
-    if not e.maxed and cost_text(e.next_cost) == nil then
+    if not e.maxed and not e.capped and cost_text(e.next_cost) == nil then
         lines[#lines + 1] = "  The next level's cost could not be read."
-    end
-    if e.level_cap ~= nil and e.level_max ~= nil and e.level_cap < e.level_max then
-        lines[#lines + 1] = "  Upgradable up to Lv " .. e.level_cap .. " for now."
     end
     local stats = {}
     for _, st in ipairs(e.stats or {}) do
-        if st.next ~= nil and st.next ~= st.now then
+        if st.next ~= nil and st.next ~= st.now and not e.capped then
             stats[#stats + 1] = string.format("%s %s -> %s", st.name, tostring(st.now), tostring(st.next))
         elseif st.now ~= nil then
             stats[#stats + 1] = string.format("%s %s", st.name, tostring(st.now))
         end
     end
     if #stats > 0 then
-        lines[#lines + 1] = "  Stats (now -> next level): " .. join(stats, "; ") .. "."
+        lines[#lines + 1] = "  Stats" .. ((e.maxed or e.capped) and "" or " (now -> next level)")
+            .. ": " .. join(stats, "; ") .. "."
     else
         lines[#lines + 1] = "  Stat values could not be read from the menu."
     end
@@ -142,10 +151,12 @@ local function printer_line(e)
     local s = e.name .. " - " .. tostring(e.state)
     local cost = cost_text(e.cost)
     if e.state == "printed" then
-        local lv = level_text(e.level, e.level_max)
+        local lv = level_text(e.level, e.level_cap or e.level_max)
         if lv then s = s .. ", " .. lv end
         if e.maxed then
             s = s .. ", fully upgraded"
+        elseif e.capped then
+            s = s .. CAPPED
         elseif cost then
             s = s .. ", next level costs " .. cost
         end
@@ -166,9 +177,11 @@ local function printer_detail(e)
     local per = e.level_texts or {}
     if #per > 1 or (#per == 1 and per[1] ~= "") then
         local cur = (e.state == "printed") and e.level or 0
+        -- Only the levels reachable at this point of the game.
+        local last = e.level_cap or #per
         for i, t in ipairs(per) do
-            if t ~= "" then
-                local mark = (i == cur and " (current)") or (i == cur + 1 and " (next)") or ""
+            if t ~= "" and i <= last then
+                local mark = (i == cur and " (current)") or (i == cur + 1 and not e.capped and " (next)") or ""
                 lines[#lines + 1] = string.format("  Lv %d%s: %s", i, mark, clean(t))
             end
         end
@@ -176,38 +189,78 @@ local function printer_detail(e)
     return join(lines, "\n")
 end
 
--- Every tab: the visible one from the grid, the others rebuilt from game
--- data (shelter_menus.printer_all). A tab the rebuild could not produce falls
--- back to what was seen on screen earlier this visit.
+-- Every tab, in the printer's order, with `status` = "on_screen" | "seen" |
+-- "unviewed". Entries of an unviewed tab carry `unviewed_tab` for info.
 local function printer_tabs()
     local all = read("printer_all")
     if all == nil then
         local p = read("printer")
         if p == nil then return nil end
-        all = { tab = p.tab, tabs = { { tab = p.tab, entries = p.entries } } }
+        all = { tab = p.tab, tabs = {} }
+        local listed = false
+        for _, name in ipairs(menus.PRINTER_TABS or {}) do
+            if name == p.tab then
+                all.tabs[#all.tabs + 1] = { tab = name, entries = p.entries, on_screen = true }
+                listed = true
+            else
+                all.tabs[#all.tabs + 1] = { tab = name, entries = {}, unread = true }
+            end
+        end
+        if not listed then table.insert(all.tabs, 1, { tab = p.tab, entries = p.entries, on_screen = true }) end
     end
-    remember_tab(all.tab, all.tabs[1].entries)
     local have = {}
-    for _, t in ipairs(all.tabs) do have[t.tab or "?"] = true end
+    for _, t in ipairs(all.tabs) do
+        have[t.tab or "?"] = true
+        if t.on_screen then
+            remember_tab(t.tab, t.entries)
+            t.status = "on_screen"
+        elseif t.tab ~= nil and _printer_tabs[t.tab] ~= nil then
+            t.entries, t.status = _printer_tabs[t.tab], "seen"
+        else
+            t.status = "unviewed"
+            for _, e in ipairs(t.entries) do e.unviewed_tab = t.tab end
+        end
+    end
+    -- A tab seen this visit that the binding no longer lists.
     for _, tab in ipairs(_printer_tab_order) do
         if not have[tab] then
-            all.tabs[#all.tabs + 1] = { tab = tab, entries = _printer_tabs[tab], last_seen = true }
+            all.tabs[#all.tabs + 1] = { tab = tab, entries = _printer_tabs[tab], status = "seen" }
         end
     end
     return all
 end
 
+local UNVIEWED = "not viewed yet this visit: levels and costs may be wrong; "
+    .. "switch to this tab in game to read it"
+local TAB_MARK = { on_screen = " (on screen)", seen = " (as seen this visit)",
+                   unviewed = " (" .. UNVIEWED .. ")" }
+
 local function printer_list()
     local all = printer_tabs()
     if all == nil then return false, NOT_OPEN end
-    local lines = {}
-    for i, t in ipairs(all.tabs) do
-        local label = (i == 1) and " (on screen)" or (t.last_seen and " (as last seen this visit)" or "")
-        lines[#lines + 1] = (i == 1 and "Unit Printer, tab " or "Tab ") .. tostring(t.tab or "?") .. label .. ":"
-        if #t.entries == 0 then lines[#lines + 1] = "- nothing listed" end
+    local lines = { "Unit Printer (tab on screen: " .. tostring(all.tab or "unknown") .. "):" }
+    local unviewed = {}
+    for _, t in ipairs(all.tabs) do
+        lines[#lines + 1] = "Tab " .. tostring(t.tab or "?") .. (TAB_MARK[t.status] or "") .. ":"
+        if t.status == "unviewed" then unviewed[#unviewed + 1] = tostring(t.tab) end
+        if #t.entries == 0 then
+            lines[#lines + 1] = (t.status == "unviewed")
+                and "- its units cannot be read until this tab is shown in game"
+                or "- nothing listed"
+        end
         for _, e in ipairs(t.entries) do lines[#lines + 1] = "- " .. printer_line(e) end
     end
+    if #unviewed > 0 then lines[#lines + 1] = "Tabs not viewed yet: " .. join(unviewed) .. "." end
     return true, join(lines, "\n")
+end
+
+local function printer_info_detail(e)
+    local s = printer_detail(e)
+    if e.unviewed_tab ~= nil then
+        s = s .. "\n  (Its tab, " .. tostring(e.unviewed_tab) .. ", has not been viewed yet this "
+            .. "visit: levels and costs may be wrong; switch to that tab in game to read it.)"
+    end
+    return s
 end
 
 local function printer_info(args)
@@ -217,7 +270,7 @@ local function printer_info(args)
     for _, t in ipairs(all.tabs) do
         for _, e in ipairs(t.entries) do entries[#entries + 1] = e end
     end
-    return info_reply(entries, args, printer_detail)
+    return info_reply(entries, args, printer_info_detail)
 end
 
 -- ---------------------------------------------------------------------------
@@ -225,7 +278,7 @@ end
 -- ---------------------------------------------------------------------------
 
 -- No slot numbers (the equipped list is in slot order) and no cost unless a
--- mod costs more than the usual 1 (every mod cost 1 in the 2026-10-05 test).
+-- mod costs more than the usual 1.
 local function mod_line(e)
     local s = e.name
     local bits = {}
@@ -282,22 +335,26 @@ function M.register(menu_actions, gates, binding)
     menus = binding
     local function wrap(fn) return function(args) if menus == nil then return unavailable() end return fn(args) end end
 
-    menu_actions.add({ key = "firmware", label = "the Firmware Updater",
-                       about = "units, levels, next-level costs",
-                       list = wrap(firmware_list), info = wrap(firmware_info),
-                       gate = gates.menu_open("firmware") })
-    menu_actions.add({ key = "printer", label = "the Unit Printer",
-                       about = "every tab: printed or not, levels, costs",
+    menu_actions.add({ key = "firmware", label = "the Firmware Updater", title = "Firmware Updater",
+                       open_key = "firmware",
+                       list = wrap(firmware_list), info = wrap(firmware_info) })
+    menu_actions.add({ key = "printer", label = "the Unit Printer", title = "Unit Printer",
+                       open_key = "printer",
                        list = wrap(printer_list), info = wrap(printer_info),
-                       gate = gates.menu_open("printer") })
+                       open_note = function()
+                           local tab = menus and menus.printer_tab()
+                           return tab and ("on the " .. tab .. " tab") or nil
+                       end })
     menu_actions.add({ key = "mod_terminal", label = "the train terminal's mod menu",
-                       about = "capacity, equipped and owned mods",
-                       list = wrap(mod_terminal_list), info = wrap(mod_terminal_info),
-                       gate = gates.menu_open("mod_terminal") })
+                       title = "Train terminal mod menu", open_key = "mod_terminal",
+                       list = wrap(mod_terminal_list), info = wrap(mod_terminal_info) })
 
     -- Keep the printer's per-tab cache: read the tab a few times a second
-    -- while the printer is open, and the full tab when it changes.
-    local last_tab = nil
+    -- while the printer is open, the full tab when it changes, and the tab on
+    -- screen again every REFRESH_POLLS so a print or upgrade made on it is
+    -- what the cache keeps once the player switches away.
+    local REFRESH_POLLS = 5
+    local last_tab, polls = nil, 0
     gates.on_before_sync(function()
         if menus == nil then return end
         if not gates.menu_is_open("printer") then
@@ -306,8 +363,9 @@ function M.register(menu_actions, gates, binding)
             end
             return
         end
+        polls = polls + 1
         local tab = menus.printer_tab()
-        if tab ~= nil and tab ~= last_tab then
+        if tab ~= nil and (tab ~= last_tab or polls % REFRESH_POLLS == 0) then
             local p = menus.printer()
             if p ~= nil and p.tab == tab then
                 remember_tab(tab, p.entries)
@@ -315,18 +373,6 @@ function M.register(menu_actions, gates, binding)
             end
         end
     end)
-end
-
--- For Pragmata State Debug: the exact peer texts.
-function M.debug_texts()
-    local out = {}
-    for _, pair in ipairs({ { "firmware", firmware_list }, { "printer", printer_list },
-                            { "mod_terminal", mod_terminal_list } }) do
-        local ok, success, text = pcall(pair[2])
-        out[pair[1]] = ok and string.format("[%s] %s", tostring(success), tostring(text))
-                          or ("RAISED: " .. tostring(success))
-    end
-    return out
 end
 
 return M

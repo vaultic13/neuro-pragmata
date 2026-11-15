@@ -50,9 +50,8 @@ local DEFAULT_DISTANCE_LIMIT = 12
 
 local M = {}
 
--- Last scan-trigger outcome, surfaced to the abilities debug panel so the
--- failure mode ("singleton nil" vs "method returned false" vs "errored") is
--- visible in-game without tailing the log.
+-- Last scan-trigger outcome ("singleton nil" vs "method returned false" vs
+-- "errored"), returned to the caller.
 local _last_scan_msg = "(scan not triggered yet)"
 local _frame, _request_serial = 0, 0
 local _last_request = nil
@@ -1426,9 +1425,8 @@ local _inventory_cache = { frame = -1, serial = nil, value = nil, recomputes = 0
 --
 -- Two reasons, and the second is the important one:
 --
---  1. Cost. The debug panel calls get_inventory() AND describe_results() every
---     frame, and describe_results calls get_inventory again -- three full
---     passes of several managed calls per ping, per frame.
+--  1. Cost. describe_results calls get_inventory, and both can be asked for
+--     several times a frame -- each a full pass of managed calls per ping.
 --
 --  2. Correctness. ability_state calls describe_results up to 20 times per
 --     scan window and deduplicates on the fingerprint. Filter verdicts are live
@@ -1591,7 +1589,7 @@ end
 -- located ones -- because that is what the distance list enumerates. Instances
 -- the engine could not place are not mentioned at all: a count the distance
 -- list cannot account for was noise to the peer, which can only act on things
--- it can walk to. They remain visible in get_inventory() and the debug panel.
+-- it can walk to. They remain in get_inventory().
 --
 -- The icon qualifier is dropped for named items because "(Item)" after a name
 -- the player reads in their own inventory is pure token cost, and dropped for
@@ -1650,7 +1648,7 @@ end
 -- Every number here is a distance in metres, and each row's leading count is
 -- exactly how many distances follow it. Nothing else is counted: totals of
 -- markers the report is not enumerating told the peer nothing it could act on,
--- so they stay in get_inventory() and the debug panel instead. The one
+-- so they stay in get_inventory() instead. The one
 -- remaining suffix, "(+N more marker types)", reports whole ROWS cut by the
 -- display cap, so no kind of marker vanishes without a word.
 function M.describe_results()
@@ -1663,8 +1661,7 @@ function M.describe_results()
     --
     -- A row with no distance is a marker the engine knows about but cannot
     -- place. Saying "there are 15 sub-objective markers" without being able to
-    -- point at one of them is close to worthless to a peer that has to act, and
-    -- it was most of the old report by volume.
+    -- point at one of them is close to worthless to a peer that has to act.
     --
     -- Same safety rule as the liveness filter: if the cut would leave NOTHING,
     -- it is abandoned for this scan rather than reporting an empty area. That
@@ -1709,11 +1706,6 @@ function M.describe_results()
         text = text .. string.format(" (+%d more marker %s)",
             cut_rows, cut_rows == 1 and "type" or "types")
     end
-    if config.scan_report_diagnostics and inventory.filtered_count > 0 then
-        text = text .. string.format(" [filtered %d of %d]",
-            inventory.filtered_count, inventory.raw_count)
-    end
-
     -- The fingerprint stays hash-based and is built from the per-object groups,
     -- NOT from the rendered rows: dedup must key on what was found, not on how
     -- it happened to be phrased.
@@ -1732,123 +1724,6 @@ function M.describe_results()
         raw_count = inventory.raw_count,
         filter_bypassed = inventory.filter_bypassed,
         fingerprint = technical and technical.fingerprint or nil,
-    }
-end
-
-function M.log_inventory()
-    local inventory = M.get_inventory()
-    if inventory == nil then
-        log.info("scan inventory: unavailable")
-        return false, "scan inventory unavailable"
-    end
-    log.info(string.format(
-        "scan inventory: %d reported / %d raw (%d filtered) in %d groups%s%s",
-        inventory.total_count, inventory.raw_count, inventory.filtered_count,
-        #inventory.groups,
-        inventory.scanning and " (scan active)" or "",
-        inventory.filter_bypassed and " [FILTER BYPASSED]" or ""))
-    if inventory.filter_note then
-        log.warn("scan inventory: " .. tostring(inventory.filter_note))
-    end
-    log.info(string.format("scan inventory: join ctx=%d pair=%d none=%d, candidates %d (%d keyed), activeContexts=%s",
-        inventory.join.context, inventory.join.pair, inventory.join.none,
-        inventory.candidates_total or 0, inventory.candidates_context_keyed or 0,
-        tostring(inventory.active_context_count)))
-    log.info(string.format(
-        "scan inventory: %d duplicate ping(s) collapsed, %d scene verdict(s) from EnvironmentSceneManager",
-        inventory.duplicates_removed or 0, inventory.scene_evidence or 0))
-
-    local readable = M.describe_results()
-    -- Logged next to the raw data on purpose: the AI-facing string and the
-    -- groups it came from should be comparable at a glance.
-    if readable ~= nil then log.info("scan inventory (readable): " .. readable.text) end
-
-    for _, group in ipairs(inventory.groups) do
-        log.info(string.format(
-            "scan inventory: %dx %s named=%s display=%s internal=%s kind=%s icon=%s dist=%s object=%s iconhash=%s contexts=%d",
-            group.count, tostring(group.label), tostring(group.named),
-            tostring(group.display), tostring(group.internal),
-            tostring(group.kind), tostring(group.icon),
-            group.nearest_distance and string.format("%.1f", group.nearest_distance) or "?",
-            tostring(group.object_id), tostring(group.icon_type), #group.contexts))
-        if (group.pickable or 0) > 0 or (group.blocked or 0) > 0
-            or group.item_id ~= nil then
-            local why = {}
-            for reason, n in pairs(group.blocked_by or {}) do
-                why[#why + 1] = string.format("%s=%d", tostring(reason), n)
-            end
-            log.info(string.format(
-                "scan inventory:   pickup pickable=%d blocked=%d%s itemID=%s qty=%d%s",
-                group.pickable or 0, group.blocked or 0,
-                #why > 0 and (" [" .. table.concat(why, " ") .. "]") or "",
-                tostring(group.item_id), group.quantity or 0,
-                group.named_from_container and " (named from contents)" or ""))
-        end
-    end
-    for _, drop in ipairs(inventory.dropped or {}) do
-        log.info(string.format("scan filtered out: %s (%s) icon=%s reason=%s dist=%s scene=%s",
-            tostring(drop.label), tostring(drop.internal), tostring(drop.icon),
-            tostring(drop.reason),
-            drop.distance and string.format("%.1f", drop.distance) or "?",
-            tostring(drop.scene_id)))
-    end
-    return true, string.format("logged %d of %d scan entries in %d groups",
-        inventory.total_count, inventory.raw_count, #inventory.groups)
-end
-
-function M.debug_status()
-    ensure_init()
-    local mgr = get_scan_singleton()
-    -- Raw ping count comes off the memoised inventory rather than a second
-    -- get_results pass: this runs every frame the debug panel is open.
-    local inventory = M.get_inventory()
-    local ping_count = inventory and inventory.raw_count or 0
-    local last_request = nil
-    if _last_request ~= nil then
-        -- Copy scalar fields only: this status is also written to the compact
-        -- input-test trace and must not retain a managed object reference.
-        last_request = {
-            serial = _last_request.serial,
-            frame = _last_request.frame,
-            input = _last_request.input == true,
-            engine_called = _last_request.engine_called == true,
-            before_expansion_length = _last_request.before_expansion_length,
-            after_expansion_length = _last_request.after_expansion_length,
-        }
-    end
-    return {
-        singleton_present    = mgr ~= nil,
-        request_scan_ok      = _state.m_request_scan ~= nil,
-        request_objective_ok = _state.m_request_scan_objective ~= nil,
-        is_scanning          = M.is_scanning(),
-        -- RAW ping count, deliberately unfiltered: it is the denominator the
-        -- filter counts below are measured against.
-        ping_count           = ping_count,
-        ping_count_reported  = inventory and inventory.total_count or 0,
-        filter_enabled       = inventory and inventory.filter_enabled or false,
-        filter_bypassed      = inventory and inventory.filter_bypassed or false,
-        filter_note          = inventory and inventory.filter_note or nil,
-        filtered_by          = inventory and inventory.filtered_by or {},
-        layers_disabled      = inventory and inventory.layers_disabled or {},
-        dropped              = inventory and inventory.dropped or {},
-        join                 = inventory and inventory.join or nil,
-        candidates_total     = inventory and inventory.candidates_total or nil,
-        candidates_context_keyed = inventory and inventory.candidates_context_keyed or nil,
-        context_collisions   = inventory and inventory.context_collisions or nil,
-        active_context_count = inventory and inventory.active_context_count or nil,
-        acquired_probe       = inventory and inventory.acquired_probe or nil,
-        pickup_stats         = inventory and inventory.pickup_stats or nil,
-        duplicates_removed   = inventory and inventory.duplicates_removed or 0,
-        scene_evidence       = inventory and inventory.scene_evidence or 0,
-        dedupe_enabled       = config.scan_dedupe_markers ~= false,
-        pickup_enabled       = config.scan_pickup_checks ~= false,
-        require_distance     = config.scan_report_require_distance ~= false,
-        stale                = inventory and inventory.stale,
-        inventory_recomputes = _inventory_cache.recomputes,
-        last_scan_msg        = _last_scan_msg,
-        last_request_serial  = M.last_request_serial(),
-        last_request         = last_request,
-        command_input        = command_input.status(),
     }
 end
 

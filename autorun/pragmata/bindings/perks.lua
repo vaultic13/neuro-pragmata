@@ -4,8 +4,7 @@
 -- The game keeps all three in one "perk" system, split by app.PerkType, a
 -- smart enum with three members: Passive, Active and Permanent.
 --
--- Engine layout (verified against the IL2CPP dump; which menu each list
--- corresponds to is the open question the State Debug panel answers):
+-- Engine layout:
 --
 --   app.EnhanceManager (managed singleton)
 --     - getEquippedPassiveSkillIDs()  -> UInt32[]
@@ -77,8 +76,8 @@ local _names = {}
 
 -- GUIPerkData for one perk id, through app.GuiDataManager.getPerkData. This
 -- is the perk menu's own record: _Name, _SimpleName, _Description, and
--- _ReinforceType (kept raw for the debug panel -- it is the best candidate
--- for telling suit / weapon / hacking Firmware apart).
+-- _ReinforceType (kept raw: it is the best candidate for telling suit /
+-- weapon / hacking Firmware apart).
 local function gui_perk(id)
     ensure_init()
     local mgr = r.singleton("app.GuiDataManager")
@@ -219,7 +218,7 @@ end
 -- Returns nil outside gameplay, else:
 --   { mods         = { equipped = {entry + description}, owned = {entry}, capacity = n },
 --     hacking_mods = { equipped = {entry + uses, uses_max, description}, owned = {entry}, capacity = n } }
--- Only equipped entries carry a description; pragmata_mods reports nothing else.
+-- Only equipped entries carry a description; pragmata_status reports nothing else of the mods.
 function M.read_mods()
     ensure_init()
     local em = enhance()
@@ -305,18 +304,6 @@ function M.read_upgrades()
         end
     end
     return out
-end
-
-function M.debug_status()
-    ensure_init()
-    return {
-        enhance_manager   = enhance() ~= nil,
-        reinforce_manager = r.singleton("app.ReinforceManager") ~= nil,
-        acquired_perks_ok = _s.m_acq_perks ~= nil,
-        permanent_hash    = r.enum_hash("app.PerkType", "Permanent"),
-        passive_hash      = r.enum_hash("app.PerkType", "Passive"),
-        active_hash       = r.enum_hash("app.PerkType", "Active"),
-    }
 end
 
 return M

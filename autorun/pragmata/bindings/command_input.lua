@@ -279,19 +279,4 @@ function M.clear()
     _query_stack = { trigger = {}, down = {}, release = {} }
 end
 
-function M.status()
-    resolve()
-    return {
-        initialized = _state.error == nil,
-        resolve_error = _state.error,
-        hooks_installed = _state.installed,
-        hook_error = _state.hook_error,
-        hashes = _state.hashes,
-        queue_size = #_queue,
-        busy = _active ~= nil or #_queue > 0,
-        last_injected = _last_injected,
-        last_consumed = _last_consumed,
-    }
-end
-
 return M

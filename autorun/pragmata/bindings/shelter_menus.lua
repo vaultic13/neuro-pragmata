@@ -6,7 +6,7 @@
 -- costs come out exactly as the screen shows them. Every reader returns nil
 -- when its menu is not open; the actions are gated on the menu anyway.
 --
--- Engine layout (il2cpp dump + the State Debug "Menu object" dump, 2026-10-04):
+-- Engine layout:
 --
 --   Scroll controllers (ScrollListController`1 / ScrollGridController`1)
 --     hold their entries in <InfoList>k__BackingField (List<T>); the
@@ -16,7 +16,7 @@
 --     _UpgradableUnits   List<GUIPerkData>  thin records (_ID, _StatusParameter
 --                        only; _Name/_LevelData read nil) -- not used for text
 --     _ui5174._ScrollList -> InfoList of app.gui.ui5174.AppSelectItem, one per
---                        unit on screen (3 in the test):
+--                        unit on screen:
 --       _TargetUnitInfo  UnitInfo { NameTextMessageData, NameSubTextMessageData,
 --                        CurrentLevel, NextLevel, MaxLevel, UnlockMaxLevel,
 --                        ObjectId, IsMainWeapon, PerkData }
@@ -46,6 +46,7 @@
 -- id through perks.perk_name.
 
 local log = require("pragmata.util.log")
+local config = require("pragmata.mod_config")
 local r = require("pragmata.bindings.reflect")
 local gui = require("pragmata.bindings.gui_state")
 local object_names = require("pragmata.bindings.object_names")
@@ -146,7 +147,7 @@ local function stat_changes(sel)
             local h = int(r.field(d, "<ParameterHash>k__BackingField"))
             local s = r.field(d, "<ValueString>k__BackingField")
             if h ~= nil then
-                -- ValueString read "" in the 2026-10-05 test; the number is the fallback.
+                -- ValueString can read ""; the number is the fallback.
                 local v = (type(s) == "string" and s ~= "") and s or nil
                 if v == nil then
                     local f = r.to_float(r.field(d, "<Value>k__BackingField") or call(d, "get_Value"))
@@ -188,9 +189,12 @@ function M.firmware()
             local level_cap = int(r.field(u, "UnlockMaxLevel"))
             local e = {
                 id          = int(r.field(u, "ObjectId")),
+                perk_id     = int(r.field(r.field(u, "PerkData"), "_ID")),
                 name        = object_names.text(r.field(u, "NameTextMessageData")),
                 subtitle    = object_names.text(r.field(u, "NameSubTextMessageData")),
                 raw_level   = level,
+                raw_max     = level_max,
+                raw_cap     = level_cap,
                 level       = level and (level + offset) or nil,
                 level_max   = level_max and (level_max + offset) or nil,
                 level_cap   = level_cap and (level_cap + offset) or nil,
@@ -202,6 +206,11 @@ function M.firmware()
                 e.level_cap = e.level_max
             end
             e.maxed = (e.level ~= nil and e.level_max ~= nil and e.level >= e.level_max)
+            -- No cap below the maximum: drop it, so the shown maximum is one value.
+            if e.maxed or (e.level_cap ~= nil and e.level_max ~= nil and e.level_cap >= e.level_max) then
+                e.level_cap = nil
+            end
+            e.capped = not e.maxed and e.level_cap ~= nil and e.level ~= nil and e.level >= e.level_cap
             if e.name == nil then e.name = item_name(e.id) or "an unnamed unit" end
             out.entries[#out.entries + 1] = e
         end
@@ -213,29 +222,37 @@ end
 -- Unit Printer
 -- ---------------------------------------------------------------------------
 --
--- GadgetState describes the NEXT step, not whether a unit is printed
--- (2026-10-05: Confuse, printed at Lv 2/3, reads UnlockDisable because its
--- next level is unaffordable; a maxed unit reads Unlocked). Printed or not
+-- GadgetState describes the NEXT step, not whether a unit is printed (a
+-- printed unit whose next level is unaffordable reads UnlockDisable; a maxed
+-- unit reads Unlocked). Printed or not
 -- comes from the printer's own isAcquired(id).
 --
 -- The grid holds only the selected tab (ui5100.setupGrid(GUIReinforceType,
 -- ...) rebuilds it on a switch), so the other tabs are rebuilt from game data:
 --   GuiDataManager.getReinforceItemDataList() -> List<IGUIReinforceItemData>
 --     (get_ID, get_ReinforceType, get_UnlockName / get_SimpleName, ...)
---     -- the 2026-10-05 check found it covers only part of each tab, so also
+--     -- it covers only part of each tab, so also
 --   GuiDataManager._ReinforceDataTable  Dictionary<UInt32, GUIReinforceData
 --     { Item (GUIReinforceUserDataItem: get_UnlockName, ...), ReinforceType }>
 --   ReinforceManager.getCurrentLevel(UInt32) / getMaxLevel(UInt32)
 --   ReinforceManager.getCurrentHideType(UInt32 id, UInt32 unlockType, Int32 level)
 --     -> ReinforceHideType { Open, Secret, Hide }  (Hide = not listed)
---   ui5100 (the open printer): isAcquired(UInt32),
+--   ui5100: static isAcquired(UInt32),
 --     getUnlockCost(UInt32 id, UInt32 unlockType, GadgetState) -> UnlockCost[]
--- The unlock-type argument (taken from GridInfo.UnlockType; one value,
--- 132296270, in the test) and the engine-to-menu level offset (+1) are
--- calibrated from the visible tab. M.printer_check() compares the rebuild of
--- the visible tab against the grid for the debug panel.
+--     (instance: the open printer only)
+-- The unlock-type argument (taken from GridInfo.UnlockType) and the
+-- engine-to-menu level offset (+1) are calibrated from the visible tab. Game
+-- data alone does not give the right answers with the printer screen closed.
 
 local T_TAB = "app.GUIReinforceType"
+
+-- The tabs the printer shows, in its order (GUIReinforceType names, as
+-- printer().tab gives them). Fixed rather than taken from which kinds the
+-- rebuild produced, so a tab whose units all rebuild as hidden does not
+-- vanish from the list. The data also knows an "Ability"
+-- kind that no reply has ever listed; like any kind not named here, it is
+-- listed after these only if units rebuild for it.
+M.PRINTER_TABS = { "Weapon", "Attachment", "HackingNode" }
 local T_STATE = "app.gui.ui5100.GadgetState"
 
 local _p = { inited = false }
@@ -253,6 +270,8 @@ local function printer_init()
     _p.m_level_max = r.method(rm, "getMaxLevel(System.UInt32)")
     _p.m_hide      = sig(rm, "getCurrentHideType(System.UInt32,System.UInt32,System.Int32)",
                              "getCurrentHideType(System.UInt32, System.UInt32, System.Int32)")
+    _p.m_level_cap = sig(rm, "getMaxLevelWithOutHide(System.UInt32,System.Boolean)",
+                             "getMaxLevelWithOutHide(System.UInt32, System.Boolean)")
     local ui = r.td("app.gui.ui5100")
     _p.m_acquired  = r.method(ui, "isAcquired(System.UInt32)")
     _p.m_cost      = sig(ui, "getUnlockCost(System.UInt32,System.UInt32,app.gui.ui5100.GadgetState)",
@@ -308,19 +327,81 @@ local function affordable(costs)
 end
 
 -- Printed: isAcquired, or any engine level above 0. isAcquired answers
--- false for every Attachment (Mod Slot at 6/6 included, 2026-10-05), which
+-- false for every Attachment (Mod Slot at 6/6 included), which
 -- are upgrades rather than prints; their engine level is the tell.
 local function is_printed(acquired, raw_level)
     return acquired == true or (raw_level ~= nil and raw_level >= 1)
 end
 
+-- ---------------------------------------------------------------------------
+-- Stage caps: how far a unit can be upgraded at this point of the game
+-- ---------------------------------------------------------------------------
+--
+-- Every level of a unit (ReinforceData._ReinforceActionTable[level]) has its
+-- own _OpenCondition / _SecretCondition / _PurchaseCondition, and those check
+-- story progress (ReinforceUnlockConditionParam._CheckStage). A level whose
+-- condition is not met yet is "Hide". The menus' MaxLevel (the grid's, and
+-- getMaxLevel) is the unit's full maximum, hidden levels included, so it is
+-- not what the player can reach now. Two readings of the cap, picked by
+-- mod_config.upgrade_level_cap:
+--   "without_hide"  ReinforceManager.getMaxLevelWithOutHide(id, false), the
+--                   same engine scale as getMaxLevel
+--   "hide_scan"     the last engine level above the current one that
+--                   getCurrentHideType(id, unlockType, level) does not answer
+--                   "Hide" for, stopping at the first one it does
+--   "off"           no cap
+-- The Firmware Updater needs none of this while open: its UnitInfo carries
+-- the cap (UnlockMaxLevel, from ui5120.findUnlockMaxLevel).
+
+local MAX_SCAN = 20     -- no unit has more levels than this
+
+local function cap_without_hide(rm, id, flag)
+    if _p.m_level_cap == nil then return nil end
+    return int(r.call(_p.m_level_cap, rm, id, flag == true))
+end
+
+-- Engine cap by hide scan, and the hide word per level.
+local function cap_hide_scan(rm, id, unlock_type, raw, raw_max)
+    if _p.m_hide == nil or raw == nil or raw_max == nil then return nil, nil end
+    local cap, words = raw, {}
+    for lv = raw + 1, math.min(raw_max, raw + MAX_SCAN) do
+        local h = enum_name("app.ReinforceHideType", r.call(_p.m_hide, rm, id, unlock_type, lv))
+        words[#words + 1] = lv .. "=" .. tostring(h)
+        if h == nil then return nil, words end
+        if h == "Hide" then break end
+        cap = lv
+    end
+    return cap, words
+end
+
+-- The cap on the MENU's scale, or nil when there is none below the maximum
+-- (or it cannot be read). `level_max` is the entry's menu maximum.
+local function stage_cap(rm, id, unlock_type, raw, raw_max, level_max, lv_off, max_off)
+    local mode = config.upgrade_level_cap or "without_hide"
+    if mode == "off" or rm == nil or id == nil then return nil end
+    local cap = nil
+    if mode == "hide_scan" then
+        local engine = cap_hide_scan(rm, id, unlock_type, raw, raw_max)
+        cap = engine and (engine + (lv_off or 0)) or nil
+    else
+        local engine = cap_without_hide(rm, id, false)
+        cap = engine and (engine + (max_off or 0)) or nil
+    end
+    if cap == nil or level_max == nil or cap >= level_max then return nil end
+    return cap
+end
+
 -- Words for the peer: { state = "printed" | "not printed yet" | "not found
--- yet", maxed, affordable }.
+-- yet", maxed, capped, affordable }.
 local function settle(e)
     e.affordable = affordable(e.cost)
     local printed = is_printed(e.acquired, e.raw_level)
     e.maxed = (e.state_raw == "Unlocked")
         or (printed and e.level ~= nil and e.level_max ~= nil and e.level >= e.level_max)
+    if e.maxed then e.level_cap = nil end
+    -- Printed and as far as this point of the game allows.
+    e.capped = printed and not e.maxed and e.level_cap ~= nil and e.level ~= nil
+        and e.level >= e.level_cap
     if printed or e.state_raw == "Unlocked" then
         e.state = "printed"
     elseif e.state_raw == "Secret" then
@@ -371,6 +452,17 @@ function M.printer()
             local rm = r.singleton("app.ReinforceManager")
             e.raw_level = rm and (int(r.call(_p.m_level, rm, e.data_id or id))
                                   or int(r.call(_p.m_level, rm, id))) or nil
+            -- The stage cap. The level offset comes from the row itself; the
+            -- max offset does not, in case the grid's MaxLevel is already capped.
+            if rm ~= nil then
+                local cid = e.data_id or id
+                local raw_max = int(r.call(_p.m_level_max, rm, cid))
+                local lv_off = (e.level and e.raw_level) and (e.level - e.raw_level)
+                    or (config.printer_level_offset_default or 1)
+                local max_off = config.printer_max_offset_default or 1
+                e.level_cap = stage_cap(rm, cid, e.unlock_type or config.printer_unlock_type_default,
+                    e.raw_level, raw_max, e.level_max, lv_off, max_off)
+            end
             -- A secret entry stays nameless, as on screen.
             if state ~= "Secret" then
                 e.name = app_text(r.field(g, "TxtName")) or item_name(id)
@@ -455,30 +547,47 @@ local function candidates(gdm)
     return out, by_id
 end
 
--- One entry rebuilt from game data, in the same shape as printer()'s.
+-- The calibration, or the mod_config defaults before the grid has voted.
+local function unlock_type_for(id)
+    return _unlock_type_of[id] or winner(_unlock_type_votes, config.printer_unlock_type_default or 0)
+end
+local function level_offset() return winner(_offset_votes, config.printer_level_offset_default or 0) end
+local function max_offset() return winner(_max_offset_votes, config.printer_max_offset_default or 0) end
+
+-- One entry rebuilt from game data, in the same shape as printer()'s. `c` is
+-- the open printer (getUnlockCost is an instance method).
 local function rebuild(c, rm, cand)
     local id = cand.id
-    local unlock_type = _unlock_type_of[id] or winner(_unlock_type_votes, 0)
+    local unlock_type = unlock_type_for(id)
     local raw = int(r.call(_p.m_level, rm, id)) or 0
     local raw_max = int(r.call(_p.m_level_max, rm, id))
-    -- The level argument: the current engine level answered "Hide" for every
-    -- unit at engine level 0 that the grid shows (Heat, Auto-hacking, ...,
-    -- 2026-10-05), so a Hide is re-asked for the next level before it counts.
+    -- The level argument: the current engine level answers "Hide" for every
+    -- unit at engine level 0 that the grid shows, so a Hide is re-asked for
+    -- the next level before it counts.
     local hide = enum_name("app.ReinforceHideType", r.call(_p.m_hide, rm, id, unlock_type, raw))
     if hide == "Hide" then
         hide = enum_name("app.ReinforceHideType", r.call(_p.m_hide, rm, id, unlock_type, raw + 1))
     end
-    local acq = r.call(_p.m_acquired, c, id)
+    local acq = r.call(_p.m_acquired, nil, id)
     -- A printed unit is always listed. Units whose only level is 1 (the
-    -- hacking modes, the scans, 2026-10-05) answer Hide for both levels asked.
-    if hide == "Hide" and not is_printed(acq, raw) then return nil end
+    -- hacking modes, the scans) answer Hide for both levels asked.
+    -- mod_config.printer_keep_hidden_tabs exempts a tab whose grid lists
+    -- units the game answers Hide for.
+    if hide == "Hide" and not is_printed(acq, raw) then
+        local keep = false
+        for _, t in ipairs(config.printer_keep_hidden_tabs or {}) do
+            if t == cand.tab then keep = true break end
+        end
+        if not keep then return nil end
+    end
 
     local e = {
         id = id, raw_level = raw, unlock_type = unlock_type, hide = hide, from_data = true,
-        level = raw + winner(_offset_votes, 0),
-        level_max = raw_max and (raw_max + winner(_max_offset_votes, 0)) or nil,
+        level = raw + level_offset(),
+        level_max = raw_max and (raw_max + max_offset()) or nil,
     }
     if type(acq) == "boolean" then e.acquired = acq end
+    e.level_cap = stage_cap(rm, id, unlock_type, raw, raw_max, e.level_max, level_offset(), max_offset())
 
     local maxed = is_printed(e.acquired, raw) and e.level_max ~= nil and e.level >= e.level_max
     if hide == "Secret" and not is_printed(e.acquired, raw) then
@@ -540,8 +649,12 @@ function M.unit_description(id, name)
     return (id ~= nil and t.by_id[id]) or (name ~= nil and t.by_name[name]) or nil
 end
 
--- { tab = <visible tab>, tabs = {{ tab, entries, from_data }} }: the visible
--- tab read from the grid, every other tab rebuilt from game data.
+-- { tab = <visible tab>, tabs = {{ tab, entries, on_screen, from_data,
+--   unread }} }: every tab of M.PRINTER_TABS in that order (plus any other
+-- kind the data rebuilds units for, after them). The visible tab is read
+-- from the grid, every other tab rebuilt from game data; a tab with nothing
+-- rebuilt is still there, with no entries, and `unread` when the game data
+-- could not be read at all.
 function M.printer_all()
     local c = gui.control(M.CODES.printer)
     if c == nil then return nil end
@@ -549,97 +662,51 @@ function M.printer_all()
     if grid == nil then return nil end
     calibrate(grid)
 
-    local out = { tab = grid.tab, tabs = { { tab = grid.tab, entries = grid.entries } } }
+    local by_tab, order = {}, {}
+    local function tab_of(name)
+        if by_tab[name] == nil then
+            by_tab[name] = { tab = name, entries = {}, from_data = true }
+            order[#order + 1] = name
+        end
+        return by_tab[name]
+    end
+    for _, name in ipairs(M.PRINTER_TABS) do tab_of(name) end
+    if grid.tab ~= nil then
+        local t = tab_of(grid.tab)
+        t.entries, t.on_screen, t.from_data = grid.entries, true, nil
+    end
+    local out = { tab = grid.tab, tabs = {} }
+    local function finish()
+        for _, name in ipairs(order) do
+            local t = by_tab[name]
+            -- An extra kind only when it rebuilt something.
+            local fixed = false
+            for _, f in ipairs(M.PRINTER_TABS) do if f == name then fixed = true break end end
+            if fixed or t.on_screen or #t.entries > 0 then out.tabs[#out.tabs + 1] = t end
+        end
+        return out
+    end
+
     local gdm = r.singleton("app.GuiDataManager")
     local rm = r.singleton("app.ReinforceManager")
-    if gdm == nil or rm == nil then return out end
+    if gdm == nil or rm == nil then
+        for _, t in pairs(by_tab) do if not t.on_screen then t.unread = true end end
+        return finish()
+    end
 
     local on_grid = {}
     for _, e in ipairs(grid.entries) do
         on_grid[e.id] = true
         if e.data_id ~= nil then on_grid[e.data_id] = true end
     end
-    local by_tab, order = {}, {}
     for _, cand in ipairs((candidates(gdm))) do
         local tab = cand.tab
         if tab ~= nil and tab ~= "Invalid" and tab ~= grid.tab and not on_grid[cand.id] then
             local ok, e = pcall(rebuild, c, rm, cand)
-            if ok and e ~= nil then
-                if by_tab[tab] == nil then by_tab[tab] = {} order[#order + 1] = tab end
-                table.insert(by_tab[tab], e)
-            end
+            if ok and e ~= nil then table.insert(tab_of(tab).entries, e) end
         end
     end
-    for _, tab in ipairs(order) do
-        out.tabs[#out.tabs + 1] = { tab = tab, entries = by_tab[tab], from_data = true }
-    end
-    return out
-end
-
--- Debug: the visible tab rebuilt from game data next to the grid's own rows,
--- one line per unit that differs. Proves the rebuild before it is trusted.
-function M.printer_check()
-    local c = gui.control(M.CODES.printer)
-    if c == nil then return nil end
-    local grid = M.printer()
-    if grid == nil then return nil end
-    calibrate(grid)
-    local gdm = r.singleton("app.GuiDataManager")
-    local rm = r.singleton("app.ReinforceManager")
-    if gdm == nil or rm == nil then return { "managers missing" } end
-
-    local cands, by_id = candidates(gdm)
-    local n_list, n_table, per_tab = 0, 0, {}
-    for _, cand in ipairs(cands) do
-        if cand.sources.list then n_list = n_list + 1 end
-        if cand.sources.table then n_table = n_table + 1 end
-        per_tab[cand.tab or "?"] = (per_tab[cand.tab or "?"] or 0) + 1
-    end
-    local tabs = {}
-    for t, n in pairs(per_tab) do tabs[#tabs + 1] = t .. "=" .. n end
-    table.sort(tabs)
-    local lines = {
-        string.format("methods: items=%s level=%s hide=%s acquired=%s cost=%s",
-            tostring(_p.m_items ~= nil), tostring(_p.m_level ~= nil), tostring(_p.m_hide ~= nil),
-            tostring(_p.m_acquired ~= nil), tostring(_p.m_cost ~= nil)),
-        string.format("level offset %s, max offset %s, unlock type %s",
-            tostring(winner(_offset_votes, "?")), tostring(winner(_max_offset_votes, "?")),
-            tostring(winner(_unlock_type_votes, "?"))),
-        string.format("data: %d units (list %d, table %d); per tab %s",
-            #cands, n_list, n_table, table.concat(tabs, " ")),
-    }
-
-    local function costs(list)
-        local p = {}
-        for _, k in ipairs(list or {}) do p[#p + 1] = k.need .. "x" .. k.item end
-        return table.concat(p, "+")
-    end
-    local function row(e)
-        return string.format("%s %s %s/%s %s", e.acquired and "acq" or "-", tostring(e.state_raw),
-            tostring(e.level), tostring(e.level_max), costs(e.cost))
-    end
-
-    local same, diff = 0, 0
-    for _, g in ipairs(grid.entries) do
-        local cand = by_id[g.id] or (g.data_id and by_id[g.data_id])
-        local e = nil
-        if cand ~= nil then
-            local ok, v = pcall(rebuild, c, rm, cand)
-            e = ok and v or nil
-            if not ok then lines[#lines + 1] = g.name .. ": rebuild raised " .. tostring(v) end
-        end
-        local a, b = row(g), e and row(e) or "(not rebuilt)"
-        if a == b then
-            same = same + 1
-        else
-            diff = diff + 1
-            lines[#lines + 1] = string.format("%s  grid: %s | data: %s  [id %s, data id %s, data tab %s, cand %s %s, hide %s]",
-                g.name, a, b, tostring(g.id), tostring(g.data_id), tostring(g.data_tab),
-                cand and "yes" or "no", cand and tostring(cand.tab) or "-", e and tostring(e.hide) or "-")
-        end
-    end
-    table.insert(lines, 4, string.format("tab %s: %d match, %d differ", tostring(grid.tab), same, diff))
-    return lines
+    return finish()
 end
 
 
@@ -649,8 +716,7 @@ end
 
 -- { capacity_current, capacity_total, max_equipped, locked,
 --   entries = {{ id, name, cost, equipped, slot, is_new, description }} }
--- capacity_total matched the printer's "Mod Slot" level (6) in the test; all
--- mods cost 1 there.
+-- capacity_total is the printer's "Mod Slot" level.
 -- Locked mods are only counted: the menu hides what they are.
 function M.mod_terminal()
     local c = gui.control(M.CODES.mod_terminal)
@@ -687,14 +753,6 @@ function M.mod_terminal()
         end
     end
     return out
-end
-
-function M.debug_status()
-    return {
-        firmware_open = gui.is_open(M.CODES.firmware),
-        printer_open = gui.is_open(M.CODES.printer),
-        mod_terminal_open = gui.is_open(M.CODES.mod_terminal),
-    }
 end
 
 return M

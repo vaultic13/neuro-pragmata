@@ -72,14 +72,8 @@ local M = {}
 --
 -- Four directions, and only four. The command table also declares
 -- PuzzleUpForKeyboard / PuzzleDownForKeyboard / PuzzleLeftForKeyboard /
--- PuzzleRightForKeyboard and PuzzleDecide, and this list used to press the
--- keyboard variants alongside the pad ones, on the reasoning that answering a
--- command nothing queries costs nothing. It does cost nothing -- but those five
--- constants are DEAD. A scan of the whole shipped code section found no
--- reference to any of them outside the command table's own static constructor.
--- Nothing in the game ever asks about them, so nothing here should offer them,
--- and PuzzleDecide in particular must not read as a plausible answer to "which
--- button confirms this puzzle" ever again.
+-- PuzzleRightForKeyboard and PuzzleDecide, but nothing in the game ever asks
+-- about them, so nothing here offers them.
 --
 -- PuzzleSnakeProgressReset is real, but it is read through
 -- app.PlayerCommandUpdater.isDown, which bindings/command_input.lua does not
@@ -382,40 +376,7 @@ function M.tick()
 end
 
 
-function M.status()
-    return {
-        busy       = _active ~= nil,
-        owner      = _owner,
-        remaining  = #_queue,
-        done       = _active and _active.done or 0,
-        total      = _active and _active.total or 0,
-        cooldown   = _cooldown,
-        gate_wait  = _gate_wait,
-        interval   = _interval_frames or DEFAULT_INTERVAL_FRAMES,
-        last_error = _last_error,
-        stats      = _stats,
-        command_input = command_input.status(),
-        mouse_mode = mouse_mode.status(),
-    }
-end
 
-
--- Exposed for the debug panel's manual probe: fire one raw command immediately,
--- outside the queue, so the input route can be tested with nothing else running.
-function M.probe(command)
-    local names = COMMANDS[command]
-    if names == nil then return false, "unknown puzzle input: " .. tostring(command) end
-    force_button_branch()
-    return command_input.queue("probe_" .. command, {
-        { trigger = names, down = names },
-        { release = names },
-    })
-end
-
-
-function M.command_names(command)
-    return COMMANDS[command]
-end
 
 
 return M

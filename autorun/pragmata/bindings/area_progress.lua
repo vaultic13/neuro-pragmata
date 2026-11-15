@@ -1,8 +1,7 @@
 --
 -- The map area the player is in, and what is still left to collect there.
 --
--- Engine layout (verified against the IL2CPP dump; invocation still to be
--- confirmed in-game through the State Debug panel):
+-- Engine layout:
 --
 --   app.GuiManager (managed singleton)
 --     - get_MapDataManager() -> app.MapDataManager   (not itself a singleton)
@@ -90,9 +89,8 @@ local function message_text(method_def, key)
     return object_names.text(r.call(method_def, msg, key))
 end
 
--- Localised area name. The first test run got nothing from
--- getCheckAreaName(area id), so the scene id is tried as the key too; which
--- one answered is kept for the debug panel. Nil when neither does.
+-- Localised area name. getCheckAreaName(area id) can answer nothing, so the
+-- scene id is tried as the key too. Nil when neither does.
 function M.area_name(area_id, scene_id)
     if area_id == nil then return nil end
     local cached = _area_names[area_id]
@@ -333,10 +331,24 @@ end
 -- noticed without an elevator; a scene change inside the same area is not.
 -- The current sector's stage hash alone, or nil when it cannot be read
 -- (menus, loading screens). action_gates compares it with the Shelter's.
+--
+-- On a new game the map's stage-record list can still be empty (it fills at
+-- the first save / load), so no candidate matches a record and the sector
+-- read nil until the player reloaded -- the Shelter gates then kept "not in
+-- the Shelter" through the opening. The gate needs only the
+-- hash, not the record's name, so it falls back to the first candidate (the
+-- HUD's, when it reports one).
 function M.current_sector_hash()
     local map = map_data()
     if map == nil then return nil end
-    return (current_sector(map))
+    local h = current_sector(map)
+    if h ~= nil then return h end
+    local c = (_s.sector_candidates or {})[1]
+    if c ~= nil then
+        _s.sector_via = tostring(c.via) .. " (not in the map's list yet; hash only)"
+        return c.id
+    end
+    return nil
 end
 
 -- (sector_hash, sector_name) of the current sector, or nil. The name is the
@@ -354,52 +366,6 @@ function M.current_location_key()
     local sector_hash = current_sector(map)
     if area_id == nil and sector_hash == nil then return nil end
     return tostring(sector_hash) .. ":" .. tostring(area_id)
-end
-
-function M.debug_status()
-    ensure_init()
-    local map = map_data()
-    local area_id, scene_id = nil, nil
-    if map ~= nil then
-        area_id, scene_id = current_area(map)
-        current_sector(map)   -- refreshes sector_via / sector_candidates below
-    end
-    return {
-        gui_manager     = r.singleton("app.GuiManager") ~= nil,
-        map_data        = map ~= nil,
-        own_scene_id    = map and r.to_int(r.field(map, "_CurrentSceneId")) or nil,
-        matched_scene   = scene_id,
-        area_id         = area_id,
-        is_got_ok       = _s.m_is_got ~= nil,
-        area_name_ok    = _s.m_area_name ~= nil,
-        area_name_key   = _s.name_key,      -- which key getCheckAreaName answered to
-        items_key       = _s.items_key,     -- which key _StageItemDict answered to
-        stage_key       = _s.stage_key,     -- how the sector name was found
-        stage_record_count = _s.stage_record_count,
-        sector_via      = _s.sector_via,    -- which source matched a record
-        sector_candidates = (function()
-            local out = {}
-            for _, c in ipairs(_s.sector_candidates or {}) do
-                out[#out + 1] = tostring(c.id) .. " via " .. c.via
-            end
-            return out
-        end)(),
-        location_key    = M.current_location_key(),
-        last_checkpoint = last_checkpoint_id(),
-        -- Every stage record the map holds, as "hash = name", so the key
-        -- space can be compared with stage_ids / last_checkpoint above.
-        stage_records   = (function()
-            if map == nil then return nil end
-            local out = {}
-            for _, p in ipairs(r.elements(r.call(_s.m_stage_params, map))) do
-                out[#out + 1] = tostring(r.to_int(r.field(p, "_StageIdHash")))
-                    .. " = " .. tostring(stage_param_name(p))
-            end
-            return out
-        end)(),
-        stage_ids       = (map and area_id) and stages_of(map, area_id) or nil,
-        last_error      = _s.last_error,
-    }
 end
 
 return M

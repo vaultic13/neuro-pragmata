@@ -2,9 +2,8 @@
 -- a file of the mod's own, one per game session:
 --   reframework/data/pragmata_logs/pragmata_<date>_<time>.log
 --
--- REFramework rewrites its log each time it starts, so a test that spans a
--- restart (loading a save, returning to the title screen) used to lose
--- everything before it. The session files are never overwritten or cleaned up
+-- REFramework rewrites its log each time it starts, so a session that spans a
+-- restart would lose everything before it. The session files are never overwritten or cleaned up
 -- by the mod; delete old ones by hand. If pragmata_logs/ is missing (io is
 -- sandboxed to reframework/data/ and cannot create directories) the files go
 -- to pragmata_mailbox/ instead, and if that fails too only REFramework's log

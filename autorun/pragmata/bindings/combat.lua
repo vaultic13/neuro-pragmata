@@ -56,7 +56,6 @@
 --   no enemy has yet been entered into the engage list. That's an
 --   acceptable lag.
 
-local log = require("pragmata.util.log")
 
 local M = {}
 

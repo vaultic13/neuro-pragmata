@@ -3,7 +3,7 @@
 -- Simulations. Both live on one screen (app.gui.ui5136), so the screen bitset
 -- alone cannot tell them apart.
 --
--- Engine facts (sdk dump; confirmed in game 2026-10-06):
+-- Engine facts:
 --   app.gui.ui5136
 --     _TabControl  ScrollListController<ui5136.TabInfo>
 --                    <InfoList>k__BackingField, <SelectedIndex>k__BackingField
@@ -101,18 +101,6 @@ end
 function M.shop_ui()
     if gui == nil then return nil end
     return r.field(gui.control(M.CODE), "_ShopUI")
-end
-
--- For Pragmata State Debug: what the last selected_tab() saw.
-function M.debug_status()
-    return {
-        route = _last.route,
-        tab = _last.tab,
-        index = _last.index,
-        tab_type_hash = _last.hash,
-        tab_type_name = _last.enum,
-        title = _last.title,
-    }
 end
 
 return M

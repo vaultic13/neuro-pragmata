@@ -1,8 +1,7 @@
 --
 -- Player health and repair kits.
 --
--- Engine layout (verified against the IL2CPP dump; invocation still to be
--- confirmed in-game through the State Debug panel):
+-- Engine layout:
 --
 --   app.CharacterManager (managed singleton)
 --     - getPlayerHandle() -> app.PlayerHandle
@@ -26,8 +25,8 @@
 --
 -- The kit's item id is not hard-coded. mod_config.state_repair_kit_item names
 -- it by its app.ObjectIDs field name when known; otherwise the held item whose
--- localised name contains "repair" is used, and the debug panel lists every
--- held item so the right one can be pinned.
+-- localised name contains "repair" is used. The mod menu (Pragmata Neuro ->
+-- Setup values) lists every held item so the right one can be pinned.
 --
 -- The computed heal (base x multiplier + addition) is a reading of the data
 -- tables, not an observation. game_state_observer records the HP actually
@@ -184,19 +183,6 @@ function M.read()
     end
     out.kit_item = kit_id
     return out
-end
-
-function M.debug_status()
-    ensure_init()
-    return {
-        handle_ok      = player_handle() ~= nil,
-        hp_method_ok   = _s.m_hp ~= nil,
-        core_method_ok = _s.m_core_data ~= nil,
-        kit_id         = _kit.id,
-        kit_id_source  = _kit.source,
-        kit_internal   = _kit.id and object_names.object_name(_kit.id) or nil,
-        heal_rate_hash = r.enum_hash("app.PlayerParameterType", "HealReparikitRate"),
-    }
 end
 
 return M

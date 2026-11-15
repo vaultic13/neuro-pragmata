@@ -5,14 +5,14 @@
 -- scene will not continue until the player presses Overdrive. This binding
 -- notices that, and presses it on the peer's behalf.
 --
--- ENGINE LAYOUT (il2cpp dump; confirmed in game 2026-10-09..11)
+-- ENGINE LAYOUT
 --
 --   app.EventActionDeathBlowUnlock_PLWrapperd : app.EventActionWrapperdBase
 --     the timeline action that runs such a scene. Subclasses:
 --       app.EventActionCh14500DeathBlowWrapperd        (a boss finisher)
 --       app.EventActionFilamentRemoverUnlock_PLWrapperd
 --     neither overrides update(), so one hook on the base update() sees all
---     three (CLAUDE.md §3: a base hook misses overrides -- here there are none).
+--     three (a base hook misses overrides; here there are none).
 --     _State : ...Wrapperd.State
 --       Wait, AddGauge, WaitGaugeFullEffect, WaitStartDeathBlowButton,
 --       StartedDeathBlow
@@ -20,17 +20,10 @@
 --     onSpecialMove() -- what a real press runs
 --   app.FinishBlowGuiMediator.requestOpen / requestClose(OpenType) -- the
 --     centred icon; hooked to latch whether it is on screen.
---   GuiManager.<FinishBlowGuiMediator>k__BackingField._OpeningType -- the
---     same icon as a bitmask; read for the debug panel only.
 --
--- CAPTURED 2026-10-09 (boss scene, Ch14500, one manual press):
---
---     Wait -> AddGauge -> icon.requestOpen -> WaitGaugeFullEffect
---     ... the scene waits here with the icon up ...
---     f45051 ENTER scene.onSpecialMove      depth 0
---     f45051   ENTER icon.requestClose
---     f45051 EXIT  scene.onSpecialMove
---     f45052 state -> StartedDeathBlow
+-- A manual press runs: Wait -> AddGauge -> icon.requestOpen ->
+-- WaitGaugeFullEffect (the scene waits here with the icon up) ->
+-- onSpecialMove (which closes the icon) -> StartedDeathBlow.
 --
 -- So the prompt is up while the action is in WaitGaugeFullEffect (or, for the
 -- scenes that use it, WaitStartDeathBlowButton) AND the icon is open. The
@@ -39,7 +32,7 @@
 -- PlayerUpdater and PlayerCommandUpdater did nothing, and tryDeathblow() is
 -- not involved. press() therefore calls the action's own onSpecialMove(); the
 -- Overdrive unlock, the first boss and the Filament Remover scenes all went on
--- that way (2026-10-11).
+-- that way.
 --
 -- Confirmation is the scene's own state: confirmed when the action leaves its
 -- waiting state (or ends), failed when it has not within
@@ -179,21 +172,6 @@ local function open_type_of(w)
     local v = r.to_int(r.call(_s.m_open_type, w.obj))
     if v == nil then return nil end
     return _s.open_type_names[v] or tostring(v)
-end
-
--- Names of the bits set in FinishBlowGuiMediator._OpeningType, i.e. which
--- prompt icons the HUD is showing. Empty when nothing is, nil if unreadable.
-local function opening_bits()
-    local gm = r.singleton("app.GuiManager")
-    local med = r.field(gm, "<FinishBlowGuiMediator>k__BackingField")
-    local bits = r.to_int(r.field(med, "_OpeningType"))
-    if bits == nil then return nil end
-    local out = {}
-    for value, name in pairs(_s.open_type_names or {}) do
-        if value > 0 and math.floor(bits / value) % 2 == 1 then out[#out + 1] = name end
-    end
-    table.sort(out)
-    return out, bits
 end
 
 local function icon_up()
@@ -366,41 +344,5 @@ end
 -- "idle" | "pending" | "confirmed" | "failed", and its explanation.
 function M.request_state() return _request.state, _request.message end
 function M.request_id() return _request.id end
-
-function M.debug_status()
-    ensure_init()
-    local bits_names, bits = opening_bits()
-    local wrappers = {}
-    for addr, w in pairs(_wrappers) do
-        local st = state_of(w)
-        wrappers[#wrappers + 1] = {
-            address = string.format("%X", addr),
-            type_name = w.type_name, kind = w.kind,
-            state = st, state_name = _s.state_names and _s.state_names[st],
-            open_type = open_type_of(w),
-            waiting_id = w.waiting_id,
-            age = _frame - (w.last_frame or 0),
-        }
-    end
-    return {
-        error = _s.error,
-        hook = _s.m_update ~= nil and _s.error == nil,
-        wait_value = table.concat((function()
-            local out = {}
-            for v in pairs(_s.wait_values or {}) do out[#out + 1] = tostring(v) end
-            return out
-        end)(), ","),
-        icon_hooked = _s.icon_hooked,
-        icon_open = next(_s.icon_open) ~= nil,
-        wrappers = wrappers,
-        active = _active,
-        opening_bits = bits,
-        opening_names = bits_names,
-        request_state = _request.state,
-        request_message = _request.message,
-        pending_frames = _pending and _pending.frame or nil,
-        last_press = _last_press,
-    }
-end
 
 return M

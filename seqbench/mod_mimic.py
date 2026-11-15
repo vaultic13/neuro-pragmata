@@ -15,10 +15,14 @@ A run, per version:
     one actions/force per puzzle -> wait for `action` -> judge -> action/result
 
 A grid run (GridRunPlan, pragmata_enemy_hack_plan) plays episodes instead: each
-puzzle is forced, the reply is played on it (grid_sim), the mod's result is sent
-back, and while the hack is neither solved nor over the puzzle is forced again
-from where the cursor ended -- as the mod re-forces -- up to `max_forces`. The
-finale's five stages run as one chain, never ephemeral, each against a clock.
+puzzle is forced, the reply is played on it (grid_sim) and the mod's result is
+sent back. A failure on a live hack goes back as the mod sends it: `success:
+false` with the board as it is now and the query appended, and no new force --
+the Neuro server retries a failed forced action by itself, and that retry is the
+next answer. After RETRY_LIMIT retried failures in a row (the mod's
+force_retry_limit) the failure goes back plain and the puzzle is forced afresh,
+and so is a retry that never comes. Answers per episode stop at `max_forces`.
+The finale's five stages run as one chain, never ephemeral, each against a clock.
 
 At most one force is outstanding, as in the mod. A reply that misses the cap is
 still waited for (up to one more cap) before the next force, so it can never be
@@ -55,6 +59,10 @@ from variants import Version
 GAME = "Pragmata"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 FINALE_MAX_FORCES = 12
+# mod_config.force_retry_limit: failures one force may collect as server
+# retries before the mod forces afresh. A fresh force starts the count over.
+RETRY_LIMIT = 3
+RETRY_BOARD = "\n\nThe board is now (this replaces the earlier one):\n"
 STALE_MESSAGE = "stale: this reply arrived after the bench stopped waiting; nothing was pressed"
 
 
@@ -242,7 +250,8 @@ class ModMimic:
             self._pending.set_result((msg, received))
             return
         data = msg.get("data") or {}
-        await self._send_result(str(data.get("id", "")), False, STALE_MESSAGE)
+        # success: nothing was done, and a failure would only be retried again.
+        await self._send_result(str(data.get("id", "")), True, STALE_MESSAGE)
         if self._late is not None and not self._late.done():
             self._late.set_result((msg, received))
         self._emit("log", f"stale reply {data.get('name')} {data.get('data')} -- told it was stale")
@@ -454,15 +463,21 @@ class ModMimic:
         (out_dir / "versions.json").write_text(
             json.dumps(versions, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    async def _force(self, state: str, query: str, ephemeral: bool, cap_s: float):
+    async def _force(self, state: str, query: str, ephemeral: bool, cap_s: float,
+                     retry: Optional[tuple[str, str]] = None):
         """Send one plan force and wait for its action: (msg, seconds), or
-        (None, late reply ms or None) when the cap passes first."""
+        (None, late reply ms or None) when the cap passes first. With `retry`
+        (action id, message) no force is sent: the failure goes back as that
+        action's result, and the answer awaited is the server's retry."""
         fut = asyncio.get_running_loop().create_future()
-        self._pending = fut
-        await self._send({"command": "actions/force", "game": GAME, "data": {
-            "state": state, "query": query, "ephemeral_context": ephemeral,
-            "action_names": [gt.ACTION_NAME], "priority": gt.PRIORITY,
-        }})
+        self._pending = fut  # before the send: a fast retry must not read as stale
+        if retry is not None:
+            await self._send_result(retry[0], False, retry[1])
+        else:
+            await self._send({"command": "actions/force", "game": GAME, "data": {
+                "state": state, "query": query, "ephemeral_context": ephemeral,
+                "action_names": [gt.ACTION_NAME], "priority": gt.PRIORITY,
+            }})
         sent = time.perf_counter()
         try:
             msg, received = await asyncio.wait_for(fut, cap_s)
@@ -508,11 +523,22 @@ class ModMimic:
         # A finale stage is retried until its clock runs out, as in game; the
         # force limit only stops a runaway peer there.
         limit = max(plan.max_forces, FINALE_MAX_FORCES) if timed else plan.max_forces
-        for _ in range(limit):
+        retries = 0                                  # the mod's _retry_count
+        retry: Optional[tuple[str, str]] = None      # a failure to send as the re-ask
+        for n in range(limit):
             state = gt.render(puzzle, adjacency=version.adjacency)
-            msg, took = await self._force(state, gt.FORCE_QUERY, item.ephemeral, plan.cap_s)
-            force: dict = {"state": state, "cursor": list(puzzle.cursor)}
+            msg, took = await self._force(state, gt.FORCE_QUERY, item.ephemeral, plan.cap_s, retry)
+            force: dict = {"state": state, "cursor": list(puzzle.cursor), "retry": retry is not None}
+            if retry is None:
+                retries = 0
+            retry = None
             record["forces"].append(force)
+            if msg is None and force["retry"] and n + 1 < limit:
+                # The retry never came: the mod forces afresh (after
+                # force_retry_wait_seconds in game; the cap stands in here).
+                force.update(outcome="no_retry", elapsed_ms=None, late_reply_ms=took,
+                             message=f"no retry within {plan.cap_s:g} s; forced afresh")
+                continue
             if msg is None:
                 force.update(outcome="no_reply", elapsed_ms=None, late_reply_ms=took,
                              message=f"no action within {plan.cap_s:g} s")
@@ -538,7 +564,17 @@ class ModMimic:
             # past the budget the game has already failed the stage.
             if timed and clock > plan.finale_budget_s:
                 message, ok, outcome, timed_out = gt.MSG_FAILED, False, "over_budget", True
-            await self._send_result(str(data.get("id", "")), ok, message)
+            action_id = str(data.get("id", ""))
+            if (not ok and not timed_out and played is not None and not played.over
+                    and retries < RETRY_LIMIT and n + 1 < limit):
+                # A failure on a live hack: held by the mod, sent with today's
+                # board, and the server's retry is the next answer.
+                retries += 1
+                message += RETRY_BOARD + gt.render(played.after, adjacency=version.adjacency) \
+                    + "\n\n" + gt.FORCE_QUERY
+                retry = (action_id, message)
+            else:
+                await self._send_result(action_id, ok, message)
             force.update(outcome=outcome, message=message, clock_s=round(clock, 2))
             if played is not None:
                 force.update(landed=played.landed, stuns=played.stuns,

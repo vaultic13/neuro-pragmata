@@ -3,6 +3,7 @@
 Categories (grid_corpus_build.CATEGORY_HELP has the long form):
 
     plain  error  blocks  corrupt  big  nonsquare  resume  finale
+    erase  nodes  gates          (generated only, until the mod records one)
 
 A set holds `per_category` puzzles of each ticked category except `finale`,
 which is always the boss's five stages in order, once per repeat -- they are
@@ -28,7 +29,12 @@ import grid_gen
 import grid_texts as gt
 
 CORPUS = Path(__file__).resolve().parent / "grid_corpus.json"
-CATEGORIES = ("plain", "error", "blocks", "corrupt", "big", "nonsquare", "resume", "finale")
+CATEGORIES = ("plain", "error", "blocks", "corrupt", "big", "nonsquare", "resume", "finale",
+              "erase", "nodes", "gates")
+# Cells the mod can draw but no game has shown yet (from the old sim/ harness):
+# off unless picked, so a default run stays comparable with earlier ones.
+SPECULATIVE = ("erase", "nodes", "gates")
+DEFAULT_CATEGORIES = tuple(c for c in CATEGORIES if c not in SPECULATIVE)
 SOURCES = ("both", "recorded", "generated")
 
 

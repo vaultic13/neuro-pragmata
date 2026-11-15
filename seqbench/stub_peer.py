@@ -9,7 +9,12 @@ answers according to --mode:
     slow:X      the right answer after X seconds
     random      random directions of the right length
     redblock    grid only: the first time a grid is seen, walk into a red block
-                (then answer right on the re-force); elsewhere as correct
+                (then answer right on the retry); elsewhere as correct
+
+Like the Neuro server, it retries a forced action answered `success: false`,
+up to RETRY_LIMIT times (grid forces only: the sequence bench scores one
+answer per puzzle). When the failure carries the board as it is now (the
+mod's "The board is now" re-ask), the retry plans on that board.
 
 Hacking grids (pragmata_enemy_hack_plan) are answered with a shortest safe route
 read off the state text (grid_texts.parse_state), clean of corrupted cells when
@@ -37,6 +42,8 @@ except ImportError:  # pragma: no cover
     from websockets import serve
 
 DIRECTIONS = ("up", "down", "left", "right")
+RETRY_LIMIT = 3  # the server's; apitest's server_rules.DEFAULT_RETRY_LIMIT
+RETRY_BOARD = "The board is now (this replaces the earlier one):\n"
 _FROM_COMPASS = {"north": "up", "south": "down", "west": "left", "east": "right"}
 
 _ARM_LINE = re.compile(r"^(up|down|left|right)\s+0((?: [+\-a-p])+)$")
@@ -142,6 +149,10 @@ class StubPeer:
         self.actions: dict[str, dict] = {}
         self.results: list[dict] = []
         self._seen_grids: set[str] = set()
+        self._force: Optional[dict] = None   # the force being answered
+        self._answer_id: Optional[str] = None
+        self._tries = 0
+        self._retry_task: Optional[asyncio.Task] = None
 
     def _grid_args(self, state: str) -> dict:
         """pragmata_enemy_hack_plan: a BFS route read off the state text alone."""
@@ -205,16 +216,32 @@ class StubPeer:
                 for action in data.get("actions") or []:
                     self.actions[action["name"]] = action
             elif command == "actions/force":
+                # A new force replaces the old one, and with it any retry still due.
+                if self._retry_task is not None:
+                    self._retry_task.cancel()
+                    self._retry_task = None
+                self._force, self._tries = data, 0
                 asyncio.create_task(self._answer(ws, data))
             elif command == "action/result":
                 self.results.append(data)
+                if (not data.get("success") and self._force is not None
+                        and grid_texts.ACTION_NAME in (self._force.get("action_names") or [])
+                        and data.get("id") == self._answer_id and self._tries < RETRY_LIMIT):
+                    self._tries += 1
+                    retry = dict(self._force)
+                    message = str(data.get("message") or "")
+                    if RETRY_BOARD in message:
+                        board = message.split(RETRY_BOARD, 1)[1]
+                        retry["state"] = board.rsplit("\n\n", 1)[0]
+                    self._retry_task = asyncio.create_task(self._answer(ws, retry))
 
     async def _answer(self, ws, force: dict) -> None:
         args = self._answer_args(force)
         await asyncio.sleep(self._delay())
         name = (force.get("action_names") or ["pragmata_enviro_hack_sequence"])[0]
+        self._answer_id = str(uuid.uuid4())
         await ws.send(json.dumps({"command": "action", "data": {
-            "id": str(uuid.uuid4()), "name": name, "data": json.dumps(args)}}))
+            "id": self._answer_id, "name": name, "data": json.dumps(args)}}))
 
 
 class StubThread:

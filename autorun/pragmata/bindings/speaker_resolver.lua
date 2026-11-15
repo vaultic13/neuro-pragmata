@@ -203,7 +203,7 @@ end
 --                     variant. All closed-caption flavors share this tag.
 --   "Dialogue"      — generic fallback when info is non-idle but _Type
 --                     is unreadable or an unrecognised value (e.g. a
---                     post-patch member not present in the captured dump).
+--                     member added by a game patch).
 -- nil               — idle / no active line.
 
 -- One-time-resolved int -> category map for app.MessageInfo.MessageType.

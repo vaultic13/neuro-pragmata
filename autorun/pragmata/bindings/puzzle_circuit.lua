@@ -11,13 +11,8 @@
 -- one circuit that has to be closed. A circuit is a line that starts at a
 -- source on the edge of the board and runs through fixed cells and one
 -- connector into the centre; the connector closes it when it JOINS its line to
--- the centre, both ends lined up. Pointing at the centre is not enough -- see
--- lit_cells() for the 2026-09-11 trace that settled it, including a turn made
--- by hand that left an arm on the centre and put the whole line out.
---
--- This file believed the one-arm version for a round, on the strength of how
--- the diamonds look on screen; the engine's own flags disagree in 79 of 175
--- recorded board states.
+-- the centre, both ends lined up. Pointing at the centre is not enough (see
+-- lit_cells()), whatever the diamonds on screen suggest.
 --
 -- Connectors are therefore addressed by the side they sit on, which is also the
 -- button that turns them (that pairing is what the engine's own button2Index
@@ -25,13 +20,9 @@
 -- engine reorders its array -- but it is only safe while the side we name is
 -- the side whose button really turns that connector.
 --
--- That pairing is now MEASURED rather than worked out from the board. The
--- 2026-09-07 capture is what working it out cost: across four hacks the
--- connector the peer called "right" never moved once in sixteen presses while a
--- connector nobody had named turned instead, and the only two hacks that were
--- solved were solved because every piece was a straight needing exactly one
--- press -- the one shape where a shuffled set of names still gives the right
--- answer. See the "Which button turns which cell" section below.
+-- That pairing is MEASURED rather than worked out from the board: a pairing
+-- deduced from the board can shuffle the names, and a shuffled name turns the
+-- wrong connector. See the "Which button turns which cell" section below.
 
 local log = require("pragmata.util.log")
 local registry = require("pragmata.bindings.puzzle_registry")
@@ -229,11 +220,9 @@ end
 -- the demanded-openings calculation need, because both ask their questions
 -- through the same map and so survive any of the eight candidates intact.
 --
--- It does NOT name connectors any more. It used to, and the 2026-09-07 capture
--- is what that cost: the scoring reported itself CONFIDENT on all eighteen
--- layouts of the session and was wrong on half of them, because a board can be
--- symmetric enough that the engine's own flags cannot separate two candidates
--- and this is only as good as the evidence on the board. Names come from the
+-- It does NOT name connectors: a board can be symmetric enough that the
+-- engine's own flags cannot separate two candidates, so a name deduced here
+-- can be confidently wrong. Names come from the
 -- measured button mapping above; a name is a promise about which button turns
 -- something, and that is worth measuring rather than deducing.
 
@@ -275,13 +264,9 @@ end
 
 -- Which cells the engine will call connected, for a given reading of the grid.
 --
--- THE ENGINE'S RULE, measured rather than assumed. Replaying all 175 board
--- states of the 2026-09-11 trace against the game's own IsConnectingToGoal:
---
---   flood outward from the centre (the old model)        wrong in 79 states
---   a line runs from an edge source into the centre      wrong in 13, all of
---                                                        them where the trace
---                                                        itself missed a re-deal
+-- THE ENGINE'S RULE, measured against the game's own IsConnectingToGoal: a
+-- line runs from an edge source into the centre (a flood outward from the
+-- centre does not match).
 --
 -- Each circuit starts at an edge SOURCE (_SourceType Open) and runs through
 -- fixed cells and one connector into the centre. A cell is connected only if it
@@ -373,12 +358,10 @@ end
 -- On an empty board -- nothing connected yet, which is every board at the start
 -- of every round -- the engine's flags cannot tell the eight frames apart: under
 -- the real rule, no line is complete under ANY of them, so all eight agree with
--- the game perfectly. The old tie-break, fewest contradictions, then picked m0
--- on the first board of the 2026-09-11 trace and the right frame on only 5 of
--- its 12 boards. But the fixed line cells are laid out for one frame: read
--- through it, each source's line can be followed cell by cell up to its
--- connector; read through any other, the walk dies at once. Walk length picks
--- the right frame, alone, on all 12.
+-- the game perfectly, and fewest contradictions is no tie-break. But the fixed
+-- line cells are laid out for one frame: read through it, each source's line
+-- can be followed cell by cell up to its connector; read through any other,
+-- the walk dies at once. Walk length picks the right frame.
 local function source_reach(at, ends, map)
     local total = 0
     for _, src in ipairs(ends and ends.sources or {}) do
@@ -465,24 +448,19 @@ end
 
 -- The frame the engine has CONFIRMED -- scored against a board with something
 -- lit on it, and agreeing. Module-level on purpose: which grid delta each name
--- means is a property of the puzzle's code, not of one board, and the
--- 2026-09-11 trace has it as m1 on every board that had evidence to offer.
+-- means is a property of the puzzle's code, not of one board.
 --
--- Without this every new round was calibrated from scratch on a board with
--- nothing lit, where four candidates tie on a perfect score and the
--- contradiction count picks between them -- r1, r3 and m2 each won a round that
--- way, and on the last board m2 made every target the mod printed wrong.
+-- Without this every new round would be calibrated from scratch on a board
+-- with nothing lit, where four candidates tie on a perfect score and the pick
+-- between them is arbitrary -- and a wrong frame makes every target wrong.
 local _known_frame = nil
 
 -- Which button turns which connector, remembered per connector arrangement
 -- (button_layout_key) once a probe has named EVERY connector on it. Like the
 -- frame, it is a fact about where the connectors sit rather than about one
--- board: the 2026-09-12 session measured the same mapping on two different
--- puzzle records. Reusing it skips four presses on every return, and with them
--- the chance of a probe losing presses -- which is how that session's third
--- stage ended up with one named connector out of three for the rest of the
--- session. Dropped when a plan's press turns a connector other than the one it
--- names.
+-- board. Reusing it skips four presses on every return, and with them the
+-- chance of a probe losing presses and leaving connectors unnamed. Dropped
+-- when a plan's press turns a connector other than the one it names.
 local _known_buttons = {}
 
 -- Pick the mapping for one board. `cells` must already carry `open_set`.
@@ -565,64 +543,12 @@ M.turn_openings = turn_openings
 -- And every cell, not only the ones the board calls rotatable, for the same
 -- reason: a cell that turns under a press IS a connector whatever the flag says,
 -- and a snapshot that skipped it would report the press as having done nothing.
--- Fixed cells never move, so carrying them costs a few table entries and buys
--- the one connector every layout in the 2026-09-07 session was missing.
+-- Fixed cells never move, so carrying them costs a few table entries and
+-- catches a connector the board does not flag as rotatable.
 local function snapshot_cells(state)
     local out = {}
     for _, cell in ipairs(state and state.cells or {}) do
         out[cell_key(cell.x, cell.y)] = table.concat(cell.openings, "+")
-    end
-    return out
-end
-
--- The board as the engine handed it over, one line per cell, raw values first.
---
--- Raw because the integer is the evidence and the decoded names are only the
--- reading: the screen shows one arm per connector while _PathType hands over
--- two openings, and it took the engine's own values to settle which was right.
-local function board_report(state)
-    local out = {}
-    local goals = {}
-    for _, g in ipairs(state.goals or {}) do
-        goals[#goals + 1] = tostring(g.x) .. "," .. tostring(g.y)
-    end
-    out[#out + 1] = string.format(
-        "%dx%d  goals=%s%s  gui lines=%s  rounds=%s  pre-goals=%s",
-        state.width, state.height,
-        #goals > 0 and table.concat(goals, " ") or "none",
-        state.goal_guessed and " (assumed)" or "",
-        tostring(state.line_count), tostring(state.rounds_needed),
-        tostring(state.pre_goal_count))
-    out[#out + 1] = string.format(
-        "frame=%s confident=%s disagree=%s evidence=%s confirmed=%s model_bad=%s"
-        .. "  solved_whole=%s  spin=%s",
-        state.axis and state.axis.id or "?",
-        tostring(state.axis and state.axis.confident),
-        tostring(state.axis and state.axis.live_disagree),
-        tostring(state.axis and state.axis.evidence),
-        tostring(state.model_confirmed), tostring(state.model_bad),
-        tostring(state.solved_whole), tostring(state.spin))
-    out[#out + 1] = "cell    pathtype  openings      bits  rot turn conn source     pathsrc"
-    for _, cell in ipairs(state.cells) do
-        out[#out + 1] = string.format(
-            "%-6s  %-8s  %-12s  %-4d  %-3s %-4s %-4s %-10s %s",
-            cell.key, tostring(cell.raw_path),
-            #cell.openings > 0 and table.concat(cell.openings, "+") or "-",
-            #cell.openings,
-            cell.rotatable and "y" or "-",
-            cell.turnable and "y" or "-",
-            cell.connected and "y" or "-",
-            tostring(cell.source) .. "(" .. tostring(cell.raw_source) .. ")",
-            tostring(cell.path_source))
-    end
-    for _, c in ipairs(state.connectors) do
-        out[#out + 1] = string.format(
-            "connector %-6s at %-6s target=%-12s presses=%-5s closes-as=%-12s complete=%-5s"
-            .. "  [%s]",
-            tostring(c.side or "UNNAMED"), c.key, tostring(c.target or "-"),
-            tostring(c.presses),
-            #c.demanded > 0 and table.concat(c.demanded, "+") or "-",
-            tostring(c.demand_complete), tostring(c.wanted_detail))
     end
     return out
 end
@@ -646,11 +572,9 @@ end
 -- board of straight pieces can never say, which is fine, because on a board of
 -- straight pieces the direction does not change any answer either.
 --
--- This used to only warn. The 2026-09-08 capture has that warning in it and
--- nothing acted on it, so on that layout every press count was 1 and 3 the
--- wrong way round: a half turn is a half turn and a straight piece needs one
--- press either way, but an elbow needing 1 or 3 was told the opposite. The
--- direction is a property of THIS board's name frame, not of the engine -- a
+-- Getting it wrong swaps every press count of 1 and 3: a half turn is a half
+-- turn and a straight piece needs one press either way, but an elbow needing
+-- 1 or 3 would be told the opposite. The direction is a property of THIS board's name frame, not of the engine -- a
 -- mirrored calibration turns a physically clockwise press into a
 -- counter-clockwise one in these names -- so it is measured per layout.
 local function quarter_turn_spin(before, after, key)
@@ -702,10 +626,8 @@ end
 -- is now rather than as it was described to them.
 --
 -- This puzzle is driven by the same buttons as player movement, so the board
--- moves while the peer is thinking. In the 2026-09-08 capture the mod pressed a
--- connector that had already drifted into the orientation the answer was asking
--- for, forty-six times, turning a correct connector wrong and costing the hack a
--- retry each time.
+-- moves while the peer is thinking: a connector can drift into the orientation
+-- the answer asks for, and pressing it as asked would turn it wrong again.
 --
 -- The answer is re-expressed rather than second-guessed. A press count plus the
 -- openings it was read against name one absolute orientation, and that
@@ -745,10 +667,8 @@ end
 -- it structurally cannot answer: a connector whose neighbour is another
 -- connector. What that neighbour will open onto is not settled, so no number
 -- can be stood behind and the state text falls back to listing the three
--- options. The 2026-09-08 capture says how often that happened -- 103 of 138
--- forces carried no press count at all -- and a fallback that frequent is not a
--- fallback, it is the behaviour, and the behaviour is the coin flip this was
--- all meant to remove.
+-- options. That case is common, and a fallback that frequent is a coin flip,
+-- which is what this was meant to remove.
 --
 -- Worse, the fallback is not even neutral. A connector that is invisible to the
 -- reader (the GUI drew four circuits and only three cells are flagged
@@ -780,8 +700,8 @@ local SOLVE_MAX_CONNECTORS = 6
 -- count in names, like the whole-board solve, so the caller converts both the
 -- same way.
 --
--- This replaces a one-arm rule -- "cheapest turn that opens onto the centre" --
--- that the 2026-09-11 trace disproves: see lit_cells.
+-- Not "cheapest turn that opens onto the centre": one arm on the centre does
+-- not close a circuit (see lit_cells).
 --
 -- `complete` is false when a neighbour is itself a connector: what that one
 -- will open onto is not settled, so an answer computed through it would be
@@ -802,9 +722,6 @@ local function presses_to_close(cell, at, ends, map, spin)
         local shape = turn_openings(cell.openings, turns)
         local lit = lit_cells(at, ends, map, { [self_key] = opening_set(shape) })
         local closes = lit[self_key] == true
-        -- Carried out to the Num0 dump: which press counts close this
-        -- connector is the whole of this rule, and a wrong answer here is
-        -- invisible in the number it produces.
         detail[#detail + 1] = tostring(presses) .. "=" .. table.concat(shape, "+")
                            .. (closes and "(closes)" or "")
         if closes and found == nil then found = turns end
@@ -821,10 +738,9 @@ end
 -- only allowed to run while the model reproduces IsConnectingToGoal, so what
 -- it searches is a proven reading of this board.
 --
--- On the last board of the 2026-09-11 trace this has exactly one answer and it
--- is the one the player found by hand. The previous objective -- every
--- connector merely TOUCHING the centre -- accepted orientations whose other arm
--- was loose, which the game never lights. Lit cells break a tie between two
+-- The objective is lit circuits, not every connector merely TOUCHING the
+-- centre: that accepts orientations whose other arm is loose, which the game
+-- never lights. Lit cells break a tie between two
 -- equally cheap answers, where they decide nothing and keep the choice
 -- deterministic.
 --
@@ -906,12 +822,11 @@ end
 -- openings are excluded, so turning one does not read as a new layout --
 -- struct_sig depends on that and so does every cache keyed on this.
 --
--- The fixed cells used to be left out too, and the 2026-09-11 trace shows what
--- that cost: rounds reuse the same source positions with different lines, and
--- the key o0,0;o0,4;o4,4 turns up with two different boards under it. A round
--- dealt under an old key inherited the previous round's solved targets and no
--- replan happened. A fixed cell never turns, so its shape can be fingerprinted
--- without a turning connector ever looking like a new board.
+-- The fixed cells are included: rounds reuse the same source positions with
+-- different lines, and without them two different boards share a key, so a
+-- new round would inherit the previous round's solved targets and never
+-- replan. A fixed cell never turns, so its shape can be fingerprinted without
+-- a turning connector ever looking like a new board.
 local function layout_key(cells, goals, width, height)
     local marks = {}
     for _, cell in ipairs(cells) do
@@ -952,18 +867,6 @@ local function button_layout_key(cells, width, height)
     return tostring(width) .. "x" .. tostring(height) .. ":" .. table.concat(marks, ";")
 end
 
--- How many cells the engine's own _Goals set holds, or nil when it cannot be
--- read. Best effort by design: this exists to be compared against the cells
--- whose _SourceType says "goal", and a nil compares as "no opinion".
-local function goals_field_count(inst)
-    local set = safe(function() return inst:get_field("_Goals") end)
-    if set == nil then return nil end
-    local n = registry.to_int(safe(function() return set:call("get_Count") end))
-    if n ~= nil then return n end
-    return registry.to_int(safe(function() return set:get_field("_count") end))
-end
-
-
 local function read_state(rec)
     if rec == nil then return nil end
     local inst = rec.inst
@@ -1002,32 +905,22 @@ local function read_state(rec)
                     rotatable = rotatable,
                     -- A cell a press has actually turned counts as a connector
                     -- whatever _IsRotatable says: the button moved it, which is
-                    -- the only evidence that matters. Every layout in the
-                    -- 2026-09-07 session reported one more GUI line than
-                    -- rotatable cell, so at least one connector was going
-                    -- undescribed and unpressed on every board.
+                    -- the only evidence that matters. A board can show one
+                    -- more GUI line than it has rotatable cells.
                     turnable  = rotatable
                              or (rec.extra_cells ~= nil and rec.extra_cells[key] == true),
                     connected = registry.read_bool(cell, "<IsConnectingToGoal>k__BackingField", false),
                     source    = source,
-                    -- The engine's own integers, kept beside the decoded names
-                    -- for the Num0 dump, verbatim rather than summarised.
+                    -- The engine's own integers, kept beside the decoded names.
                     raw_path   = raw_path,
-                    raw_source = raw_source,
-                    -- Which sources have rippled this far (clearGridPathSource /
-                    -- rippleSource fill it in). Carried for the debug dump only
-                    -- -- nothing here depends on a reading of its meaning.
-                    path_source = registry.to_int(safe(function() return cell:get_field("_PathSource") end)),
                 }
                 cells[#cells + 1] = entry
                 at[key_of(x, y)] = entry
-                -- EVERY goal. This kept the last one it saw, and every circuit
-                -- running to any other goal was then solved toward the wrong
-                -- place -- silently, because a board with nothing connected
-                -- yet cannot contradict a reachability model.
+                -- EVERY goal, not the last one seen: a circuit solved toward
+                -- the wrong goal fails silently, because a board with nothing
+                -- connected yet cannot contradict a reachability model.
                 if source == "goal" then goals[#goals + 1] = { x = x, y = y } end
-                -- Where each circuit starts. Open is what every board of the
-                -- 2026-09-11 trace uses; Start is its sibling in the same enum.
+                -- Where each circuit starts: Open, or its sibling Start.
                 if source == "open" or source == "start" then
                     sources[#sources + 1] = { x = x, y = y }
                 end
@@ -1345,12 +1238,9 @@ local function read_state(rec)
     local connected_count = 0
     for _, c in ipairs(connectors) do if c.connected then connected_count = connected_count + 1 end end
 
-    -- Worth a line, and nothing more than that. It used to read "the connector
-    -- model does not fit this layout", and the state block told the peer a
-    -- circuit was going undescribed -- on a board whose screenshot has exactly
-    -- three pieces and three key pads against a Lines array of four. Lines is
-    -- not a count of circuits, whatever else it is, so nothing may be concluded
-    -- from the difference until something has read _GuiParam properly.
+    -- Worth a log line and nothing more: the GUI's Lines array is not a count
+    -- of circuits (a board with three pieces can hold four), so nothing may be
+    -- concluded from the difference.
     if line_count ~= nil and line_count ~= #connectors and rec.line_warned ~= layout then
         rec.line_warned = layout
         log.info(string.format(
@@ -1383,8 +1273,7 @@ local function read_state(rec)
         button_route    = rec.button_route,
         axis            = axis,
         -- +1 / -1 once a press has said which way this board turns, nil until
-        -- one has. The render needs it for one sentence; the debug panel needs
-        -- it to explain a press count that looks backwards.
+        -- one has.
         spin            = rec.spin,
         solved_whole    = solved ~= nil,
         -- Set by force_blocked when a board that reads as needing nothing has
@@ -1393,13 +1282,6 @@ local function read_state(rec)
         stuck           = rec.force_stuck == true,
         line_count      = line_count,
         connected_count = connected_count,
-        rounds_needed   = registry.to_int(safe(function() return inst:get_field("_RoundCountForSuccess") end)),
-        pre_goal_count  = registry.to_int(safe(function() return inst:get_field("_PreGoalCount") end)),
-        -- The engine's own goal set, shown on the debug panel and in the Num0
-        -- dump and depended on by nothing: a HashSet needs reflection that may
-        -- not work on every build, while _SourceType marks the same cells and
-        -- always reads.
-        goals_field     = goals_field_count(inst),
         remaining_time  = type(remaining) == "number" and remaining or nil,
         timer_rate      = type(timer_rate) == "number" and timer_rate or nil,
         timed           = type(remaining) == "number",
@@ -1441,10 +1323,10 @@ end
 M.struct_sig = struct_sig
 
 
-function M.render_state(id)
+function M.render_state(id, opts)
     local state = M.get_state(id)
     if state == nil then return nil end
-    return render.circuit(state)
+    return render.circuit(state, opts)
 end
 
 
@@ -1488,11 +1370,10 @@ end
 -- connectors were OPENING ONTO when the peer was asked.
 --
 -- It has to. This puzzle is driven by the same buttons as player movement, so
--- the board moves while the peer is thinking: in the 2026-09-08 capture the mod
--- logged "the peer asked for 1 press(es) on <side> and the board says 0" forty-
--- six times -- the connector had already reached the orientation the answer was
--- about to ask for, and the press turned it back off again. So the openings are
--- parked here too, and set_plan reconciles the answer against them.
+-- the board moves while the peer is thinking, and a connector can reach the
+-- orientation the answer asks for before the press that would then turn it
+-- off again. So the openings are parked here too, and set_plan reconciles the
+-- answer against them.
 function M.snapshot_force_target(id)
     local rec = store.by_id(id)
     if rec == nil then return end
@@ -1560,11 +1441,9 @@ function M.force_blocked(id)
         rec.stuck_warned, rec.force_stuck = nil, false
     end
 
-    -- A force is a question, and there has to be something to ask. 28 of the 79
-    -- circuit forces in the 2026-09-08 capture asked one while telling the peer
-    -- to leave every single connector alone, and an answer to that is either
-    -- nothing (the hack stalls) or a guess that turns a connector which was
-    -- already right.
+    -- A force is a question, and there has to be something to ask. Asking while
+    -- telling the peer to leave every connector alone gets either nothing (the
+    -- hack stalls) or a guess that turns a connector which was already right.
     local answerable = false
     for _, c in ipairs(state.connectors) do
         -- No count means the mod could not work one out and the render lists
@@ -1717,8 +1596,7 @@ function M.set_plan(id, rotations, resolve)
         -- out from the board. The peer's answer is still what gets pressed --
         -- it may know something about a circuit the mod cannot read -- but a
         -- disagreement is worth a line: it is the difference between "the peer
-        -- misread the state" and "the mod computed the wrong number", and
-        -- without it the next session cannot tell those apart. Compared AFTER
+        -- misread the state" and "the mod computed the wrong number". Compared AFTER
         -- reconciling, so drift does not masquerade as disagreement.
         if turns > 0 and connector ~= nil and connector.presses ~= nil
             and connector.presses ~= turns then
@@ -1764,11 +1642,8 @@ function M.set_plan(id, rotations, resolve)
     -- The puzzle edge-detects each direction against its own _PrevUp /
     -- _PrevDown / _PrevLeft / _PrevRight, so two presses of the SAME button
     -- back to back are the pair most likely to arrive as one edge and turn the
-    -- connector once. That is what the 2026-09-08 session reported on itself --
-    -- "the peer asked for 3 press(es) on down and the board says 1", and three
-    -- consecutive re-presses of left that all turned nothing -- and it is why a
-    -- board needing one press per connector solved while a board needing two or
-    -- three on one connector did not.
+    -- connector once, so a board needing two or three presses on one
+    -- connector would otherwise come up short.
     --
     -- Spreading them out puts a different button, and therefore a guaranteed
     -- release, between every repeat. The order costs nothing: each connector's
@@ -1788,9 +1663,9 @@ function M.set_plan(id, rotations, resolve)
 
     local cur = current_record()
     local queued, parked = P.set_plan(rec, steps, resolve, cur ~= nil and cur.id == rec.id)
-    -- The drift is worth carrying on this line as well as per connector: it is
-    -- how a session tells "the peer answered badly" from "the board moved under
-    -- a good answer", and those want completely different fixes.
+    -- The drift is worth carrying on this line as well as per connector: "the
+    -- peer answered badly" and "the board moved under a good answer" want
+    -- completely different fixes.
     local drift = ""
     if adjusted > 0 or dropped > 0 then
         drift = string.format(" (%d adjusted, %d dropped -- the board moved under the answer)",
@@ -1805,20 +1680,17 @@ end
 -- --------------------------------------------------------------------
 -- Pressing, one press at a time
 -- --------------------------------------------------------------------
--- The engine's own _InputEnableInterval is 0.03 s -- three frames -- and the
--- dispatcher used to fire a whole plan at that cadence and watch it go. The
--- 2026-09-07 capture says what that bought: 114 quarter turns asked for, 70
--- delivered. Three frames is the fastest the engine will ACCEPT an input, not
--- how long a connector takes to turn, so the rest of the burst landed on a
--- board that was still animating and was dropped.
+-- The engine's own _InputEnableInterval is 0.03 s -- three frames -- but that
+-- is the fastest the engine will ACCEPT an input, not how long a connector
+-- takes to turn: a whole plan fired at that cadence lands much of the burst
+-- on a board that is still animating, and those presses are dropped.
 --
--- So each press now waits for its own result. The gate on press N is "press
+-- So each press waits for its own result. The gate on press N is "press
 -- N-1 has been seen to turn something", which is the machinery the timing
 -- puzzle already needed, and a press whose result never arrives is sent again
--- rather than counted. That also fixes the observation: the old report_turn
--- read the board in the same frame as the press and so blamed every turn on the
--- press AFTER the one that caused it, which is why its warnings read as chaos
--- instead of as the one clear signal they were.
+-- rather than counted. It also keeps the observation honest: a board read in
+-- the same frame as the press blames every turn on the press after the one
+-- that caused it.
 local function press_timeout_frames()
     return math.floor(tunable("puzzle_circuit_press_timeout_frames", 30, 1))
 end
@@ -1919,8 +1791,7 @@ local function absorb(rec, track)
                   .. tostring(expected) .. ", but cell " .. tostring(key) .. " turned")
             -- Every remaining press in this plan names a connector by the same
             -- mapping that has just been shown to be wrong, so none of them are
-            -- sent. Carrying on would be turning connectors at random, which is
-            -- what the 2026-09-07 session did for two and a half minutes.
+            -- sent. Carrying on would be turning connectors at random.
             input.cancel(rec.id)
         end
     end
@@ -2024,9 +1895,9 @@ local function press_tick(rec, state)
     if not track.done then return false end
 
     -- The engine ripples its connection state in its own update, a frame or
-    -- more after the last press lands. Reading it in the same frame is what
-    -- reported all seven of the 2026-09-07 session's SUCCESSFUL hacks to the
-    -- peer as failures. Its own success trigger ends the wait early.
+    -- more after the last press lands; reading it in the same frame would
+    -- report a successful hack as a failure. Its own success trigger ends the
+    -- wait early.
     local succeeded = state ~= nil and state.success == true
     if succeeded then track.settle = settle_frames() end
     track.settle = track.settle + 1
@@ -2038,9 +1909,8 @@ local function press_tick(rec, state)
     -- For a PROBE, a press that turned nothing is the answer -- there is no
     -- connector on that side -- so re-sending it buys nothing. press_timed_out
     -- already makes that distinction for every press but the last one; the last
-    -- one is handled here and used to re-send regardless, which cost two presses
-    -- and about a second on every layout whose fourth button turns nothing (all
-    -- fifteen of them in the 2026-09-08 capture).
+    -- one is handled here, so a layout whose fourth button turns nothing does
+    -- not cost two extra presses.
     if track.pending ~= nil and not succeeded and track.kind ~= "probe" then
         local dir = track.dirs[track.pending]
         if track.retries < track.budget then
@@ -2078,8 +1948,8 @@ end
 -- It costs four quarter turns and about a third of a second, and it is taken
 -- BEFORE the force goes out so the peer plans against the board it is shown. A
 -- cell that turns under a press but was never flagged _IsRotatable is added to
--- the connector list: every layout in the 2026-09-07 session showed one more
--- GUI line than rotatable cell, so at least one connector was invisible.
+-- the connector list: a board can show one more GUI line than it has
+-- rotatable cells, and that connector would otherwise be invisible.
 local function finish_probe(rec, track, state)
     if track.spoiled then
         -- The board moved under the measurement. Record nothing and leave
@@ -2111,11 +1981,10 @@ local function finish_probe(rec, track, state)
 
     -- A probe that named some connectors and not others lost presses: a press
     -- that turns nothing is only an answer ("no connector on that side") when
-    -- there is no connector left for it to have turned. On 2026-09-12 a probe
-    -- taken straight after a round ended turned one connector out of three,
-    -- was accepted, and the other two could not be answered for on every later
-    -- visit. Measured again instead, within the same three attempts that bound
-    -- every probe; only the last attempt's partial mapping is kept.
+    -- there is no connector left for it to have turned. Accepting a partial
+    -- mapping would leave the unnamed connectors unanswerable on every later
+    -- visit, so it is measured again instead, within the same three attempts
+    -- that bound every probe; only the last attempt's partial mapping is kept.
     local named, missing = {}, {}
     for _, key in pairs(buttons) do named[key] = true end
     for _, c in ipairs(state and state.cells or {}) do
@@ -2177,12 +2046,9 @@ local function probe_ready(rec, state)
     if rec.probe_layout == layout then return true end
 
     -- The attempt counter is there to stop ONE board blocking a hack forever,
-    -- not to run out for the puzzle. It used to carry over, and a multi-round
-    -- hack draws a fresh board every round: after the third round the probe
-    -- stopped for good and every connector name fell back to the board's
-    -- geometry -- the exact defect this file was rewritten to remove. That is
-    -- why the 2026-09-08 session solved the early rounds and never the later
-    -- ones.
+    -- not to run out for the puzzle: a multi-round hack draws a fresh board
+    -- every round, and a counter carried over would stop the probe for good
+    -- after a few rounds, leaving every later name to the board's geometry.
     if rec.probe_attempt_layout ~= layout then
         rec.probe_attempt_layout = layout
         rec.probe_attempts = 0
@@ -2267,8 +2133,8 @@ local function probe_ready(rec, state)
         return true
     end
 
-    -- Every corrupted measurement in the 2026-09-08 capture sits within a few
-    -- frames of a lifecycle edge, so wait for the board to hold still before
+    -- Measurements taken within a few frames of a lifecycle edge come out
+    -- corrupted, so wait for the board to hold still before
     -- pressing anything at it. Checked before the attempt is counted: waiting is
     -- not a failed attempt.
     if (rec.quiet_frames or 0) < probe_quiet_frames() then return false end
@@ -2298,10 +2164,9 @@ end
 -- Dispatch
 -- --------------------------------------------------------------------
 -- What the peer is told at the end of a plan, decided only once the board has
--- stopped moving. The old version read it in the same frame as the final press
--- and reported every one of the 2026-09-07 session's seven SUCCESSFUL hacks as
--- "the rotations were applied but the circuit is not solved" -- the worst
--- possible thing to teach a peer that learns from its own tool results.
+-- stopped moving: read in the same frame as the final press, a successful
+-- hack reads as "applied but not solved" -- the worst possible thing to teach
+-- a peer that learns from its own tool results.
 local function finish_plan(rec, track, state)
     -- A press turned a connector other than the one it names. Every name in
     -- this plan is therefore suspect, so absorb() stopped the run: the mapping
@@ -2366,8 +2231,7 @@ local function finish_plan(rec, track, state)
     -- that counts, so stop offering answers built on it -- read_state drops the
     -- solution while model_bad names this layout -- and write the board down.
     --
-    -- Without this the mod simply says the same thing again, which is the loop
-    -- the 2026-09-08 sessions spent themselves in.
+    -- Without this the mod simply says the same thing again, in a loop.
     if track.lost == 0 and state.solved_whole then
         local on_target, targets = true, 0
         for _, c in ipairs(state.connectors) do
@@ -2407,7 +2271,7 @@ function M.tick_plan()
 
     -- How long the board has held still. Counted here because tick_plan runs
     -- exactly once per frame, where read_state does not: it is called several
-    -- times a frame by the render, the force gate and the debug panel.
+    -- times a frame by the render and the force gate.
     local cells_now = snapshot_cells(state)
     local still = true
     if rec.last_cells == nil then
@@ -2487,52 +2351,7 @@ end
 -- --------------------------------------------------------------------
 -- Debug
 -- --------------------------------------------------------------------
--- Every cell of the board, verbatim. Written for the one question the logs
--- could not answer: the GUI reported four circuits on every layout of the
--- 2026-09-07 session while the reader found three rotatable cells, and which of
--- the two is wrong is not decidable from a mailbox capture.
--- The whole board as text, for the Num0 dump: every raw value the engine
--- handed over, formatted by board_report, plus what is specific to a dump --
--- the button mapping and where the names came from.
-function M.board_dump()
-    local rec = current_record()
-    local state = read_state(rec)
-    if state == nil then return nil end
 
-    local lines = board_report(state)
-    table.insert(lines, 2, string.format(
-        "buttons via %s: %s   (connectors=%d connected=%d unaddressed=%d)",
-        tostring(state.button_route), describe_buttons(state.buttons),
-        #state.connectors, state.connected_count, state.unaddressed or 0))
-    table.insert(lines, 3, string.format(
-        "goal cells marked in the grid: %d;  the engine's _Goals set holds: %s",
-        #(state.goals or {}), tostring(state.goals_field)))
-    return table.concat(lines, "\n")
-end
-
-
-function M.debug_status()
-    local rec, active = current_record()
-    local track = rec and rec.press or nil
-    return {
-        kind      = M.kind,
-        puzzle_id = rec and rec.id or nil,
-        type_name = active and active.type_name or nil,
-        state     = read_state(rec),
-        plan      = P.status(rec),
-        input     = input.status(),
-        buttons   = rec and rec.buttons or nil,
-        button_route = rec and rec.button_route or nil,
-        button_note  = _b2i.note,
-        pressing  = track ~= nil and {
-            kind    = track.kind,
-            pending = track.pending,
-            done    = track.done,
-            lost    = track.lost,
-            retries = track.retries,
-        } or nil,
-    }
-end
 
 
 return M

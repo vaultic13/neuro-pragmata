@@ -1,6 +1,6 @@
 """Offline checks for seqbench. No API, no game.
 
-    py -3 selftest.py            everything, including the loopback runs (~40 s)
+    py -3 selftest.py            everything, including the loopback runs and run_eval (~60 s)
     py -3 selftest.py --no-e2e   the pure checks only
 """
 from __future__ import annotations
@@ -495,6 +495,38 @@ def test_grid_sim() -> None:
     check("shortest route avoids R / # / d", grid_sim.shortest_path(q) == ["down", "down"])
     check("best route counts blues", grid_sim.best_route(p) == (1, 5), str(grid_sim.best_route(p)))
 
+    x = _grid(["S X G",
+               ". . ."])
+    r = play(x, ["right", "right"])
+    check("X erase trap: the hack fails", r.outcome == "failed" and r.over and r.message == gt.MSG_FAILED)
+    check("shortest route goes round an X", grid_sim.shortest_path(x) == ["down", "right", "right", "up"])
+    nodes = _grid(["S b P C B G"])
+    check("bomb / purge / chain nodes are walkable",
+          play(nodes, ["right"] * 5).outcome == "solved" and gt.render(gt.parse_state(gt.render(nodes)))
+          == gt.render(nodes))
+
+    g = _grid(["S = G",
+               ". J ."])
+    check("gate =: straight through", play(g, ["right", "right"]).outcome == "solved")
+    r = play(g, ["down", "right", "right"])
+    check("gate J: entered from the left it only turns up", r.outcome == "wall"
+          and r.message == gt.MSG_WALL.format(n=2) and r.after.cursor == (1, 1), r.message)
+    j = _grid(["S . G",
+               ". J ."])
+    check("gate J: the turn is legal", play(j, ["down", "right", "up", "right"]).outcome == "solved")
+    v = _grid(["S | G",
+               ". . ."])
+    r = play(v, ["right"])
+    check("gate |: no entry from the side", r.outcome == "wall" and r.message == gt.MSG_WALL.format(n=0))
+    check("shortest route obeys gates", grid_sim.shortest_path(v) == ["down", "right", "right", "up"],
+          str(grid_sim.shortest_path(v)))
+    t = _grid(["S 7 #",
+               ". . G"])
+    check("gate 7: right in, down out", grid_sim.shortest_path(t) in (["right", "down", "right"],
+                                                                     ["down", "right", "right"]),
+          str(grid_sim.shortest_path(t)))
+    check("retrace off a gate is allowed", play(t, ["right", "left"]).after.cursor == (0, 0))
+
     rated = [(True, 1, 2.0, False, "very good"), (True, 1, 3.5, False, "good"), (True, 2, 1.0, False, "risky"),
              (False, 3, 1.0, False, "fail"), (False, 1, None, True, "timeout"), (True, 1, 1.0, True, "timeout")]
     for solved, forces, t, timed_out, want in rated:
@@ -536,8 +568,9 @@ def test_grid_e2e() -> None:
     try:
         trials, fin = _grid_bench(stub.port, grid_puzzles.CATEGORIES, per_category=2, warmup=True)
         scored = [t for t in trials if not t["warmup"]]
-        check("7 categories x 2 + 5 finale stages + 1 warm-up", len(trials) == 20 and len(scored) == 19,
-              str(len(trials)))
+        n_cats = len(grid_puzzles.CATEGORIES) - 1
+        check(f"{n_cats} categories x 2 + 5 finale stages + 1 warm-up",
+              len(trials) == n_cats * 2 + 6 and len(scored) == n_cats * 2 + 5, str(len(trials)))
         check("correct: every episode solved first try",
               all(t["solved"] and t["forces_used"] == 1 for t in scored),
               str([(t["puzzle"], t["outcome"], t["forces"][-1].get("message")) for t in scored
@@ -549,13 +582,20 @@ def test_grid_e2e() -> None:
         rows = grid_scoring.summarize(trials)
         check("summary: one row per category", sorted(r["category"] for r in rows) == sorted(grid_puzzles.CATEGORIES))
         res = [r for r in stub.peer.results if r["message"] == gt.MSG_SOLVED]
-        check("the peer was told each hack completed", len(res) == 20, str(len(res)))
+        check("the peer was told each hack completed", len(res) == n_cats * 2 + 6, str(len(res)))
 
         stub.peer.mode = "redblock"
         trials, _ = _grid_bench(stub.port, ["blocks"], per_category=3, warmup=False)
-        check("redblock: refused, then solved on the re-force",
+        check("redblock: refused, then solved on the server's retry",
               all(t["refusals"] == 1 and t["solved"] and t["forces_used"] == 2 and t["rating"] == "risky"
                   for t in trials), str([(t["refusals"], t["outcome"], t["forces_used"]) for t in trials]))
+        check("the refusal went back with the board, and no second force was sent",
+              all(not t["forces"][0]["retry"] and t["forces"][1]["retry"]
+                  and "The board is now (this replaces the earlier one):" in t["forces"][0]["message"]
+                  for t in trials))
+        refused = [r for r in stub.peer.results if r["message"].startswith("Plan refused")]
+        check("the peer got each refusal as success: false",
+              len(refused) == 3 and not any(r["success"] for r in refused), str(len(refused)))
         stub.peer._seen_grids.clear()
         trials, _ = _grid_bench(stub.port, ["blocks"], per_category=3, warmup=False, refuse_red=False)
         check("redblock, refusal off: the hack fails", all(t["outcome"] == "failed" and t["forces_used"] == 1
@@ -576,6 +616,37 @@ def test_grid_e2e() -> None:
         stub.stop()
 
 
+def test_run_eval() -> None:
+    print("command line: run_eval.py against the stub peer")
+    import contextlib
+    import io
+    import run_eval
+    stub = StubThread("correct").start()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = run_eval.main(["--url", f"ws://127.0.0.1:{stub.port}", "--gap", "0", "--no-warmup",
+                                      "--out-root", tmp, "grid", "--per", "1",
+                                      "--categories", "plain,gates", "--min-solved", "100"])
+            text = out.getvalue()
+            check("grid: exit 0, a summary row per category", code == 0 and "g-gates-1" in text
+                  and text.count("100.0") >= 4, text[-400:])
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = run_eval.main(["--url", f"ws://127.0.0.1:{stub.port}", "--gap", "0", "--no-warmup",
+                                      "--out-root", tmp, "--quiet", "sequence", "--groups", "1"])
+            check("sequence: exit 0", code == 0)
+            check("run folders written", len(list(Path(tmp).iterdir())) == 2)
+        stub.peer.mode = "wrong"
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            code = run_eval.main(["--url", f"ws://127.0.0.1:{stub.port}", "--gap", "0", "--no-warmup",
+                                  "--out-root", tmp, "--quiet", "sequence", "--groups", "5",
+                                  "--min-pass", "100"])
+        check("a missed threshold exits 2", code == 2, str(code))
+    finally:
+        stub.stop()
+
+
 def main() -> int:
     test_renders()
     test_mod_port_unchanged()
@@ -592,6 +663,7 @@ def main() -> int:
     if "--no-e2e" not in sys.argv:
         test_e2e()
         test_grid_e2e()
+        test_run_eval()
     print()
     if _failures:
         print(f"{len(_failures)} FAILED: " + ", ".join(_failures))

@@ -2,10 +2,7 @@
 --
 -- The read-only state action, pragmata_status: describe_status joins
 -- describe_health / _location / _weapons / _mods / _inventory. Each
--- describe_*() returns (ok, text) exactly like an action handler; the parts
--- stay separate functions for the State Debug panel. describe_upgrades no
--- longer backs an action (the Shelter's printer and updater menus show the
--- same) and is kept for that panel only.
+-- describe_*() returns (ok, text) exactly like an action handler.
 --
 -- This module only formats: every engine read happens in bindings/, which
 -- hand back plain tables. A binding that failed to load, or a read that came
@@ -239,43 +236,6 @@ end
 -- Upgrades
 -- ---------------------------------------------------------------------------
 
-function M.describe_upgrades()
-    if M.perks == nil then return false, "upgrades binding not loaded" end
-    local u = read(M.perks, "read_upgrades")
-    if u == nil then return true, "Upgrades " .. NOT_IN_GAME .. "." end
-
-    local parts = {}
-    local fw_hack, fw_other = {}, {}
-    for _, e in ipairs(u.firmware) do
-        if e.hacking then fw_hack[#fw_hack + 1] = perk_line(e)
-        else fw_other[#fw_other + 1] = perk_line(e) end
-    end
-    if #fw_other + #fw_hack == 0 then
-        parts[#parts + 1] = "Firmware upgrades: none yet."
-    else
-        if #fw_other > 0 then parts[#parts + 1] = "Firmware upgrades (suit / weapon): " .. join(fw_other, "; ") .. "." end
-        if #fw_hack > 0 then parts[#parts + 1] = "Firmware upgrades (hacking): " .. join(fw_hack, "; ") .. "." end
-    end
-
-    -- Unit Printer: weapon levels and ability levels.
-    local printer = {}
-    local l = read(M.loadout, "read")
-    if l ~= nil then
-        for _, w in ipairs(l.weapons) do
-            local lv = level_text(w.level, w.level_max)
-            if lv then printer[#printer + 1] = w.name .. " " .. lv end
-        end
-    end
-    for _, e in ipairs(u.abilities) do
-        local lv = level_text(e.level, e.level_max)
-        if lv then printer[#printer + 1] = e.name .. " " .. lv end
-    end
-    if #printer > 0 then
-        parts[#parts + 1] = "Unit Printer levels: " .. join(printer, "; ") .. "."
-    end
-    return true, join(parts, " ")
-end
-
 -- ---------------------------------------------------------------------------
 -- Inventory
 -- ---------------------------------------------------------------------------
@@ -390,9 +350,8 @@ end
 -- ---------------------------------------------------------------------------
 -- Status (pragmata_status)
 -- ---------------------------------------------------------------------------
--- Health, location, weapons, equipped mods and inventory in one reply. They
--- used to be five actions the peer had to call one after another to answer
--- "how are we doing" (BEST_PRACTICES.md: avoid near-identical actions). One section that
+-- Health, location, weapons, equipped mods and inventory in one reply, so
+-- "how are we doing" is one call rather than five near-identical actions. One section that
 -- cannot be read says so on its own line and the others still answer; the
 -- reply fails only when none of them can be read at all.
 

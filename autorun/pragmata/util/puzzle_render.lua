@@ -18,36 +18,8 @@ local M = {}
 -- --------------------------------------------------------------------
 -- Shared bits
 -- --------------------------------------------------------------------
-local function set_of(list)
-    local s = {}
-    for _, v in ipairs(list or {}) do s[v] = true end
-    return s
-end
-
 local function join(list, sep)
     return table.concat(list or {}, sep or ", ")
-end
-
--- A pipe piece drawn from which sides it opens onto. Two openings is the normal
--- case (the engine builds straight and elbow pieces); anything else falls back
--- to a neutral marker rather than a misleading glyph.
-local function pipe_glyph(openings)
-    local o = set_of(openings)
-    local n = 0
-    for _ in pairs(o) do n = n + 1 end
-    if n == 0 then return "." end
-    if n >= 3 then return "+" end
-    if n == 1 then
-        if o.up then return "^" elseif o.down then return "v"
-        elseif o.left then return "<" else return ">" end
-    end
-    if o.up and o.down then return "|" end
-    if o.left and o.right then return "-" end
-    if o.up and o.right then return "L" end
-    if o.up and o.left then return "J" end
-    if o.down and o.right then return "r" end
-    if o.down and o.left then return "7" end
-    return "?"
 end
 
 
@@ -70,17 +42,23 @@ end
 -- boards are transposed, grid +x runs down the screen -- so they appear only to
 -- tell the press counts apart. The peer is asked for a count, which it can act
 -- on without knowing which way the grid runs.
-function M.circuit(state)
+-- opts.board_only: what the board looks like, without the instructions (how a
+-- connector closes, how to answer). Used when the board is only shown to the
+-- peer as context (hacking_auto_force = false); the rules are in the action.
+function M.circuit(state, opts)
     if state == nil then return "A circuit hack is active." end
+    local board_only = opts ~= nil and opts.board_only == true
 
     local lines = {}
     local total = #state.connectors
-    lines[#lines + 1] = string.format(
-        "Circuit hack: %d circuit%s to close, %d of %d already connected. Each one "
-        .. "is a line running in from the edge of the board through one connector "
-        .. "to the centre, and the connector closes it when it JOINS its line to the "
-        .. "centre -- both ends lined up. Pointing at the centre is not enough.",
+    local head = string.format("Circuit hack: %d circuit%s to close, %d of %d already connected.",
         total, total == 1 and "" or "s", state.connected_count, total)
+    if not board_only then
+        head = head .. " Each one is a line running in from the edge of the board through "
+            .. "one connector to the centre, and the connector closes it when it JOINS its "
+            .. "line to the centre -- both ends lined up. Pointing at the centre is not enough."
+    end
+    lines[#lines + 1] = head
 
     -- What the counts below are worth. The mod works them out from a model of
     -- the wiring, and that model is only as good as the last time the game
@@ -111,9 +89,13 @@ function M.circuit(state)
     end
 
     if state.timed and state.remaining_time then
-        lines[#lines + 1] = string.format(
-            "This one is on a timer: %.1f seconds left. Answer with your best "
-            .. "rotation now rather than deliberating.", state.remaining_time)
+        if board_only then
+            lines[#lines + 1] = string.format("On a timer: %.1f seconds left.", state.remaining_time)
+        else
+            lines[#lines + 1] = string.format(
+                "This one is on a timer: %.1f seconds left. Answer with your best "
+                .. "rotation now rather than deliberating.", state.remaining_time)
+        end
     end
 
     lines[#lines + 1] = ""
@@ -166,13 +148,13 @@ function M.circuit(state)
             end
         end
     end
+    if board_only then return table.concat(lines, "\n") end
     lines[#lines + 1] = ""
 
-    -- Deliberately not "clockwise" any more. Which way a press turns is a fact
-    -- about this board's frame, and the 2026-09-08 capture has the mod noticing
-    -- a board that turned the other way and telling the peer clockwise anyway.
-    -- The previews above are computed from the measured direction, so they are
-    -- true either way and the peer never has to know which it is.
+    -- Deliberately no "clockwise": which way a press turns is a fact about
+    -- this board's frame, and some boards turn the other way. The previews
+    -- above are computed from the measured direction, so they are true either
+    -- way and the peer never has to know which it is.
     lines[#lines + 1] =
         "Answer with `rotations`: name a connector by its side and give the PRESS "
         .. "count from its line above. Each press is a quarter turn and four presses "
@@ -191,7 +173,7 @@ end
 -- --------------------------------------------------------------------
 -- Five ways to show the puzzle, chosen as a GROUP by
 -- mod_config.puzzle_sequence_group. Each one passed seqbench
--- (reframework/seqbench/, 2026-09-16) with a peer answering without a thinking
+-- (reframework/seqbench/) with a peer answering without a thinking
 -- pass, and the texts below are line-for-line ports of its
 -- sequence_texts.py -- change one side and the other stops describing what was
 -- tested. The numbers and ids match the bench's:
@@ -261,9 +243,8 @@ function M.find_sequence_group(value)
     return nil
 end
 
--- The active group. Read on every call, not once at load, so a switch from the
--- debug panel takes effect on the next render. An unknown setting falls back to
--- the default and says so once.
+-- The configured group. An unknown setting falls back to the default and
+-- says so once.
 local _bad_group_said = nil
 function M.sequence_group()
     local g = M.find_sequence_group(config.puzzle_sequence_group)
@@ -493,8 +474,13 @@ end
 
 local UNREADABLE = "A sequence hack is active, but its directions could not be read."
 
-function M.buttons(state)
+-- opts.board_only: the drawing (or list) without the instructions; the reading
+-- steps, the worked example and the compass key only with opts.legend. Used
+-- when the board is only shown to the peer as context.
+function M.buttons(state, opts)
     if state == nil then return "A sequence hack is active." end
+    local board_only = opts ~= nil and opts.board_only == true
+    local legend = not board_only or opts.legend == true
 
     local lines = {}
     local n = #state.sequence
@@ -506,11 +492,13 @@ function M.buttons(state)
         lines[#lines + 1] = string.format("Sequence hack: %d direction%s must be entered in order, %s.",
             n, plural(n), M.buttons_arms() and "one line per arm" or "drawn as a cross")
         lines[#lines + 1] = ""
-        lines[#lines + 1] = "How to read the drawing:"
-        for _, l in ipairs(hint_steps(form)) do lines[#lines + 1] = l end
-        lines[#lines + 1] = ""
-        for _, l in ipairs(example_lines(form)) do lines[#lines + 1] = l end
-        lines[#lines + 1] = ""
+        if legend then
+            lines[#lines + 1] = "How to read the drawing:"
+            for _, l in ipairs(hint_steps(form)) do lines[#lines + 1] = l end
+            lines[#lines + 1] = ""
+            for _, l in ipairs(example_lines(form)) do lines[#lines + 1] = l end
+            lines[#lines + 1] = ""
+        end
         lines[#lines + 1] = string.format("This puzzle (%d press%s):", n, plural(n, "es"))
         for _, l in ipairs(drawn) do lines[#lines + 1] = l end
         lines[#lines + 1] = ""
@@ -535,10 +523,21 @@ function M.buttons(state)
         else
             lines[#lines + 1] = "On screen, in order: " .. join(entries, "  ")
         end
-        if M.buttons_compass() then
+        if M.buttons_compass() and legend then
             lines[#lines + 1] = "Directions are compass points: north = up, south = down, "
-                .. "west = left, east = right. Answer with up/down/left/right."
+                .. "west = left, east = right."
+                .. (board_only and "" or " Answer with up/down/left/right.")
         end
+    end
+
+    if board_only then
+        if (state.step or 0) > 0 then
+            lines[#lines + 1] = string.format("%d of %d already entered.", state.step, state.total)
+        end
+        if state.timed then lines[#lines + 1] = "It has a timing dial." end
+        -- Drop the trailing blank line the drawing leaves.
+        if lines[#lines] == "" then lines[#lines] = nil end
+        return table.concat(lines, "\n")
     end
 
     if (state.step or 0) > 0 then
@@ -689,116 +688,6 @@ function M.buttons_schema()
         },
         __keyorder = { "type", "required", "properties" },
     }
-end
-
-
--- --------------------------------------------------------------------
--- SlidePipe: slide tiles to complete a pipe run
--- --------------------------------------------------------------------
-function M.slide(state)
-    if state == nil then return "A pipe hack is active." end
-
-    local lines = {}
-    lines[#lines + 1] = string.format(
-        "Pipe hack (%d x %d sliding tiles). Slide tiles into the empty space "
-        .. "until an unbroken pipe runs from S to the goal O.",
-        state.width, state.height)
-
-    local by_pos = {}
-    for _, cell in ipairs(state.cells or {}) do
-        by_pos[cell.y * 1000 + cell.x] = cell
-    end
-    lines[#lines + 1] = ""
-    for y = 0, state.height - 1 do
-        local row = {}
-        for x = 0, state.width - 1 do
-            local cell = by_pos[y * 1000 + x]
-            local glyph
-            if state.empty and state.empty.x == x and state.empty.y == y then
-                glyph = " "
-            elseif cell == nil then
-                glyph = "."
-            elseif cell.is_goal then
-                glyph = "O"
-            elseif cell.is_start then
-                glyph = "S"
-            else
-                glyph = pipe_glyph(cell.openings)
-            end
-            row[#row + 1] = glyph
-        end
-        lines[#lines + 1] = " " .. table.concat(row, " ")
-    end
-    lines[#lines + 1] = ""
-
-    if state.empty then
-        lines[#lines + 1] = string.format(
-            "The empty space is at (%d, %d). (0,0) is TOP-LEFT; x runs left to "
-            .. "right, y runs top to bottom.", state.empty.x, state.empty.y)
-    end
-    lines[#lines + 1] =
-        "Each move names the direction the EMPTY SPACE travels -- 'up' pulls the "
-        .. "tile above it down into the gap. A move that would push the empty "
-        .. "space off the board does nothing, so keep it inside the grid."
-    lines[#lines + 1] =
-        "Glyphs: | - L J r 7 are pipe tiles drawn by which sides they open onto, "
-        .. "S the source, O the goal, a blank the empty space."
-
-    return table.concat(lines, "\n")
-end
-
-
--- --------------------------------------------------------------------
--- ThroughThePath: rotate rows to open a route
--- --------------------------------------------------------------------
-function M.path(state)
-    if state == nil then return "A path hack is active." end
-
-    local lines = {}
-    lines[#lines + 1] = string.format(
-        "Path hack (%d x %d). Rotate whole rows until an unbroken path runs "
-        .. "across the board.", state.width, state.height)
-
-    local by_pos = {}
-    for _, cell in ipairs(state.cells or {}) do
-        by_pos[cell.y * 1000 + cell.x] = cell
-    end
-    lines[#lines + 1] = ""
-    for y = 0, state.height - 1 do
-        local row = {}
-        for x = 0, state.width - 1 do
-            local cell = by_pos[y * 1000 + x]
-            row[#row + 1] = cell and pipe_glyph(cell.openings) or "."
-        end
-        local mark = ""
-        for _, r in ipairs(state.rotatable_rows or {}) do
-            if r == y then mark = "  <- rotatable" end
-        end
-        lines[#lines + 1] = string.format(" row %d  %s%s", y, table.concat(row, " "), mark)
-    end
-    lines[#lines + 1] = ""
-
-    if #(state.rotatable_rows or {}) > 0 then
-        local names = {}
-        for _, r in ipairs(state.rotatable_rows) do names[#names + 1] = tostring(r) end
-        lines[#lines + 1] = "Rotatable rows: " .. join(names, ", ") .. "."
-    end
-    lines[#lines + 1] =
-        "Answer with `rotations`, each naming a row and how many quarter turns to "
-        .. "give it (1, 2 or 3). Rows are numbered from 0 at the top."
-    lines[#lines + 1] =
-        "Glyphs: | - L J r 7 are path pieces drawn by which sides they open onto, "
-        .. ". an empty cell."
-
-    return table.concat(lines, "\n")
-end
-
-
--- Fallback for a family that resolved but has no renderer, and for the case
--- where a read failed mid-hack. Never leaves the peer with an empty state field.
-function M.unknown(kind_label)
-    return "A " .. tostring(kind_label or "hack") .. " is active, but its board "
-        .. "could not be read this frame."
 end
 
 

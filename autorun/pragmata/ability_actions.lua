@@ -86,7 +86,7 @@ function M.scan(ctx)
         local ok, message = scan.scan_input()
         serial = scan.last_request_serial()
         started_at = _frame
-        -- Only with a deferred result to carry them; F6 (no ctx) narrates.
+        -- Only with a deferred result to carry them.
         if ok and ctx ~= nil then M.peer_scan_active = true end
         return ok, message
     end, function()
@@ -199,12 +199,6 @@ function M.purify(ctx)
         return false, "the scene's filament-cleaning prompt was already answered; the scene has moved on"
     end
     return false, "no scene is waiting for the filament-cleaning button"
-end
-
-function M.status()
-    local out = {}
-    for name, value in pairs(_pending) do out[name] = value.deadline - _frame end
-    return out
 end
 
 re.on_frame(function()

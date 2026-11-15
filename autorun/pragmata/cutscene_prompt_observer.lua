@@ -120,10 +120,10 @@ local function followup_seconds(sector, sector_hash)
     return nil
 end
 
--- The first boss (Solar Power Plant, 2026-10-11): pressing its scene prompt
+-- The first boss (Solar Power Plant): pressing its scene prompt
 -- ends the cutscene, but the boss still has to be finished with a normal
 -- Overdrive (the gauge is left full for it). Wait for the scene to finish,
--- then `secs`, then fire Overdrive through the same call as F8, retrying while
+-- then `secs`, then fire Overdrive through the same call as the peer's action, retrying while
 -- the game is not ready yet.
 local function tick_followup()
     local f = _followup
@@ -283,17 +283,6 @@ end
 function M.action_for(button)
     local b = BUTTONS[button]
     return b and b.action or nil
-end
-
-function M.debug_status()
-    return {
-        offered = _offered,
-        inflight = _inflight,
-        followup = _followup and _followup.phase or nil,
-        late_reply_window = _late_reply and (_late_reply.until_frame - _frame) or nil,
-        events = _events,
-        frame = _frame,
-    }
 end
 
 return M

@@ -377,40 +377,4 @@ function M.is_auto_hack_unlocked()
     return false
 end
 
--- Read-only diagnostic snapshot used by the in-game ability tracer. It does
--- not claim that auto-hack can be started; it only exposes the state that the
--- current conservative binding can actually observe.
-function M.debug_status()
-    ensure_init()
-    local mgr = get_hacking_singleton()
-    local workunit, driver = find_auto_hack_workunit()
-    local target = resolve_target(nil)
-    local gauge = nil
-    if driver ~= nil and _state.m_get_hacking_gauge ~= nil then
-        pcall(function() gauge = _state.m_get_hacking_gauge:call(driver) end)
-    end
-    local empty, remaining = nil, nil
-    if gauge ~= nil and _state.m_get_empty ~= nil then
-        pcall(function() empty = _state.m_get_empty:call(gauge) end)
-    end
-    if gauge ~= nil and _state.m_get_remaining_rate ~= nil then
-        pcall(function() remaining = _state.m_get_remaining_rate:call(gauge) end)
-    end
-    local can = nil
-    if workunit ~= nil then pcall(function() can = workunit:get_field("_CanAutoHack") end) end
-    return {
-        manager_present = mgr ~= nil,
-        driver_present = driver ~= nil,
-        workunit_present = workunit ~= nil,
-        target_present = target ~= nil,
-        jamming = is_jamming(),
-        auto_hacking = is_already_auto_hacking(workunit),
-        can_auto_hack = can,
-        gauge_empty = empty,
-        gauge_remaining_rate = remaining,
-        start_method_ok = _state.m_start_auto_hack ~= nil,
-        drivers = player_drivers.debug_status(),
-    }
-end
-
 return M

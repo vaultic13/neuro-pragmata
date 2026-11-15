@@ -1,12 +1,12 @@
 -- Generic hacking-puzzle discovery, shared across every puzzle family.
 --
--- The game has five hacking minigames and they all derive from one base type.
--- Only the enemy one (the cursor-routing grid, bindings/puzzle_snake.lua) was
+-- The mod plays three hacking minigames (the enemy grid, the circuit, the
+-- sequence) and they all derive from one base type. Only the enemy one (the cursor-routing grid, bindings/puzzle_snake.lua) was
 -- ever bound, which is why environmental hacks -- switches, doors, elevators --
 -- were completely invisible to the mod: they start, run and finish without a
 -- single observer noticing.
 --
--- This module is the part that is the SAME for all five:
+-- This module is the part that is the SAME for all of them:
 --
 --   * resolving which puzzle the player is currently aimed at, without hooks:
 --       HackingManager.LastHackingTarget  -> a PuzzleUnit (the "socket")
@@ -47,8 +47,6 @@ local FAMILY_BY_TYPE = {
     ["app.PuzzleSnake"]           = "snake",
     ["app.PuzzleCircuit"]         = "circuit",
     ["app.PuzzleButtonTiming"]    = "buttons",
-    ["app.PuzzleSlidePipe"]       = "slide",
-    ["app.PuzzleThroughThePath"]  = "path",
 }
 
 -- Module path per family. All of these are loaded at boot by M.preload() and
@@ -58,19 +56,15 @@ local MODULE_BY_KIND = {
     snake   = "pragmata.bindings.puzzle_snake",
     circuit = "pragmata.bindings.puzzle_circuit",
     buttons = "pragmata.bindings.puzzle_buttons",
-    slide   = "pragmata.bindings.puzzle_slide",
-    path    = "pragmata.bindings.puzzle_path",
 }
 
-M.KINDS = { "snake", "circuit", "buttons", "slide", "path" }
+M.KINDS = { "snake", "circuit", "buttons" }
 
 -- Human-readable, spoiler-free names for the peer-facing context lines.
 local KIND_LABEL = {
     snake   = "hacking grid",
     circuit = "circuit hack",
     buttons = "sequence hack",
-    slide   = "pipe hack",
-    path    = "path hack",
 }
 
 function M.kind_label(kind)
@@ -326,47 +320,6 @@ function M.base_state(inst)
 end
 
 
--- The input state the puzzle families keep for themselves, for the debug panel.
---
--- Every family that reads directions carries the same four one-frame trigger
--- flags and the same four previous-frame flags, at the same names, so one reader
--- covers all of them. They matter because on mouse + keyboard the puzzle writes
--- these from the movement vector and then reads them back WITHOUT asking the
--- input layer anything -- so a direction flickering true here while the probe
--- reports "never asked about" is the whole diagnosis in one readout.
---
--- Which branch is actually in force is bindings/puzzle_mouse_mode.lua's to
--- answer, deliberately: it owns the hook on that call, and only it can ask
--- without its own question polluting the counter that says whether the ENGINE
--- reached the hook.
-function M.input_debug_state(inst)
-    if not ensure_init() or inst == nil then return nil end
-    if not M.is_alive(inst) then return nil end
-
-    -- nil rather than false for an absent field: a family that does not declare
-    -- these must read as "no such thing", not as "not pressed".
-    local function flag(name)
-        local v = safe(function() return inst:get_field(name) end)
-        if v == nil then return nil end
-        return v == true
-    end
-
-    return {
-        trg = {
-            up    = flag("_TrgUp"),
-            down  = flag("_TrgDown"),
-            left  = flag("_TrgLeft"),
-            right = flag("_TrgRight"),
-        },
-        prev = {
-            up    = flag("_PrevUp"),
-            down  = flag("_PrevDown"),
-            left  = flag("_PrevLeft"),
-            right = flag("_PrevRight"),
-        },
-    }
-end
-
 
 -- The socket the puzzle hangs off, and what kind of thing it is attached to.
 function M.unit_info(unit)
@@ -425,7 +378,7 @@ end
 -- Active puzzle
 -- --------------------------------------------------------------------
 -- Resolved once per frame and memoised, because every consumer (observer,
--- overlay, debug panel, each family's tick) asks for it.
+-- overlay, each family's tick) asks for it.
 local _active_cache = { frame = -1, value = nil }
 local _frame = 0
 
@@ -512,13 +465,9 @@ end
 --
 -- REFramework's module search path contains reframework/autorun/ ONLY while it
 -- is loading scripts at startup. A require first reached at runtime fails with
--- "module not found" against a path list that does not include this directory.
--- These bindings used to load on first sighting of a puzzle, which meant they
--- never loaded: the 2026-09-06 capture has circuit and buttons failing exactly
--- that way, minutes after boot, with both files sitting on disk. Everything
--- else in the mod happened to be reached at boot, which is why nothing had hit
--- this before -- and why the observer's runtime require of player_status looks
--- like a counter-example when it is only a package.loaded cache hit.
+-- "module not found" against a path list that does not include this directory,
+-- so a binding loaded on first sighting of a puzzle would never load. A runtime
+-- require that seems to work is only a package.loaded cache hit.
 --
 -- Snake is deliberately not listed: pragmata_main requires it directly, so it
 -- is already loaded before anything here runs.
@@ -629,56 +578,7 @@ end
 -- --------------------------------------------------------------------
 -- Diagnostics
 -- --------------------------------------------------------------------
-function M.debug_status()
-    ensure_init()
-    local a = M.active_raw()
-    local loaded = {}
-    for kind in pairs(_loaded) do loaded[#loaded + 1] = kind end
-    return {
-        init         = _init_report,
-        active_kind  = a and a.kind or nil,
-        active_type  = a and a.type_name or nil,
-        is_gimmick   = a and a.unit_info and a.unit_info.is_gimmick or false,
-        is_enemy     = a and a.unit_info and a.unit_info.is_enemy or false,
-        base         = a and M.base_state(a.inst) or nil,
-        loaded_kinds = loaded,
-        jamming      = M.is_jamming(),
-        paused       = M.is_game_paused(),
-    }
-end
 
-
--- Enumerate every live puzzle the engine knows about, regardless of aim. Used by
--- the debug panel to confirm kind resolution while walking around, and by the
--- observer's cross-check that a completion wasn't missed.
-function M.enumerate_live()
-    if not ensure_init() then return {} end
-    local mgr = get_hacking_manager()
-    if mgr == nil then return {} end
-
-    local drivers = safe(function() return mgr:get_field("_PuzzleDriverList") end)
-    if drivers == nil then return {} end
-
-    local count = safe(function() return drivers:get_field("_size") end)
-    local items = safe(function() return drivers:get_field("_items") end)
-    if count == nil or items == nil then return {} end
-
-    local out = {}
-    for i = 0, count - 1 do
-        local driver = safe(function() return items[i] end)
-        if driver ~= nil and _sdk.m_driver_current ~= nil then
-            local puzzle = safe(function() return _sdk.m_driver_current:call(driver) end)
-            if puzzle ~= nil and M.is_alive(puzzle) then
-                out[#out + 1] = {
-                    kind      = M.kind_of(puzzle),
-                    type_name = M.type_name(puzzle),
-                    playing   = (M.base_state(puzzle) or {}).playing,
-                }
-            end
-        end
-    end
-    return out
-end
 
 
 return M

@@ -1,175 +1,152 @@
 # Pragmata Neuro-SDK Mod
 
 A REFramework Lua mod for [Pragmata](https://www.capcom-games.com/pragmata/)
-that exposes Diana's abilities and the game's world state to **Neuro**, an AI
-peer, over a standard Neuro-SDK WebSocket connection. Neuro can perform Diana's
-actions (scan, auto-hack, overdrive), route the hacking minigame, and receive
-context updates (dialogue, Overdrive readiness, scene transitions, combat state).
+that lets **Neuro**, an AI peer, play alongside you as Diana over a standard
+Neuro-SDK WebSocket connection. Neuro can use Diana's abilities (Scan,
+Auto-Hack, Overdrive), solve the hacking minigames, read the game's menus and
+collections, and receives context as you play: dialogue, combat, area changes,
+health, new entries.
 
-> **Status: working, actively developed.** All three of Diana's abilities are
-> now runtime-confirmed in-game, as are the hacking integration and dialogue
-> capture. Each ability has exactly one dispatch path, and each reports success
-> only after the game is observed to have started it. Coverage still grows as I
-> play through the game.
+> **Status: working, actively developed.** Diana's three abilities, the scene
+> button prompts, the enemy hacking grid, the circuit and sequence hacks,
+> dialogue capture and the Shelter menus all work in game. Each ability reports
+> success only after the game is seen to start it.
+
+> [!WARNING]
+> **Tested only on Windows with mouse and keyboard.** The mod has not been
+> tested on **Linux** (Proton / Steam Deck) or with a **controller**. The mod
+> presses buttons for Neuro through the game's own input layer, and the game
+> reads input differently depending on the input device, so on a controller
+> or under Proton Neuro's inputs (scans, hacking presses, scene prompts) may
+> be missed, doubled, or clash with your own. Reports are welcome.
+
+## Contents
+
+- [What Neuro can do](#what-neuro-can-do)
+- [Context sent to Neuro](#context-sent-to-neuro)
+- [Install](#install)
+- [Running](#running)
+- [The mod menu](#the-mod-menu)
+- [Configuration](#configuration)
+- [How the hacking works](#how-the-hacking-works)
+- [Troubleshooting](#troubleshooting)
+- [Known limitations](#known-limitations)
+
+Full schemas, every reply and refusal, the grid format and the whole context
+surface are in [ACTIONS.md](ACTIONS.md). Advice for integrations is in
+[BEST_PRACTICES.md](BEST_PRACTICES.md).
 
 ## What Neuro can do
 
 | Action | Arguments | Effect |
 |---|---|---|
-| `pragmata_ping` | none | Sanity check; returns `pong`. Only with `mod_config.debug_actions`. |
-| `pragmata_scan` | none | Diana scans and reports what she found, with distances. Within 7 s of the last scan it answers from that scan instead and says so. |
-| `pragmata_status` | `category` (optional) | Health, location, weapons, mods, hacking mods and inventory in one reply, or just one of them. Read-only. |
-| `pragmata_menu_list` | `menu` | Read a Shelter menu or catalog: the Firmware Updater, Unit Printer, train mod menu, Stamp Club or tram sector selection (while open), the Data Library, Bot Database, Training Simulations or Earth Memories (in the Shelter), or the Archive (anywhere). Always registered; says why when a menu cannot be read. Read-only. |
-| `pragmata_menu_info` | `menu`, `names` | Detail for up to 8 entries of one of those. Read-only. |
+| `pragmata_scan` | none | Diana scans and reports what she found, with distances. Within 7 s of the last scan it answers from that scan and says so. |
 | `pragmata_enemy_auto_hack` | none | Auto-hacks the locked-on target (needs the Auto-Hack upgrade). |
-| `pragmata_overdrive` | none | Fires Overdrive (needs 100 gauge points). |
-| `pragmata_enemy_hack_plan` | `moves` | Plans a path through the active hacking grid. Auto-forced on grid-start. |
-| `pragmata_enviro_hack_rotate` | `rotations` | Solves a circuit hack — turn pieces until each connects to the centre. Auto-forced. |
-| `pragmata_enviro_hack_sequence` | `buttons` or `order` | Solves a sequence hack — each lettered button read off a picture of the puzzle, or the directions from a list, depending on the sequence group. Auto-forced. |
-| `pragmata_enviro_hack_slide` | `moves` | Solves a pipe hack — slide tiles to complete the run. Auto-forced. Off by default. |
-| `pragmata_enviro_hack_path` | `rotations` | Solves a path hack — turn columns to open a route. Auto-forced. Off by default. |
+| `pragmata_overdrive` | none | Fires Overdrive (costs 100 gauge points). During a scene waiting on the Overdrive prompt, presses it instead. |
+| `pragmata_purify` | none | Presses a scene's filament-cleaning prompt. Offered only while one is up. |
+| `pragmata_status` | `category` (optional) | Health, location, weapons, mods, hacking mods and inventory, or one of them. Read-only. |
+| `pragmata_menu_list` | none | Reads the Shelter menu open on screen (Firmware Updater, Unit Printer, train mod menu, Stamp Club, tram sector selection). Read-only. |
+| `pragmata_menu_info` | `names` | Detail for up to 8 entries of the open menu. Read-only. |
+| `pragmata_archive_list` | `catalog` (optional) | The Archive (the default), or a Shelter catalog: Data Library, Bot Database, Training Simulations, Earth Memories. Read-only. |
+| `pragmata_archive_info` | `catalog` (optional), `names` | Full text or details of up to 8 entries. Read-only. |
+| `pragmata_enemy_hack_plan` | `moves` | Routes the cursor through an enemy's hacking grid. |
+| `pragmata_enviro_hack_rotate` | `rotations` | Solves a circuit hack. |
+| `pragmata_enviro_hack_sequence` | `buttons` or `order` | Solves a sequence hack (the shape depends on `puzzle_sequence_group`). |
 
-The last five are the hacking minigames. **Only one is ever offered at a time** —
-the force names exactly the action matching the puzzle on screen, so Neuro never
-has to work out which kind it is looking at.
+- **The hacking actions are forced.** When a hack starts, the mod asks Neuro
+  with an `actions/force` naming the one action that fits the puzzle on
+  screen, so she never has to work out which kind it is.
+- **Success means the game acted.** The abilities and the hacks answer when the
+  game is seen to act (within a few seconds), not when asked. A precondition
+  failure comes back at once with its reason.
 
-**Diana's three abilities take no arguments.** There is nothing to choose: Scan
-is a single input command, Overdrive is a single driver call, and the engine's
-Auto-Hack entry point has no target parameter, so the game's lock-on decides the
-target. `pragmata_enemy_hack_plan` is the only action with arguments, because it is a
-reply to a grid the mod sent.
+  ```
+  pragmata_scan             -> true   "Scan done. Diana found: 2x Upgrade Components (34 / 67 m)."
+  pragmata_overdrive        -> true   "the game started Overdrive (canDeathblow cleared)"
+  pragmata_enemy_auto_hack  -> false  "no valid hack target (nothing is locked on)"
+  ```
 
-**Success means the game acted.** All three abilities use deferred results — the
-mod answers when it sees the engine start the ability (within 2–3 seconds), not
-when it asks. A precondition failure comes back immediately with the specific
-reason; a call the game silently ignored comes back as a failure at the end of
-the window.
+### When actions are offered
 
-```
-pragmata_scan       -> true   "scan started (request-specific progression observed)"
-pragmata_overdrive  -> true   "the game started Overdrive (canDeathblow cleared)"
-pragmata_enemy_auto_hack  -> false  "no valid hack target (nothing is locked on)"
-```
+Neuro is told only about actions that make sense right now:
 
-### Actions come and go
+- Scan, Auto-Hack and Overdrive are hidden during the opening (before Diana has
+  them) and in the Shelter's sector; the hacking actions are hidden in the
+  Shelter too, unless there is something to hack.
+- `pragmata_menu_list` / `_info` appear in the main Shelter (once you are past
+  the opening tutorial) and while one of their menus is open. Neuro is told when
+  a menu opens or closes.
+- `pragmata_purify` appears only while a scene waits for the filament-cleaning
+  button.
+- The Archive pair is always there; the Shelter catalogs answer only in the
+  main Shelter.
 
-Neuro is only told about actions that make sense right now:
+When a scripted scene stops on the Overdrive button, Neuro is asked to press
+it, and the scene carries on. You can still press it yourself. After the first
+boss's scene (Solar Power Plant) the mod fires the Overdrive that finishes the
+boss by itself.
 
-- When a scripted scene stops on the Overdrive button prompt, Neuro is asked
-  to use `pragmata_overdrive`, which presses the prompt for the player so the
-  scene carries on. A scene that wants the filament-cleaning button gets
-  `pragmata_purify` instead, offered only then. The player can still press
-  either one themselves. After the first boss's scene (Solar Power Plant) the
-  mod fires the normal Overdrive that finishes the boss by itself, 2 s after
-  the cutscene ends.
-- In the Shelter, Scan / Auto-Hack / Overdrive and the hacking actions are
-  withdrawn (`hide_abilities_in_shelter`, `hide_hacking_in_shelter`), unless
-  there is something to hack there (the opening tutorial), and the
-  Data Library, Bot Database, Training Simulations and Earth Memories actions
-  appear.
-- A menu's actions appear while it is open: Firmware Updater, Unit Printer,
-  the train terminal's mod menu and sector selection, and the Cabin's Stamp
-  Club tab.
-- The Archive's actions are always there.
+## Context sent to Neuro
 
-Things not found yet are only counted, never named. Each change is an
-`actions/unregister` plus a full `actions/register`. See
-[ACTIONS.md](ACTIONS.md#action-availability).
+Sent as `context` messages, silent unless noted:
 
-### Context emitted to Neuro
-
-All sent as `context` messages with `silent: true`:
-
-- Subtitle dialogue with speaker and dialogue type —
-  `Dialogue: [Conversation] Diana says "Let's finish this!"`
-- Collectible-document text, when a document is opened (needs
-  `mod_config.archive_gui_path` set — see [Configuration](#configuration))
+- Dialogue with speaker and type: `Dialogue: [Conversation] Diana says "Let's finish this!"`
 - `Overdrive is ready.` · `Auto-Hack upgrade is now available.`
-- `Diana scanned: …` result summaries, for scans the player makes (a scan the
-  peer asks for returns its findings as the action result)
-- `Hacking grid started.` · `Hack succeeded.` · `Hack failed.`
-- `Hugh and Diana entered a new area.` — with the area's name, its map
-  completion % and what is left to collect there, while the area summary is on
+- `Diana scanned: …` for scans you make (Neuro's own scans come back as her
+  action result)
+- Hack lifecycle: `Hacking grid started.` · `Hack succeeded.` · `Hack failed.`,
+  and a spoken notice when a grid cannot be hacked yet (red blocks still up,
+  enemy too corrupted)
+- `Hugh and Diana entered a new area.`, with the area's name, completion % and
+  what is left to collect there
 - `Hugh is down to 22% HP (88/400) with 1 repair kit left.` on falling past
   50% / 25%
-- `Weapon equipped: <name>.` / `Weapon unequipped: <name>.`
-- `Hacking mod equipped: <name>.` / `Hacking mod unequipped: <name>.`
-- In the Shelter only: `New Data Library entry: …`, `New Bot Database figure: …`,
-  `New Training Simulation available: …`, `New Earth Memory: …`,
-  `Earth Memory placed in the Shelter: …`
+- Weapons and hacking mods equipped or unequipped
+- Menus opening and closing, and new Archive / catalog entries, each with the
+  call that reads them
 - `Checkpoint reached.` · `Combat started.` · `Combat ended.`
-- Optional in-combat ability hints (autonomy nudges, off by default)
+- Optional in-combat ability hints (off by default)
 
-Internal scene and checkpoint **codes** are never sent — only opaque hashes are
-used internally for transition detection. The map area's player-facing name is
-the one name that is.
-
-See [ACTIONS.md](ACTIONS.md) for schemas, every result and refusal message, the
-grid render format, and the full context surface.
-
-## Architecture
-
-```
-+------------------------+         JSONL files        +-------------------+        WebSocket         +----------------+
-|   pragmata_main.lua    | <--- mailbox transport --> |  pragmata_mailbox |  <-- Neuro-SDK JSON -->  |   Neuro        |
-|  (in-game, Lua via     |  reframework/data/         |     (Python       |  (default                |  (AI peer)     |
-|   REFramework)         |  pragmata_mailbox/         |      sidecar)     |   ws://127.0.0.1:8000)   |                |
-+------------------------+                            +-------------------+                          +----------------+
-```
-
-REFramework's Lua sandbox can't open sockets, so a small Python sidecar bridges
-file-mailbox writes to a WebSocket connection. The mod never speaks to the
-network directly, and it reaches the game only through REFramework's reflection
-and hooks — no native offsets, no injected DLL, no virtual input device, and no
-OS-level key synthesis.
+Internal scene and checkpoint codes are never sent. Things not found yet are
+counted, never named.
 
 ## Install
 
 ### Prerequisites
 
-- **Pragmata** (PC).
-- **REFramework** for Pragmata. Drop `dinput8.dll` from a
+- **Pragmata** (PC, Windows; see the warning above for Linux).
+- **REFramework** for Pragmata: put `dinput8.dll` from a
   [REFramework nightly](https://github.com/praydog/REFramework-nightly/releases)
-  into the Pragmata install folder. Confirm it works by pressing **Insert**
-  in-game and seeing the REFramework menu.
-- **Python 3.10+** with `pip` (for the sidecar).
-- **Neuro** (or any Neuro-SDK-compatible peer) listening on a WebSocket
-  endpoint. The mod connects out to whatever URL you configure.
+  in the game folder. Pressing **Insert** in game should open its menu.
+- **Python 3.10+** with `pip`, for the sidecar.
+- **Neuro**, or any Neuro-SDK-compatible peer, listening on a WebSocket.
 
 ### One-time setup
 
-1. **Install the mod files.** Copy the contents of `autorun/` into Pragmata's
-   REFramework autorun directory:
-
-   ```
-   cp -r autorun/* "<Pragmata>/reframework/autorun/"
-   ```
-
-   You should now have `pragmata_main.lua` and a `pragmata/` subdirectory inside
-   `<Pragmata>/reframework/autorun/`.
-
-2. **Create the mailbox directory.** Both the mod and sidecar expect this path:
+1. **Copy the mod.** Copy the contents of `autorun/` into
+   `<Pragmata>/reframework/autorun/`, so that `pragmata_main.lua` and the
+   `pragmata/` folder sit side by side there.
+2. **Create the mailbox folder:**
 
    ```
    mkdir "<Pragmata>/reframework/data/pragmata_mailbox"
    ```
 
-   (The sidecar will create it if missing, but pre-creating avoids a startup
-   race.)
-
-3. **Install sidecar dependencies:**
+   The sidecar creates it if missing, but creating it first avoids a race at
+   startup.
+3. **Install the sidecar's dependencies:**
 
    ```
    pip install -r sidecar/requirements.txt
    ```
 
-### Each run
+## Running
 
-Three things need to be running simultaneously, in any order:
+Start these three, in any order:
 
-1. **Neuro** on a WebSocket port of your choice.
-
-2. **The Pragmata mailbox sidecar:**
+1. **Neuro** on a WebSocket port.
+2. **The sidecar**, which bridges the mod to Neuro (REFramework's Lua cannot
+   open sockets):
 
    ```
    python sidecar/pragmata_mailbox.py \
@@ -177,227 +154,167 @@ Three things need to be running simultaneously, in any order:
        --bridge-url "ws://127.0.0.1:8000"
    ```
 
-   (Replace the URL with Neuro's actual endpoint. You can also set
-   `PRAGMATA_BRIDGE_WS` instead of passing `--bridge-url`.)
+   `PRAGMATA_BRIDGE_WS` can replace `--bridge-url`.
+3. **Pragmata** with REFramework. The mod loads with the game.
 
-3. **Pragmata** with REFramework loaded — the mod loads automatically when the
-   game starts.
+Neuro then receives `startup` and the list of actions available at that moment.
+The sidecar re-sends them on every reconnect.
 
-When all three are running, Neuro should see a `startup` message followed by
-`actions/register` listing the six exposed actions.
+```
+Pragmata + mod  <-- JSONL files -->  sidecar  <-- WebSocket -->  Neuro
+            reframework/data/pragmata_mailbox/
+```
 
-## Testing without the AI
+The mod reaches the game only through REFramework's reflection and hooks: no
+native offsets, no injected DLL, no virtual input device, no OS key presses.
 
-The **Pragmata Abilities Debug** panel (REFramework menu, **Insert**) binds each
-ability to a function key and to a button in the same row:
+## The mod menu
 
-| Key | Button | Ability |
-|---|---|---|
-| **F6** | `Scan (F6)` | Scan |
-| **F7** | `Auto-Hack (F7)` | Auto-Hack |
-| **F8** | `Overdrive (F8)` | Overdrive |
+Press **Insert** in game to open REFramework's menu, then open **Pragmata
+Neuro**. It shows whether the bridge is up, when the last message from Neuro
+arrived, how many actions she holds, and whether a hack is waiting for her
+answer. If something goes wrong, its buttons fix it without restarting the
+game:
 
-Each calls **exactly the same binding function Neuro's action calls**, so a
-working key proves Neuro's route rather than a parallel test path. The outcome
-appears at the top of the panel and in `reframework/log.txt`. The rest of the
-panel is read-only: binding state, gauge readouts, the scan inventory, and what
-the scan filters removed.
+| Button | Use it when |
+|---|---|
+| **Re-send actions** | Neuro does not know the mod's actions (after a reconnect, or the sidecar was started late). Sends the startup message and the full action list again. |
+| **Reset hacking** | A hack is stuck: Neuro's plan stopped, or a hack request never got an answer. Stops every plan and asks about the hack on screen again. |
+| **Rescan archive and catalogs** | The Archive or a Shelter catalog reads wrong, or a new entry was missed. Reads them all again; entries already found are not announced as new. |
+| **Clear bridge files** | The mailbox files grew very large, or old messages confuse the sidecar. Click twice within 5 s to empty both files; then press **Re-send actions**. |
 
-Overdrive drives a cinematic pipeline — test it on a disposable save. With an
-empty gauge, F8 should refuse with a readiness reason; a silent success there
-would mean the readiness check isn't working.
+**Setup values** (inside the menu) reads the current sector's name and hash
+and every held item's internal name, for the "non-English game" settings.
+
+To test without the AI, send any action by hand with `apitest/` (see its
+README). Test Overdrive on a disposable save: with an empty gauge it should
+refuse with a reason.
 
 ## Configuration
 
-User-tunable settings live in
-[`autorun/pragmata/mod_config.lua`](autorun/pragmata/mod_config.lua), documented
-inline and re-read each game launch. Edit it in the **deployed** mod directory
-(`reframework/autorun/pragmata/mod_config.lua`).
+Settings live in `reframework/autorun/pragmata/mod_config.lua`, each documented
+in place and read at every game launch. The ones most players touch:
 
-**Autonomy**
+**General**
 
-- `autonomy_nudges` (default `false`) — emit an in-combat hint listing which
-  abilities are currently available, encouraging Neuro to act proactively. When
-  false, Neuro only acts on direct request.
-- `autonomy_nudge_interval_frames` (default `1800`, ~30 s) — minimum frames
-  between nudges.
+- `display_name` (`"Neuro"`): the name in the on-screen "is hacking" banner.
+- `autonomy_nudges` (`false`): in combat, remind Neuro which abilities are
+  ready, at most every `autonomy_nudge_interval_frames` (~30 s).
+- `action_descriptions` (`"full"`): `"short"` sends one-sentence action
+  descriptions and the long rules separately.
 
 **Hacking**
 
-- `hacking_auto_force` (default `true`) — send `actions/force` the moment a grid
-  appears, so Neuro plans immediately.
-- `hacking_render_legend` (default `true`) — include the cell-glyph legend. It
-  only lists glyphs actually present in the current puzzle.
-- `hacking_render_adjacency` (default `true`) — include the per-direction legal
-  first-move block. It's the largest chunk of per-puzzle text; turn it off to
-  test whether the grid alone is enough.
-- `hacking_require_reasoning` (default `false`) — require a step-by-step
-  `reasoning` string before the moves. More accurate, noticeably slower.
-- `hacking_show_overlay` (default `true`) — draw the on-screen
-  "`<display_name>` is hacking" banner. No-ops on builds without REFramework's
-  `draw` API.
-- `hacking_overlay_x_fraction` / `hacking_overlay_y_fraction` (`0.5` / `0.08`) —
-  banner placement as fractions of screen size; nudge if it overlaps the HUD.
+- `hacking_auto_force` (`true`): ask Neuro the moment a hack appears.
+  `"not_open"` asks about every hack except on an enemy that is still open
+  (vulnerable) from the last hack: for those Neuro is only shown the grid and
+  decides herself whether to hack it. `false` asks about none, and shows her
+  each hack the same way (enemy grids and the door / switch / elevator hacks);
+  she solves the ones she chooses to.
+- `hacking_context_legend` (`false`): a hack shown that way is sent as the
+  board alone; `true` adds its legend (grid symbols, the sequence hack's
+  reading steps, glyph keys).
+- `hacking_render_legend` (`true`) / `hacking_render_adjacency` (`false`):
+  extra help text in the grid Neuro is sent.
+- `hacking_require_reasoning` (`false`): require a reasoning string before the
+  moves. More accurate, slower.
+- `hacking_show_overlay` (`true`), `hacking_overlay_x_fraction` /
+  `_y_fraction`: the on-screen banner and its position.
+- `hack_block_gate`, `hack_corruption_gate`, `hack_corruption_max_cells` (30),
+  `hack_explosion_guard`: how the enemy grid modifiers (red blocks, corruption,
+  exploding rows) are handled.
+- `puzzle_kinds`: which environmental hacks Neuro is offered (circuit,
+  sequence; both on).
+- `puzzle_sequence_group` (`1`): how the sequence hack is shown to Neuro.
 
-**Scan reporting**
+**Scan**
 
-- `scan_report_detail` (default `"located"`) — `"located"` lists every instance
-  individually; `"grouped"` gives one line per kind with the nearest distance.
-- `scan_report_require_distance` (default `true`) — report only markers the
-  engine can actually place. Abandoned automatically for a scan where nothing
-  has a distance, rather than reporting an empty area.
-- `scan_report_distance_limit` (default `12`) — most individual distances one
-  row prints before summarising the rest.
-- `scan_report_max_groups` (default `8`) — most distinct marker kinds named
-  before `(+N more marker types)`.
-- `scan_filters` — the liveness filter layers, each independently switchable.
-  Every layer answers *dead*, *live*, or *no evidence*, and a marker is hidden
-  **only** on a definite dead, so a broken layer cannot empty the report. The
-  panel can toggle them live for the session.
-- `scan_dedupe_markers` / `scan_dedupe_radius` (`true` / `0.5`) — collapse
-  repeated pings describing one physical object.
-- `scan_pickup_checks` (default `true`) — read each marker's own item and
-  interaction state, which is what answers "is that pickup still there".
+- `scan_report_detail` (`"located"`): every instance, or `"grouped"` per kind.
+- `scan_report_distance_limit` (12), `scan_report_max_groups` (8): caps.
+- `scan_filters`, `scan_dedupe_markers`, `scan_pickup_checks`: what counts as
+  still there.
 
-**Game state**
+**Messages to Neuro**
 
-- `state_push_area_summary` (default `true`) — on entering a new map area, send
-  its name, completion % and what is left to collect. Replaces the bare
-  "entered a new area" line while it works.
-- `state_push_low_health` / `state_low_health_thresholds` (`true` /
-  `{ 0.5, 0.25 }`) — report HP and repair kits left when HP falls past a
-  threshold. Downward crossings only.
-- `state_push_new_weapon` (default `true`) — announce a newly collected weapon.
-- `catalog_push_library` / `catalog_push_bot_database` /
-  `catalog_push_simulations` / `catalog_push_earth_memories` (all `true`) —
-  announce a new entry in that catalog. Only ever sent while in the Shelter.
-- `state_repair_kit_item` (default `nil`) — the repair kit's internal item name.
-  Left `nil`, the kit is found by its English name; on another language set it
-  from the Inventory section of the *Pragmata State Debug* panel.
+- `state_push_area_summary`, `state_push_low_health`
+  (`state_low_health_thresholds`), `state_push_new_weapon`,
+  `state_push_hacking_mods`: the game-state lines.
+- `catalog_push_archive`, `catalog_push_library`, `catalog_push_bot_database`,
+  `catalog_push_simulations`, `catalog_push_earth_memories`: new-entry lines.
+- `menu_push_open_close`: menu open / close lines.
+- `state_repair_kit_item`: on a non-English game, set the repair kit's item
+  name (mod menu -> **Setup values**).
 
-**Other**
+## How the hacking works
 
-- `display_name` (default `"Neuro"`) — name shown in the on-screen hacking
-  banner. Purely cosmetic.
-- `archive_enabled` / `archive_gui_path` / `archive_discover_paths` —
-  collectible-document capture. `archive_gui_path` is build-dependent and has no
-  default: set `archive_discover_paths = true`, open a document in-game, and
-  watch `reframework/log.txt` for the candidate path. Capture is idle until it's
-  set.
+There are three hacking minigames the mod plays: the cursor grid on enemies,
+and the circuit and sequence hacks on doors, switches and elevators.
 
-## Hacking integration
+**The enemy grid.** When a grid appears the mod sends it to Neuro as text and
+asks for a list of moves. The render marks bonus nodes, which make the hack
+stronger, and asks her to route through as many as she can on the way to the
+goal. The mod then moves the cursor one cell at a time through the game's own
+input, so walls, traps and bonuses behave exactly as for a player, and the
+goal completes the hack. A banner shows that Neuro, not you, is moving the
+cursor. Before running a plan the mod checks that it is legal and reaches the
+goal; if such a plan is cut short because you look away, the enemy dies or the
+grid changes, Neuro is told her plan was right, and it runs again by itself if
+the same grid comes back. The mod also handles the special enemies: it tells Neuro when red
+blocks or corruption must be cleared first, waits out corruption stuns, and
+times her moves around the final boss's exploding rows.
 
-The hacking minigames are the most fully-integrated subsystem. There are five of
-them: the cursor-routing grid that appears on enemies, and four used on
-environmental interactables — switches, doors, elevators. They share an entry
-point, controls and outcome, and the mod drives all of them through one loop.
+**The environmental hacks.** Each kind has its own action, because the
+mechanics have nothing in common. Neuro never has to time anything: on the
+sequence hack with a rotating needle, she gives the order and the mod presses
+each button when the game would accept it.
 
-The enemy grid works like this:
-
-1. The mod observes the active puzzle's start edge and, the moment a grid
-   appears, sends an `actions/force` with the rendered grid as the `state` field
-   and `pragmata_enemy_hack_plan` as the only allowed action. Only one force may be
-   outstanding — across all five kinds — so replies are never ambiguous.
-2. Neuro returns a list of cardinal moves. The render highlights **bonus
-   nodes** — cells that do more damage and make the hack last longer — and asks
-   Neuro to route through as many as possible en route to the goal. A longer
-   bonus-collecting path beats the shortest path, as long as it still reaches
-   the goal and avoids traps, error nodes, and its own trail.
-3. The mod dispatches one cell per ~130 ms by writing the target coords into
-   `PuzzleSnake._NextMovePosition`. The engine's natural input pipeline
-   (`updateInput → updateNextPosition → updatePuzzleMovement → onEnterGrid`)
-   then processes each move for free: walls block, directional gates enforce,
-   trail flags update, bonus and skill cells trigger, `EraseCode` traps fire,
-   and **goal arrival auto-completes the puzzle** with the full completion
-   animation.
-
-While Neuro drives a hack the mod draws a HUD-styled **"`<display_name>` is
-hacking"** banner (planning → executing move N/M → COMPLETE/FAILED), so it's
-clear Neuro and not the player is moving the cursor.
-
-### The environmental hacks
-
-The other four are read and played the same way, differing only in what the
-render says and what the reply looks like: rotate pieces to reach a centre,
-press directions in order, slide tiles, or turn columns. Each gets its own
-action, because the mechanics have nothing in common and one shared schema would
-have been a union of unrelated fields.
-
-Two things are worth calling out:
-
-- **Neuro never times anything.** One of the sequence puzzles has a rotating
-  needle that a press must land inside — a window a few frames wide, which is
-  unreachable across a websocket round trip. Neuro supplies the order and the
-  mod fires each press on a frame the engine says would count. There is no time
-  pressure on the reply.
-- **Input goes through the game's own command layer.** The mod answers the
-  engine's "is PuzzleUp triggered" query for a few frames, exactly the way Scan
-  works. It writes no controller and creates no OS-visible device, and because
-  the engine runs its own input chain the puzzle completes for real.
-
-`pragmata_enviro_hack_slide` and `pragmata_enviro_hack_path` cover two families that have not
-yet been seen in a live capture, so their readers are written from the type dump
-and are **off by default** (`mod_config.puzzle_kinds`). With them off those
-puzzles are still detected and narrated, just not offered to Neuro.
-
-### Outcomes are never missed
-
-Hack outcomes are watched from two places: the puzzle Diana is aimed at, and the
-player's own status flags, which carry success/fail regardless of where she is
-aiming. The second catches a hack finishing after the player has already turned
-away — which used to mean the outcome was never reported at all.
-
-Full schemas, the glyph table, and integration notes are in
-[ACTIONS.md](ACTIONS.md#pragmata_enemy_hack_plan).
-
-## Files referencing game internals
-
-Files under [`autorun/pragmata/bindings/`](autorun/pragmata/bindings/) reference
-real Pragmata class and method names extracted from the IL2CPP dump. The public
-API surface (the `pragmata.bindings.<system>.*` Lua functions) is intentionally
-neutral — internal type and method names live inside the binding files and are
-never returned to callers, so the rest of the mod reads without exposure.
+Hack outcomes are watched both on the puzzle you aim at and on your own status,
+so a hack that finishes after you look away is still reported.
 
 ## Troubleshooting
 
-**Mod logs `mailbox dir not ready`** — the directory
-`<Pragmata>/reframework/data/pragmata_mailbox/` doesn't exist. Create it.
+**`mailbox dir not ready` in the log**: create
+`<Pragmata>/reframework/data/pragmata_mailbox/`.
 
-**Sidecar logs `bridge connection failed`** — Neuro isn't running, or it's bound
-to a different port than `--bridge-url`.
+**Sidecar logs `bridge connection failed`**: Neuro is not running, or listens
+on a different port than `--bridge-url`.
 
-**Mod doesn't load** — check `<Pragmata>/reframework/log.txt` for Lua errors.
-Most common cause: the `pragmata/` subfolder didn't get copied. Both
-`pragmata_main.lua` **and** the `pragmata/` directory must be inside
-`reframework/autorun/`.
+**The mod doesn't load**: check `<Pragmata>/reframework/log.txt` for Lua
+errors. Usually the `pragmata/` folder was not copied next to
+`pragmata_main.lua`.
 
-**An ability action fails** — read the message; each refusal names its own
-cause (nothing locked on, gauge empty, jamming active, upgrade not unlocked,
-not in gameplay). Then press the matching **F6/F7/F8** key: since the key calls
-the same binding, a key that also fails means the game is refusing, while a key
-that works means the problem is in the action plumbing rather than the ability.
+**Neuro gets nothing**: look in
+`reframework/data/pragmata_mailbox/lua_to_bridge.jsonl`. If the messages are
+there, the problem is between the sidecar and Neuro.
 
-**An ability reports failure but the effect happened anyway** — the confirmation
-window (2–3 s) expired before the engine's state transition was observed. Check
-the abilities panel, which shows which confirmation evidence was and wasn't
-seen.
+**An ability fails**: read the message, which names the cause (nothing locked
+on, gauge empty, jamming, upgrade missing, not in gameplay). Then send the same
+action from `apitest/`. If that fails too, the game is refusing; if it works,
+the problem is in the connection.
 
-**Dialogue lines aren't captured** — verify `reframework/log.txt` shows
-`[pragmata] dialogue: …` lines as subtitles appear. If not, the GUI hierarchy
-may have changed in a patch; check that `UI/Asset/ui2000/gui/ui2010` still
-resolves.
+**An ability reports failure but happened anyway**: the confirmation window
+(2–3 s) ran out before the game's change was seen. The session log says which
+evidence arrived.
 
-## Open items
+**A hack is stuck or Neuro lost her actions**: use **Reset hacking** or
+**Re-send actions** in the mod menu (above).
 
-- **`archive_gui_path` is unset by default**, so collectible-document capture
-  does nothing until it's discovered per build.
-- **Directional grid cells** (`OneWay`, `TwoWay*`) exist in the engine's enum
-  but have never appeared in an observed grid; `OneWay` renders as a generic
-  `?`.
-- **Mission/objective state** is not yet bound.
-- **Two puzzle families are unverified.** The pipe and path hacks
-  (`pragmata_enviro_hack_slide`, `pragmata_enviro_hack_path`) are written from the type dump
-  and have never been exercised against a real one; they ship disabled.
+**Inputs missed or doubled on a controller or Linux**: untested setups, see the
+warning at the top. Please report what happened, with `reframework/log.txt`.
+
+**No dialogue lines**: `reframework/log.txt` should show `dialogue: …` as
+subtitles appear. If not, a game patch may have moved the subtitle screen.
+
+## Known limitations
+
+- Untested on Linux and with a controller.
+- Directional grid cells (`OneWay`, `TwoWay*`) have never appeared in a grid;
+  `OneWay` renders as `?`.
+- Mission and objective state is not read.
+
+## Hacking solving testing
+
+**There is a seperate app in seqbench folder that let tests Neuro (or Evil) solving capabilities for hacking puzzle (both enviromental and enemy). More info in Readme.md present in seqbench folder
 
 ## License
 

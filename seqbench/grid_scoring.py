@@ -1,4 +1,4 @@
-"""Scoring a grid episode: one puzzle, up to `max_forces` forces.
+"""Scoring a grid episode: one puzzle, up to `max_forces` answers (retries included).
 
 An episode ends when the hack is solved, fails (an X, a red block with the
 refusal off, the finale's clock), the peer does not answer, or the force limit

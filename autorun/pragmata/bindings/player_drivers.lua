@@ -16,7 +16,6 @@
 -- Public API:
 --   M.want(type_name)  -- register interest + install the capture hook (idempotent)
 --   M.get(type_name)   -- live captured instance, or nil
---   M.debug_status()   -- { [type_name] = { hook = <state>, captured = <bool> } }
 
 local log = require("pragmata.util.log")
 
@@ -117,14 +116,6 @@ function M.get(type_name)
     return nil
 end
 
-
-function M.debug_status()
-    local out = {}
-    for name, state in pairs(_hook_state) do
-        out[name] = { hook = state, captured = _is_live(_captured[name]) }
-    end
-    return out
-end
 
 
 return M

@@ -18,9 +18,8 @@
 --       app.PlayerCommandUpdater.getVec2("Move") and thresholded at +-0.5 --
 --       and the input branch just reads those flags back.
 --
--- On mouse + keyboard the second branch is taken, which is why the Puzzle Debug
--- panel's input probe reported "never asked about by the game" for every
--- direction: it was literally true. Nothing was being asked.
+-- On mouse + keyboard the second branch is taken, so an injected command is
+-- never asked about at all.
 --
 -- So rather than fabricate a movement vector, this module makes the puzzle take
 -- the branch that DOES ask a question, for exactly as long as we have an answer
@@ -64,14 +63,6 @@ local _state = {
 -- once already. A climbing `fired` proves we are in the call path.
 local _frame = 0
 local _until = -1
-local _fired = 0
-local _forced = 0
-local _observed = nil
--- Set while M.query() is asking on the debug panel's behalf. Our own calls must
--- neither be counted nor answered falsely: a `fired` that the panel drives
--- itself would prove nothing about the engine's call path, which is the only
--- thing that counter is for.
-local _self_query = false
 
 
 local function safe(fn)
@@ -86,15 +77,6 @@ end
 local function bool_return(value)
     local pointer = safe(function() return sdk.to_ptr(value and 1 or 0) end)
     return pointer ~= nil and pointer or (value and 1 or 0)
-end
-
-
-local function to_bool(value)
-    if type(value) == "boolean" then return value end
-    if value == nil then return nil end
-    local n = safe(function() return sdk.to_int64(value) end)
-    if type(n) == "number" then return n ~= 0 end
-    return nil
 end
 
 
@@ -129,20 +111,7 @@ local function install()
         sdk.hook(_state.method,
             function(args) end,
             function(retval)
-                if _self_query then
-                    local seen = to_bool(retval)
-                    if seen ~= nil then _observed = seen end
-                    return retval
-                end
-                _fired = _fired + 1
-                -- Only record what the engine really thinks while we are not
-                -- lying to it, or observed() would just echo our own answer.
-                if _frame > _until then
-                    local seen = to_bool(retval)
-                    if seen ~= nil then _observed = seen end
-                    return retval
-                end
-                _forced = _forced + 1
+                if _frame > _until then return retval end
                 return bool_return(false)
             end)
     end)
@@ -177,57 +146,17 @@ function M.release()
 end
 
 
--- Ask the engine which branch this puzzle is on, for the debug panel.
---
--- Goes through here rather than through puzzle_registry so the hook can tell our
--- question apart from the engine's own: a self-query is never counted and never
--- answered falsely, so `fired` keeps meaning "the engine reached this hook" even
--- while the panel is reading every frame.
-function M.query(inst)
-    if inst == nil then return nil end
-    -- Installing here as well as in suppress() means the panel shows the hook's
-    -- real state before the first press is ever sent.
-    install()
-    if _state.method == nil then return nil end
-    _self_query = true
-    local value = safe(function() return _state.method:call(inst) end)
-    _self_query = false
-    if value == nil then return nil end
-    return value == true
-end
-
 
 function M.active()
     return _frame <= _until
 end
 
 
--- What the engine answers when we are not interfering, or nil if it has not
--- been asked yet this session. TRUE here on mouse + keyboard is the whole
--- reason this module exists.
-function M.observed()
-    return _observed
-end
-
 
 function M.tick()
     _frame = _frame + 1
 end
 
-
-function M.status()
-    resolve()
-    return {
-        installed     = _state.installed,
-        resolve_error = _state.error,
-        hook_error    = _state.hook_error,
-        active        = M.active(),
-        frames_left   = math.max(0, _until - _frame),
-        fired         = _fired,
-        forced        = _forced,
-        observed      = _observed,
-    }
-end
 
 
 return M

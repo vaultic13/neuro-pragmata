@@ -2,8 +2,7 @@
 
 seqbench is independent of the mod on purpose: nothing here reads autorun/.
 The plain cross / arms / hints / list texts are line-for-line ports of the Lua
-as of 2026-09-15, except that the drawings now put a space between characters
-(`0 - + -`, not the mod's `0-+-`):
+(checked against the mod's forces and registration on 2026-11-15):
 
     util/puzzle_render.lua     button_cross, button_arms, button_example_lines,
                                M.buttons (the force's `state`)
@@ -385,7 +384,7 @@ def force_query(cfg: dict) -> str:
 
 
 def description(cfg: dict) -> str:
-    head = ("Solve the active sequence hack. A ring of direction prompts is on screen "
+    head = ("Environment hack (a door, switch or elevator). Solve the active sequence hack. A ring of direction prompts is on screen "
             "and they have to be entered in order.\n")
     form = letter_form(cfg)
     if form:

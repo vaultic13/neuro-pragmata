@@ -1,5 +1,5 @@
 -- The tram terminal's sector selection, as pragmata_menu_list / _info
--- { menu = "sectors" } (menu_actions.lua):
+-- while that screen is open (menu_actions.lua):
 --
 --   list   every sector with its completion %, and each location (area) in
 --          it with the stations that lead there and its collected count
@@ -49,7 +49,7 @@ end
 
 -- A sector counts as reached when it has a station reached. The screen's
 -- IsNoData flag is not that: the Hidden Chamber carries it with its station
--- reached and 100% (F11, 2026-10-07).
+-- reached and 100%.
 local function reached(s) return #s.stations > 0 end
 
 local function sector_head(s)
@@ -90,7 +90,7 @@ end
 local function list_action()
     local data, err = read()
     if data == nil then return false, err end
-    local lines = { string.format("Tram sectors (%d):", #data.sectors) }
+    local lines = { string.format("Tram sector selection, %d sectors:", #data.sectors) }
     for _, s in ipairs(data.sectors) do
         if not reached(s) then
             lines[#lines + 1] = sector_head(s) .. "."
@@ -182,36 +182,14 @@ end
 -- Registration (called once from pragmata_main.lua at startup)
 -- ---------------------------------------------------------------------------
 
--- pragmata_menu_list / pragmata_menu_info { menu = "sectors" } (menu_actions.lua).
+-- pragmata_menu_list / pragmata_menu_info while the screen is open
+-- (menu_actions.lua). Info takes locations, stations or sectors.
 function M.register(menu_actions, gates, binding)
     sectors = binding
     menu_actions.add({ key = "sectors", label = "the tram's sector selection",
-                       about = "sectors with completion %, their locations and stations, "
-                           .. "collectibles found; info takes locations, stations or sectors; "
-                           .. "only while that screen is open",
+                       title = "Tram sector selection", open_key = "train_sector",
                        list = function() return list_action() end,
-                       info = function(args) return info_action(args) end,
-                       gate = gates.menu_open("train_sector") })
-end
-
--- For Pragmata State Debug: the exact peer text of the list action, and of
--- the info action for the first sector and its first location.
-function M.debug_text()
-    local ok, success, text = pcall(list_action)
-    if not ok then return "RAISED: " .. tostring(success) end
-    local out = string.format("[%s] %s", tostring(success), tostring(text))
-    local data = read()
-    local s = data and data.sectors[1]
-    if s ~= nil then
-        local names = { sector_name(s) }
-        local loc = locations(s)[1]
-        if loc ~= nil then names[2] = loc.name end
-        local ok_i, success_i, text_i = pcall(info_action, { names = names })
-        out = out .. "\n----- pragmata_menu_info sectors " .. join(names, " + ") .. "\n"
-            .. (ok_i and string.format("[%s] %s", tostring(success_i), tostring(text_i))
-                     or ("RAISED: " .. tostring(success_i)))
-    end
-    return out
+                       info = function(args) return info_action(args) end })
 end
 
 return M

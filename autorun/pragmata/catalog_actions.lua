@@ -1,16 +1,19 @@
 -- Peer actions and pushes for the catalogs: the Data Library, the Archive, the Bot Database, the Training Simulations and
 -- the Earth Memories.
 --
--- Each is one `menu` value of pragmata_menu_list / pragmata_menu_info
--- (menu_actions.lua):
+-- All five are one `catalog` value of pragmata_archive_list /
+-- pragmata_archive_info (the Shelter menus are read only while open, by
+-- pragmata_menu_list, but the catalogs read right closed, so for them a
+-- choice makes sense):
+--   archive          the pause menu's Archive (the default) / full text
 --   library          found entries' titles by category / full text of up to 8
 --   bot_database     collected figures, how many are left / size, description
 --   simulations      available simulations, cleared or not / rules, rewards
---   archive          the pause menu's Archive (anywhere)
 --   earth_memories   Earth Memories (Rem Replicators): owned and placed, by group
 --
--- Available anywhere in the Shelter, or while the catalog's own screen is
--- open; the Archive everywhere, as it is in the pause menu. Simulations that
+-- The pair is always registered. The Archive answers anywhere; the other
+-- four only in the main Shelter or while their own screen is open, and
+-- refuse with that reason elsewhere. Simulations that
 -- are not run from the Training tab (extra, unnamed) are left out; New Game+
 -- is not a reason, every real one carries that flag. Formatting only: the
 -- reads go through bindings/catalogs.lua.
@@ -18,14 +21,17 @@
 -- Pushes: a few times a minute the found / collected / available id sets are
 -- compared with the last reading. A gain is pushed as silent context only
 -- while in the Shelter (switches in mod_config); outside it the baseline just
--- moves. A gain of more than MAX_GAIN at once is a load, not an unlock, and is
--- absorbed. Not-yet-found entries are only ever counted, never named.
+-- moves. The Archive is the exception: it is in the pause menu, so a new
+-- document is pushed wherever it is found. Every push carries the exact
+-- pragmata_archive_info call that reads the new entries. A gain of more than MAX_GAIN at once is a load, not an
+-- unlock, and is absorbed. Not-yet-found entries are only ever counted, never named.
 
 local M = {}
 
 local log = require("pragmata.util.log")
 local emit = require("pragmata.util.emit")
 local config = require("pragmata.mod_config")
+local json = require("pragmata.util.json_encode")
 local name_match = require("pragmata.util.name_match")
 
 local scene = nil
@@ -315,15 +321,10 @@ end
 
 local POLL_INTERVAL = 120         -- ~2 s at 60 fps
 local MAX_GAIN = 6                -- more at once is a load, not an unlock
-local EVENTS_MAX = 16
-
--- For Pragmata State Debug: what the trackers saw, newest first.
-M.events = {}
 local _frame = 0
 
 local function event(text)
-    table.insert(M.events, 1, { frame = _frame, text = text })
-    while #M.events > EVENTS_MAX do table.remove(M.events) end
+    log.info("catalog_actions: " .. text)
 end
 
 -- One tracker per catalog.
@@ -332,6 +333,18 @@ end
 --   message      -> prefix of the pushed line
 --   switch       -> mod_config field that turns the push on
 --   allow_empty  -> an empty set is a real reading (nothing placed yet)
+--   anywhere     -> push outside the Shelter too
+--   compose(added) -> names, message: replaces names + message when the
+--                   pushed line needs more than a list of names
+--   catalog      -> the pragmata_archive_info `catalog` value; with it,
+--                   names() also returns the entries' titles exactly as the
+--                   list gives them, and the line ends with the call that
+--                   reads them
+local function read_call(catalog, titles)
+    local call = json.encode({ catalog = catalog, names = titles, __keyorder = { "catalog", "names" } })
+    return "Read " .. ((#titles == 1) and "it" or "them") .. " with pragmata_archive_info " .. call .. "."
+end
+
 local function tracker(t)
     local last, pending = nil, nil
     t.reset = function() last, pending = nil, nil end
@@ -361,40 +374,88 @@ local function tracker(t)
             event(string.format("%s +%d at once: taken as a load, not announced", t.label, #added))
             return
         end
-        local okn, names = pcall(t.names, added)
-        if not okn or names == nil or #names == 0 then names = { #added .. " new" } end
-        local in_shelter = gates ~= nil and gates.in_shelter()
+        local names, message, titles = nil, nil, nil
+        if t.compose ~= nil then
+            local okc, n2, m2 = pcall(t.compose, added)
+            if okc then names, message = n2, m2 end
+        else
+            local okn, n2, t2 = pcall(t.names, added)
+            if okn then names, titles = n2, t2 end
+        end
+        if names == nil or #names == 0 then names, message, titles = { #added .. " new" }, nil, nil end
+        if message == nil then
+            message = t.message .. join(names, "; ") .. "."
+            if t.catalog ~= nil and titles ~= nil and #titles > 0 then
+                message = message .. " " .. read_call(t.catalog, titles)
+            end
+        end
+        local may_push = t.anywhere or (gates ~= nil and gates.in_shelter())
         event(string.format("%s gained: %s%s", t.label, join(names, "; "),
-            in_shelter and "" or " (outside the Shelter: not pushed)"))
-        if not in_shelter or config[t.switch] ~= true then return end
-        emit.narrative(t.message .. join(names, "; ") .. ".")
+            may_push and "" or " (outside the Shelter: not pushed)"))
+        if not may_push or config[t.switch] ~= true then return end
+        emit.narrative(message)
     end
     return t
 end
 
 local library_tracker = tracker({
-    label = "Data Library", switch = "catalog_push_library",
+    label = "Data Library", switch = "catalog_push_library", allow_empty = true,
+    catalog = "library",
     message = "New Data Library entry: ",
     ids = function() return read("library_ids") end,
     names = function(added)
         local want = {}
         for _, id in ipairs(added) do want[id] = true end
         local lib = read("library", false)
-        local out = {}
+        local out, titles = {}, {}
         for _, c in ipairs(lib and lib.categories or {}) do
             for _, e in ipairs(c.entries) do
                 if want[e.id] then
                     out[#out + 1] = string.format("'%s'%s", entry_title(e),
                         c.name and (" in " .. clean(c.name)) or "")
+                    titles[#titles + 1] = entry_title(e)
                 end
             end
         end
-        return out
+        return out, titles
+    end,
+})
+
+-- The Archive: anywhere, with where to find each new document and the call
+-- that reads it. The titles are entry_title()'s, exactly as
+-- pragmata_archive_list shows them, so the suggested call resolves.
+local archive_tracker = tracker({
+    label = "Archive", switch = "catalog_push_archive", anywhere = true,
+    -- An empty Archive is a real reading (archive_ids is nil while unread),
+    -- so the very first document found is announced, not taken as baseline.
+    allow_empty = true,
+    ids = function() return read("archive_ids") end,
+    compose = function(added)
+        local want = {}
+        for _, id in ipairs(added) do want[id] = true end
+        local lib = read("archive", false)
+        local names, parts, titles = {}, {}, {}
+        for _, c in ipairs(lib and lib.categories or {}) do
+            for _, e in ipairs(c.entries) do
+                if want[e.id] then
+                    local title = entry_title(e)
+                    local where = c.name and clean(c.name) or "an unnamed category"
+                    names[#names + 1] = string.format("'%s' in %s", title, where)
+                    parts[#parts + 1] = names[#names]
+                    titles[#titles + 1] = title
+                end
+            end
+        end
+        if #titles == 0 then return nil, nil end
+        local call = json.encode({ names = titles })
+        local head = (#titles == 1) and "New Archive entry: " or "New Archive entries: "
+        return names, head .. join(parts, "; ") .. ". Read "
+            .. ((#titles == 1) and "it" or "them") .. " with pragmata_archive_info " .. call .. "."
     end,
 })
 
 local bot_tracker = tracker({
-    label = "Bot Database", switch = "catalog_push_bot_database",
+    label = "Bot Database", switch = "catalog_push_bot_database", catalog = "bot_database",
     message = "New Bot Database figure: ",
     ids = function() return read("bot_database_ids") end,
     names = function(added)
@@ -405,12 +466,12 @@ local bot_tracker = tracker({
         for _, e in ipairs(db and db.entries or {}) do
             if want[e.id] then out[#out + 1] = figure_name(e) end
         end
-        return out
+        return out, out
     end,
 })
 
 local sim_tracker = tracker({
-    label = "Training Simulations", switch = "catalog_push_simulations",
+    label = "Training Simulations", switch = "catalog_push_simulations", catalog = "simulations",
     message = "New Training Simulation available: ",
     ids = function() return read("simulation_ids") end,
     names = function(added)
@@ -421,7 +482,7 @@ local sim_tracker = tracker({
         for _, e in ipairs(s and s.entries or {}) do
             if want[e.id] then out[#out + 1] = sim_name(e) end
         end
-        return out
+        return out, out
     end,
 })
 
@@ -435,11 +496,11 @@ local function memory_names(added)
             if want[e.id] then out[#out + 1] = memory_name(e) end
         end
     end
-    return out
+    return out, out
 end
 
 local memory_tracker = tracker({
-    label = "Earth Memories owned", switch = "catalog_push_earth_memories",
+    label = "Earth Memories owned", switch = "catalog_push_earth_memories", catalog = "earth_memories",
     message = "New Earth Memory: ",
     ids = function() return read("earth_owned_ids") end,
     names = memory_names,
@@ -447,14 +508,14 @@ local memory_tracker = tracker({
 
 -- Placing happens only in the Shelter, with Diana's cutscene.
 local placed_tracker = tracker({
-    label = "Earth Memories placed", switch = "catalog_push_earth_memories",
+    label = "Earth Memories placed", switch = "catalog_push_earth_memories", catalog = "earth_memories",
     message = "Earth Memory placed in the Shelter: ",
     allow_empty = true,
     ids = function() return read("earth_placed_ids") end,
     names = memory_names,
 })
 
-local TRACKERS = { library_tracker, bot_tracker, sim_tracker, memory_tracker, placed_tracker }
+local TRACKERS = { library_tracker, archive_tracker, bot_tracker, sim_tracker, memory_tracker, placed_tracker }
 
 local _unloaded = false
 
@@ -479,38 +540,124 @@ local function poll()
     end
 end
 
+-- The mod menu's "Rescan archive and catalogs": forget what was read and read
+-- everything again. The next reading is a fresh baseline, so nothing already
+-- found is announced as new.
+function M.rescan()
+    for _, t in ipairs(TRACKERS) do t.reset() end
+    if cat and cat.forget_screens then pcall(cat.forget_screens) end
+    log.info("catalog_actions: rescan requested from the mod menu")
+end
+
 -- ---------------------------------------------------------------------------
--- Registration (called once from pragmata_main.lua at startup)
+-- pragmata_archive_list / pragmata_archive_info (called once from
+-- pragmata_main.lua at startup)
 -- ---------------------------------------------------------------------------
+--
+-- Always registered: the Archive is in the pause menu and readable anywhere.
+-- The `catalog` argument picks one of the Shelter's catalogs instead; each
+-- of those has a gate (the main Shelter, or its own screen open), and a call
+-- it does not pass is refused with the gate's reason.
 
 local function unavailable() return false, "the catalog reader failed to load" end
 
-function M.register(menu_actions, gates_mod, binding)
+-- In add() order: the order the enum and the refusals list them.
+local CATALOGS = {}
+local CATALOG_ORDER = {}
+
+local function add_catalog(c)
+    CATALOGS[c.key] = c
+    CATALOG_ORDER[#CATALOG_ORDER + 1] = c.key
+end
+
+local function catalog_lines()
+    local parts = {}
+    for _, k in ipairs(CATALOG_ORDER) do parts[#parts + 1] = k .. " = " .. CATALOGS[k].about end
+    return table.concat(parts, "; ")
+end
+
+-- The catalog for args.catalog (archive when absent), or nil + a refusal.
+local function pick(args)
+    local key = type(args) == "table" and args.catalog or nil
+    if key == nil or key == "" then key = "archive" end
+    local c = type(key) == "string" and CATALOGS[key] or nil
+    if c == nil then
+        return nil, "Unknown catalog '" .. tostring(key) .. "'. Use one of: "
+            .. table.concat(CATALOG_ORDER, ", ") .. " (or leave it out for the Archive)."
+    end
+    if c.gate ~= nil then
+        local ok, avail, reason = pcall(c.gate)
+        if ok and avail == false then
+            return nil, (c.label:gsub("^%l", string.upper)) .. " cannot be read right now"
+                .. (reason and (": " .. reason) or "")
+                .. ". It can be read anywhere in the main Shelter, or while its own screen is open."
+        end
+    end
+    return c
+end
+
+local function guarded(c, fn, ...)
+    if cat == nil then return unavailable() end
+    local ok, success, message = pcall(fn, ...)
+    if not ok then
+        return false, (c.label:gsub("^%l", string.upper)) .. " could not be read: " .. tostring(success)
+    end
+    return success, message
+end
+
+function M.register(dispatcher, gates_mod, binding)
     cat, gates = binding, gates_mod
-    local function wrap(fn) return function(args) if cat == nil then return unavailable() end return fn(args) end end
     local function where(key) return gates.any(gates.shelter_only, gates.menu_open(key)) end
 
-    menu_actions.add({ key = "library", label = "the Data Library",
-                       about = "found entries by category; info gives an entry's full text; Shelter only",
-                       list = wrap(library_list), info = wrap(library_info), gate = where("library") })
-    -- The Archive is in the pause menu, so it is readable anywhere.
-    menu_actions.add({ key = "archive", label = "the Archive",
-                       about = "the pause menu's documents and records by category; "
-                           .. "info gives the full text; anywhere",
-                       list = wrap(archive_list), info = wrap(archive_info) })
-    menu_actions.add({ key = "bot_database", label = "the Bot Database",
-                       about = "figures collected; info gives size and description; Shelter only",
-                       list = wrap(bot_database_list), info = wrap(bot_database_info),
-                       gate = where("bot_database") })
-    menu_actions.add({ key = "simulations", label = "the Training Simulations",
-                       about = "available simulations, cleared or not; info gives rules and "
-                           .. "rewards; Shelter only",
-                       list = wrap(simulations_list), info = wrap(simulations_info),
-                       gate = where("simulations") })
-    menu_actions.add({ key = "earth_memories", label = "the Earth Memories",
-                       about = "Rem Replicator items owned and placed, by group; Shelter only",
-                       list = wrap(earth_memories_list), info = wrap(earth_memories_info),
-                       gate = where("replicator") })
+    add_catalog({ key = "archive", label = "the Archive", list = archive_list, info = archive_info,
+                  about = "the pause menu's documents, records and Help notes (the default; works anywhere)" })
+    add_catalog({ key = "library", label = "the Data Library", list = library_list, info = library_info,
+                  gate = where("library"),
+                  about = "the Shelter terminal's found entries by category" })
+    add_catalog({ key = "bot_database", label = "the Bot Database", list = bot_database_list,
+                  info = bot_database_info, gate = where("bot_database"),
+                  about = "figures collected; info gives size and description" })
+    add_catalog({ key = "simulations", label = "the Training Simulations", list = simulations_list,
+                  info = simulations_info, gate = where("simulations"),
+                  about = "available simulations, cleared or not; info gives rules and rewards" })
+    add_catalog({ key = "earth_memories", label = "the Earth Memories", list = earth_memories_list,
+                  info = earth_memories_info, gate = where("replicator"),
+                  about = "Rem Replicator items owned and placed, by group" })
+
+    local catalog_prop = {
+        type = "string", ["enum"] = CATALOG_ORDER,
+        description = "Which to read: " .. catalog_lines()
+            .. ". All but archive only in the main Shelter. Leave it out for the Archive.",
+    }
+    local info_schema = name_match.schema("entries of that catalog")
+    info_schema.properties.catalog = catalog_prop
+    info_schema.properties.__keyorder = { "catalog", "names" }
+
+    dispatcher.register("pragmata_archive_list", {
+        description = "List the Archive (the pause menu's documents, records and Help notes) or, "
+            .. "with `catalog`, one of the Shelter's catalogs: every entry found or collected so "
+            .. "far, with counts. The Archive works anywhere; the Shelter's catalogs in the main "
+            .. "Shelter. Read-only.",
+        short = "List the Archive, or one of the Shelter's catalogs with `catalog`. Read-only.",
+        schema = { type = "object", properties = { catalog = catalog_prop } },
+        handler = function(args)
+            local c, why = pick(args)
+            if c == nil then return false, why end
+            return guarded(c, c.list)
+        end,
+    })
+    dispatcher.register("pragmata_archive_info", {
+        description = "The full text or details of up to 8 entries of the Archive or, with "
+            .. "`catalog`, one of the Shelter's catalogs, by the names pragmata_archive_list "
+            .. "gives for it. Same availability as pragmata_archive_list. Read-only.",
+        short = "Details for up to 8 Archive or catalog entries, by name. Read-only.",
+        schema = info_schema,
+        handler = function(args)
+            local c, why = pick(args)
+            if c == nil then return false, why end
+            return guarded(c, c.info, args)
+        end,
+    })
 
     re.on_frame(function()
         _frame = _frame + 1
@@ -518,19 +665,6 @@ function M.register(menu_actions, gates_mod, binding)
         local ok, err = pcall(poll)
         if not ok then log.warn("catalog_actions: poll failed: " .. tostring(err)) end
     end)
-end
-
--- For Pragmata State Debug: the exact peer texts of the list actions.
-function M.debug_texts()
-    local out = {}
-    for _, pair in ipairs({ { "library", library_list }, { "archive", archive_list },
-                            { "bot_database", bot_database_list }, { "simulations", simulations_list },
-                            { "earth_memories", earth_memories_list } }) do
-        local ok, success, text = pcall(pair[2])
-        out[pair[1]] = ok and string.format("[%s] %s", tostring(success), tostring(text))
-                          or ("RAISED: " .. tostring(success))
-    end
-    return out
 end
 
 return M

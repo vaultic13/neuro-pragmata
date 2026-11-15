@@ -2,7 +2,7 @@
 -- Bindings for Diana's Overdrive Protocol -- the gauge-fuelled ability bound
 -- to X on keyboard and the L3+R3 stick chord on a controller.
 --
--- ENGINE LAYOUT (verified against the IL2CPP dump)
+-- ENGINE LAYOUT
 --
 --   app.PlayerPuzzleControlDriver : app.PlayerDriver
 --     get_HackingGauge() -> app.GaugeUnit     -- the gauge that fuels this
@@ -14,53 +14,28 @@
 --     requestWideFinishBlow(System.Int32) -> bool
 --     execWideFinishBlow()
 --     getWideFinishBlowDamage() -> System.Int32
---   app.PlayerDeathblowDriver : app.PlayerDriver     <- never captured before
+--   app.PlayerDeathblowDriver : app.PlayerDriver
 --     canDeathblow() -> bool, tryDeathblow(), startDeathBlow()
 --   app.GaugeUnit
 --     get_Full() / get_RemainingRate() / get_RemainingPoint() / get_TotalPoint()
 --
---   NOTE: app.GaugeUnit has NO reduce(System.Single). Earlier notes assumed a
---   "HackingGaugeUnit.reduce(float)" existed to hook for the exact spend
---   amount; it does not exist in this build. The gauge's own
---   set_RemainingPoint / the driver's clearHackingGauge are the real write
---   paths, and polling get_RemainingPoint per frame (what this binding does)
---   observes both.
+--   app.GaugeUnit has no reduce(); set_RemainingPoint and the driver's
+--   clearHackingGauge are the write paths, and polling get_RemainingPoint per
+--   frame (what this binding does) observes both.
 --
--- HOW IT IS TRIGGERED, AND HOW THAT WAS ESTABLISHED
+-- HOW IT IS TRIGGERED
 --
--- Two F11 probe captures of a manual activation are identical:
+-- A manual activation runs, on the deathblow driver:
 --
 --     canDeathblow()  = true
---     startDeathBlow()            <- recorded first
---     tryDeathblow()              <- same frame
---     canDeathblow()  = false     <- next frame
---     gauge 126.65 -> 26.65       <- four frames later, delta exactly -100.0
+--     startDeathBlow() -> tryDeathblow()   (nested, same frame)
+--     canDeathblow()  = false              (next frame)
+--     gauge -100 points                    (four frames later)
 --
 -- So the ability is dispatched through app.PlayerDeathblowDriver, and this
--- binding calls it there directly. A later entry/exit capture proved the two
--- methods are nested, not sequential -- see the trace above begin_trigger().
---
--- WHY EARLIER ATTEMPTS FAILED
---
---   * Injecting at app.PlayerInputDriver (bindings/command_input.lua) is
---     invisible to consumers that read input through PlayerDriver.get_Command()
---     -> app.hid.IPlayerCommand, or through app.hid.Command directly. Scan
---     happens to use the hooked path; this ability does not.
---
---   * Publishing at the command layer was the next attempt, and the captures
---     disprove it: `command_diff` was 0 for the entire recording of a
---     successful manual activation. No PlayerInputCommand changes state, so
---     there is no command to publish. That module (bindings/player_command.lua)
---     has been deleted; recover it from git history if a future ability turns
---     out to be command-driven.
---
---   * Raising app.player.FinishBlowStatus.RequestBurstFinishBlow was called
---     through a signature that does not exist. The real method is
---         app.EnumBitData.trgFlag(System.UInt64, System.Boolean,
---                                 System.UInt32, via.vec3[])
---     -- FOUR parameters. The old code looked up a three-parameter overload
---     (resolving to nil) and otherwise called it with two arguments. It is kept
---     below, with the correct signature, as an explicitly-diagnostic route.
+-- binding calls it there directly. It is not command-driven: no
+-- PlayerInputCommand changes state during a manual activation, and injecting
+-- at app.PlayerInputDriver is invisible to the consumers this ability uses.
 --
 -- READINESS AND CONFIRMATION ARE STATE-BASED
 --
@@ -69,8 +44,6 @@
 -- binding asks the engine whether the ability is usable and whether it started,
 -- rather than inferring both from a gauge number.
 
-local log = require("pragmata.util.log")
-local config = require("pragmata.mod_config")
 local player_drivers = require("pragmata.bindings.player_drivers")
 local player_status = require("pragmata.bindings.player_status")
 
@@ -82,10 +55,9 @@ local M = {}
 local TD_PUZZLE_DRIVER     = "app.PlayerPuzzleControlDriver"
 local TD_DEATHBLOW_DRIVER  = "app.PlayerDeathblowDriver"
 
--- CONFIRMED cost, not an assumption. Two independent F11 captures both show
--- the hacking gauge going 126.65 -> 26.65 on a successful activation: a fixed
--- deduction of exactly 100 points from a 150 total. Note what that rules out --
--- the ability does NOT require a full gauge and does NOT reset it to zero.
+-- Measured cost: a successful activation deducts exactly 100 points from a
+-- 150 total. The ability does NOT require a full gauge and does NOT reset it
+-- to zero.
 -- Used as the last-resort readiness signal only; the engine's own state is
 -- asked first (see M.readiness).
 local OBSERVED_MINIMUM_COST = 100.0
@@ -97,7 +69,7 @@ local CONFIRM_TIMEOUT_FRAMES = 180
 -- Status flags that mean "the ability actually started". Any one of them
 -- landing while a request is pending is confirmation.
 --
--- Deathblow leads because that is the driver the captures show doing the work.
+-- Deathblow leads because that is the driver that does the work.
 -- The FinishBlow flag is kept last as a cheap corroboration: it costs one
 -- lookup and would be genuine evidence if a future build routes the ability
 -- through the Burst path instead.
@@ -109,11 +81,9 @@ local START_FLAGS = {
 
 -- Status flags that mean "the engine considers this usable right now".
 --
--- This list used to hold FinishBlowStatus.CanBurstFinishBlow,
--- PuzzleStatus.OpenFinishBlow and PuzzleStatus.HackingGaugeFull. All three
--- read ZERO in the captures taken at the exact moment the ability was usable,
--- so the old list would have refused a ready ability. What was actually set was
--- DeathblowStatus = 36 = CanDeathblow | FindTarget.
+-- FinishBlowStatus.CanBurstFinishBlow, PuzzleStatus.OpenFinishBlow and
+-- PuzzleStatus.HackingGaugeFull all read ZERO at the moment the ability is
+-- usable; what is set is DeathblowStatus = CanDeathblow | FindTarget.
 --
 -- FindTarget is deliberately NOT treated as readiness: having a target in range
 -- is a precondition, not permission.
@@ -124,15 +94,14 @@ local READY_FLAGS = {
 local _last_trigger_msg = "(overdrive not triggered yet)"
 local _pending = nil
 local _frame = 0
--- Confirmation evidence collected while a request is in flight, surfaced in
--- the debug panel so a failure says WHAT was missing.
+-- Confirmation evidence collected while a request is in flight, so a failure
+-- says WHAT was missing.
 local _last_confirmation = nil
 
 -- Latched outcome of the most recent request.
 --
 -- The state machine is advanced from exactly ONE place (this module's frame
--- callback). Everything else -- ability_actions' poll, the debug panel -- only
--- READS it. That matters: when two callers both advanced the machine, whichever
+-- callback). Everything else (ability_actions' poll) only READS it. That matters: when two callers both advanced the machine, whichever
 -- ran second saw the request already cleared and reported a failure for a
 -- request that had just succeeded.
 --   "idle"      no request has been made yet
@@ -160,10 +129,7 @@ end
 -- One-time SDK lookups
 -- ---------------------------------------------------------------------------
 
--- Only what the confirmed path actually calls. The FinishBlow request methods
--- and the EnumBitData.trgFlag overload used to be resolved here for the
--- diagnostic RequestBurstFinishBlow route; that route is gone, and resolving
--- methods no one calls is just startup work that can fail confusingly.
+-- Only what the confirmed path actually calls.
 local _state = {
     inited = false,
     m_get_hacking_gauge = nil,
@@ -262,14 +228,6 @@ function M.gauge_full()
     return n ~= nil and n ~= 0 or nil
 end
 
--- True when the gauge holds at least the cost observed in the one completed
--- manual trace. Retained for compatibility (ability_state and the debug panel
--- both report it) but it is no longer the primary readiness signal.
-function M.has_observed_cost()
-    local points = M.gauge_remaining_points()
-    return type(points) == "number" and points >= OBSERVED_MINIMUM_COST
-end
-
 -- ---------------------------------------------------------------------------
 -- Readiness
 -- ---------------------------------------------------------------------------
@@ -289,13 +247,12 @@ function M.can_deathblow()
 end
 
 -- Ask the engine, in order of authority:
---   1. PlayerDeathblowDriver.canDeathblow() -- the game's own gate. In both
---      captures it read true immediately before the successful activation and
---      false on the very next frame.
+--   1. PlayerDeathblowDriver.canDeathblow() -- the game's own gate. It reads
+--      true immediately before a successful activation and false on the very
+--      next frame.
 --   2. DeathblowStatus.CanDeathblow -- the same answer off the status mask,
 --      used when the driver is momentarily unreachable.
---   3. The gauge threshold -- fallback only, and only meaningful because the
---      100-point cost is now confirmed.
+--   3. The gauge threshold (the measured 100-point cost) -- fallback only.
 -- Returns (ready_bool, reason_string) so a refusal can say what it checked.
 function M.readiness()
     ensure_init()
@@ -345,29 +302,19 @@ end
 
 -- How this binding fires Overdrive: app.PlayerDeathblowDriver.tryDeathblow().
 --
--- That is the call the captures show the game itself making. It re-runs the
+-- That is the call the game itself makes. It re-runs the
 -- game's own guards, so it can refuse -- but it can never start the ability in
 -- a state the game disallows. startDeathBlow() is the inner call; it skips
 -- those guards, so it is both more likely to fire and more likely to fire
 -- wrongly, and this binding never calls it.
 --
--- tryDeathblow WRAPS startDeathBlow. PROVEN, twice, by the entry/exit depth
--- capture -- the earlier exit-only traces could not separate "A called B" from
--- "B ran, then A ran", and it turned out to be the former:
+-- tryDeathblow WRAPS startDeathBlow (the inner call runs inside the outer
+-- one, same frame), which is why they must never be chained: calling
+-- tryDeathblow and then falling back to startDeathBlow is a SECOND
+-- activation, not a retry.
 --
---     f15046  ENTER tryDeathblow()      depth 0
---     f15046    ENTER startDeathBlow()  depth 1
---     f15046    EXIT  startDeathBlow()  depth 1
---     f15046  EXIT  tryDeathblow()      depth 0
---
--- Which is exactly why they must never be chained: calling tryDeathblow and
--- then falling back to startDeathBlow is a SECOND activation, not a retry.
--- Since the outer call is strictly safer and already reaches the inner one,
--- there is nothing to select between -- so the config switch that used to
--- choose a route is gone, and with it any way to reintroduce the chain.
---
--- The same capture also gives the post-dispatch timeline, which is what the
--- confirmation logic below is timed against:
+-- The post-dispatch timeline, which the confirmation logic below is timed
+-- against:
 --
 --     +1 frame   canDeathblow() flips true -> false; DeathblowStatus.Request
 --     +4 frames  Request/CanDeathblow clear, Start|Play raise, gauge -100
@@ -463,8 +410,7 @@ local function advance_pending()
     end
 
     -- canDeathblow() flipping true -> false is the fastest signal available:
-    -- the captures show it one frame after dispatch, against four frames for
-    -- the gauge. It is only meaningful if it was true when we dispatched --
+    -- one frame after dispatch, against four frames for the gauge. It is only meaningful if it was true when we dispatched --
     -- otherwise "false now" says nothing.
     if _pending.before_can_deathblow == true and M.can_deathblow() == false then
         _last_confirmation = {
@@ -516,9 +462,8 @@ local function advance_pending()
     end
 end
 
--- The single writer of the request state machine. The debug-panel button and
--- the probe both trigger without an ability_actions waiter, so the window has
--- to advance here rather than from a caller's poll.
+-- The single writer of the request state machine: the window advances here
+-- rather than from a caller's poll, so it runs even without a waiter.
 re.on_frame(function()
     _frame = _frame + 1
     advance_pending()
@@ -551,43 +496,5 @@ end
 -- ---------------------------------------------------------------------------
 -- Diagnostics
 -- ---------------------------------------------------------------------------
-
-function M.debug_status()
-    ensure_init()
-    local ready, reason = M.readiness()
-    local deathblow = find_driver(TD_DEATHBLOW_DRIVER)
-    local can_deathblow = nil
-    if deathblow ~= nil and _state.m_can_deathblow ~= nil then
-        can_deathblow = safe(function() return _state.m_can_deathblow:call(deathblow) end)
-        if type(can_deathblow) ~= "boolean" then
-            can_deathblow = value_to_int(can_deathblow) == 1
-        end
-    end
-    return {
-        drivers                 = player_drivers.debug_status(),
-        puzzle_driver_ok        = find_driver(TD_PUZZLE_DRIVER) ~= nil,
-        deathblow_driver_ok     = deathblow ~= nil,
-        can_deathblow           = can_deathblow,
-        dispatch_label          = DISPATCH_LABEL,
-        try_deathblow_ok        = _state.m_try_deathblow ~= nil,
-        gauge_fraction          = M.gauge_fraction(),
-        gauge_total             = M.gauge_total_points(),
-        gauge_remain            = M.gauge_remaining_points(),
-        gauge_full              = M.gauge_full(),
-        is_ready                = ready,
-        readiness_reason        = reason,
-        observed_minimum_cost   = OBSERVED_MINIMUM_COST,
-        observed_cost_available = M.has_observed_cost(),
-        status_layer            = player_status.debug_status(),
-        input_pending           = _pending ~= nil,
-        pending                 = _pending and {
-            frames_waited = _pending.frame,
-            command = _pending.command,
-            gauge_delta = _pending.gauge_delta,
-        } or nil,
-        last_confirmation       = _last_confirmation,
-        last_trigger_msg        = _last_trigger_msg,
-    }
-end
 
 return M
