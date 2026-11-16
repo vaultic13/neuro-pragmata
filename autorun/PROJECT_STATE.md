@@ -190,7 +190,10 @@ Three minigames, one loop (`hacking_observer.lua`): the enemy grid and two
 environmental families. They share `app.PuzzleBase`. Only one `actions/force` is
 outstanding at a time; each carries a `priority` (`puzzle_force_priority`: the
 enemy grid `high`, the rest `low`), which is advice to the peer, not
-arbitration here.
+arbitration here. The enemy grid's force is also `silent: true`
+(`puzzle_force_silent`): the peer answers without commenting on each one. The
+other families and the scene-prompt force (`cutscene_prompt_force_silent`) send
+no `silent` key.
 
 ### The enemy grid (PuzzleSnake)
 
@@ -437,6 +440,44 @@ Scene, area and checkpoint **codes** are never sent; opaque hashes are used for
 transition detection. The map area's player-facing name is sent with the area
 summary.
 
+### Dialogue
+
+Subtitles go out as spoken lines, `speech/started` / `speech/ended`
+(`dialogue.lua`, `dialogue_transport = "speech"`), not as context. The text
+comes from the subtitle panel (`bindings/subtitle_panel.lua`, GUI path
+`UI/Asset/ui2000/gui/ui2010`). The speaker, line type and length come from
+`MessageManager`'s current message (`bindings/speaker_resolver.lua`). A line
+is open while its text is on screen. It ends when the text changes (the next
+line starts on the same frame), when it has been gone for
+`dialogue_end_grace_frames` (12), when the panel stops drawing for 30 frames,
+or on a script reset. `expected_duration_ms` is the message's
+`_DispEndTime - _DispStartTime`.
+
+The reply level comes from `ConversationManager` (`bindings/dialogue_talk.lua`):
+the playing talk's id, the source table holding it, and the serious / event
+flags. First match wins: serious talk, cutscene line or scripted event →
+`always`; a talk from `dialogue_ambient_sources` → `never`; anything else →
+`maybe`.
+
+Measured in-game (2026-11-16: one session of 80 lines in speech mode, an
+earlier one of 186 for the levels):
+
+- 73 of 79 ended lines stayed open within a second of their expected length
+  plus the grace: a 1.5 s bark about 90 frames, a 3.0 s talk about 180.
+  Replaced lines ended at once, a second or two early.
+- The game closing ends no line: the last one stayed open and the server's
+  own timeout closes it.
+- `_PlayingTalkID` is already set on the subtitle's first frame.
+- Sources seen: combat barks `battle` (never), Diana and Hugh in the Shelter
+  `shelter` (maybe), story talk while exploring `stage` (maybe, or always when
+  flagged serious), door and switch remarks `gimmick` (never). Cutscene
+  subtitles have no talk id and read as `Cinematic` (always).
+- The "[IDUS transmission signal]" caption has no talk id, no speaker and no
+  length: it goes out as "Unknown voice", type `Dialogue`, reply `maybe`.
+
+The server's startup acknowledgement is stored (`dispatcher.session()`) and
+shown in the mod menu. Nothing else uses it.
+
 ## The mod menu
 
 `mod_menu.lua`, under the REFramework menu (**Insert**) → **Pragmata Neuro**.
@@ -506,9 +547,8 @@ re-read each launch. Settings worth knowing about:
 - Context lanes are inert (`emit.lua:30`).
 - Directional grid cells (`OneWay`, `TwoWay*`) have never been seen in a grid;
   `OneWay` renders as `?`.
-- Dialogue capture depends on the GUI path `UI/Asset/ui2000/gui/ui2010`.
-- `dialogue.lua` and `dialogue_speaker.lua` call `sdk` directly, outside
-  `bindings/` (CLAUDE.md rule 1); they should move behind a binding.
+- Dialogue capture depends on the GUI path `UI/Asset/ui2000/gui/ui2010`
+  ([Dialogue](#dialogue)).
 - Train hub, weapon selection and elevator screens (ui0071 / ui5112 / ui5113)
   have no actions.
 - `../neuro-pragmata-main/autorun/` is a stale mirror; sync it as a release step.

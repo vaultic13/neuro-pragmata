@@ -101,6 +101,9 @@ local function send_force(active)
         action_names = { b.action },
         priority = priority(),
     }
+    -- Only an explicit true is sent; otherwise the key stays absent (the
+    -- server's default, not silent).
+    if config.cutscene_prompt_force_silent == true then data.silent = true end
     mailbox.send({ command = "actions/force", game = GAME, data = data })
     _inflight = { id = active.id, since = _frame }
     _offered.forced = true

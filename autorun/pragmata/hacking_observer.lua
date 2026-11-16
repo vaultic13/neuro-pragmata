@@ -321,6 +321,13 @@ local function send_force(binding, active, id)
     -- A nil here leaves the key absent, so an unset or malformed setting sends
     -- the force with no priority field rather than a null one.
     data.priority = force_priority(active.kind)
+    -- Silent forces (the peer answers without commenting) are opt-in per
+    -- family; anything but true leaves the key absent, i.e. the server's
+    -- default of false.
+    local silents = config.puzzle_force_silent
+    if type(silents) == "table" and silents[active.kind] == true then
+        data.silent = true
+    end
 
     mailbox.send({
         command = "actions/force",

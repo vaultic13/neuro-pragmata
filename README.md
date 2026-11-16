@@ -14,7 +14,7 @@ health, new entries.
 
 > [!WARNING]
 > **Tested only on Windows with mouse and keyboard.** The mod has not been
-> tested on **Linux** or with a **controller**. The mod
+> tested on **Linux** (Proton / Steam Deck) or with a **controller**. The mod
 > presses buttons for Neuro through the game's own input layer, and the game
 > reads input differently depending on the input device, so on a controller
 > or under Proton Neuro's inputs (scans, hacking presses, scene prompts) may
@@ -31,7 +31,6 @@ health, new entries.
 - [How the hacking works](#how-the-hacking-works)
 - [Troubleshooting](#troubleshooting)
 - [Known limitations](#known-limitations)
-- [Testing hacking solving abilities](#testing-hacking-solving-abilities-of-neuro)
 
 Full schemas, every reply and refusal, the grid format and the whole context
 surface are in [ACTIONS.md](ACTIONS.md). Advice for integrations is in
@@ -56,7 +55,7 @@ surface are in [ACTIONS.md](ACTIONS.md). Advice for integrations is in
 
 - **The hacking actions are forced.** When a hack starts, the mod asks Neuro
   with an `actions/force` naming the one action that fits the puzzle on
-  screen, so she never has to work out which kind it is. This can be changed in mod_config.lua by editing hacking_auto_force. More info in [Configuration](#configuration).
+  screen, so she never has to work out which kind it is.
 - **Success means the game acted.** The abilities and the hacks answer when the
   game is seen to act (within a few seconds), not when asked. A precondition
   failure comes back at once with its reason.
@@ -79,7 +78,8 @@ Neuro is told only about actions that make sense right now:
   a menu opens or closes.
 - `pragmata_purify` appears only while a scene waits for the filament-cleaning
   button.
-- The Archive versiob of menu action named pragmata_archive_list` / `_info`. Can be access any time.
+- The Archive pair is always there; the Shelter catalogs answer only in the
+  main Shelter.
 
 When a scripted scene stops on the Overdrive button, Neuro is asked to press
 it, and the scene carries on. You can still press it yourself. After the first
@@ -90,7 +90,11 @@ boss by itself.
 
 Sent as `context` messages, silent unless noted:
 
-- Dialogue with speaker and type: `Dialogue: [Conversation] Diana says "Let's finish this!"`
+- Dialogue is sent as spoken lines (`speech/started` / `speech/ended`): Neuro
+  hears who says what, doesn't talk over a line, and afterwards replies never
+  (barks, chatter), maybe (ordinary talk) or always (story beats). With
+  `dialogue_transport = "context"` it is silent context instead:
+  `Dialogue: [Conversation, dialogue] Diana says "Let's finish this!"`
 - `Overdrive is ready.` · `Auto-Hack upgrade is now available.`
 - `Diana scanned: …` for scans you make (Neuro's own scans come back as her
   action result)
@@ -106,7 +110,6 @@ Sent as `context` messages, silent unless noted:
   call that reads them
 - `Checkpoint reached.` · `Combat started.` · `Combat ended.`
 - Optional in-combat ability hints (off by default)
-- New entry in archive with way to access it.
 
 Internal scene and checkpoint codes are never sent. Things not found yet are
 counted, never named.
@@ -187,7 +190,8 @@ game:
 **Setup values** (inside the menu) reads the current sector's name and hash
 and every held item's internal name, for the "non-English game" settings.
 
-Test Overdrive on a disposable save: with an empty gauge it should
+To test without the AI, send any action by hand with `apitest/` (see its
+README). Test Overdrive on a disposable save: with an empty gauge it should
 refuse with a reason.
 
 ## Configuration
@@ -288,7 +292,9 @@ errors. Usually the `pragmata/` folder was not copied next to
 there, the problem is between the sidecar and Neuro.
 
 **An ability fails**: read the message, which names the cause (nothing locked
-on, gauge empty, jamming, upgrade missing, not in gameplay).
+on, gauge empty, jamming, upgrade missing, not in gameplay). Then send the same
+action from `apitest/`. If that fails too, the game is refusing; if it works,
+the problem is in the connection.
 
 **An ability reports failure but happened anyway**: the confirmation window
 (2–3 s) ran out before the game's change was seen. The session log says which
@@ -306,9 +312,11 @@ subtitles appear. If not, a game patch may have moved the subtitle screen.
 ## Known limitations
 
 - Untested on Linux and with a controller.
+- Directional grid cells (`OneWay`, `TwoWay*`) have never appeared in a grid;
+  `OneWay` renders as `?`.
 - Mission and objective state is not read.
 
-## Testing hacking solving abilities of Neuro
+## Hacking solving testing
 
 **There is a seperate app in seqbench folder that let tests Neuro (or Evil) solving capabilities for hacking puzzle (both enviromental and enemy). More info in Readme.md present in seqbench folder
 

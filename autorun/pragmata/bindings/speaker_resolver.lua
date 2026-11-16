@@ -42,6 +42,8 @@
 -- emits packed metadata defaults, not raw int32 ordinals, so trusting the
 -- "default" field would be wrong. The reflection lookup is cached per-load.
 
+local reflect = require("pragmata.bindings.reflect")
+
 local M = {}
 
 -- ---------------------------------------------------------------------------
@@ -184,6 +186,35 @@ function M.extract_speaker_name(info, manager)
     if not nonempty_string(name) then return nil end
 
     return name
+end
+
+-- ---------------------------------------------------------------------------
+-- How long the current line is on screen
+-- ---------------------------------------------------------------------------
+-- app.MessageParam carries _DispStartTime / _DispEndTime (System.Single,
+-- seconds into the line; app.MessageInfo's _DefaultDispEndTime literal is
+-- 7.0, so seconds rather than frames). Their difference is how long the
+-- subtitle stays up. Returns seconds, or nil when unreadable or implausible
+-- (not positive, or over 10 minutes).
+-- Confirmed in-game (2026-11-16): the values are the line's own (1.5-3 s
+-- for barks and talks), and the subtitle stays up for that long.
+local function num(v)
+    if type(v) == "number" then return v end
+    local ok, n = pcall(tonumber, tostring(v))
+    if ok and type(n) == "number" then return n end
+    return nil
+end
+
+function M.extract_line_seconds(info)
+    if info == nil then return nil end
+    local param = current_param(info)
+    if param == nil then return nil end
+    local s = num(select(2, pcall(function() return param:get_field("_DispStartTime") end)))
+    local e = num(select(2, pcall(function() return param:get_field("_DispEndTime") end)))
+    if s == nil or e == nil then return nil end
+    local d = e - s
+    if d <= 0 or d > 600 then return nil end
+    return d
 end
 
 -- ---------------------------------------------------------------------------
@@ -341,6 +372,29 @@ function M.extract_dialogue_type(info)
     -- CONFIDENCE: medium — degradation behaviour is the right default but
     -- assumes any unknown member is still "some kind of dialogue".
     return "Dialogue"
+end
+
+-- ---------------------------------------------------------------------------
+-- The current line, read from the app.MessageManager singleton
+-- ---------------------------------------------------------------------------
+-- Returns { speaker = string|nil, kind = string|nil, seconds = number|nil },
+-- or nil when no message is current (or the manager is not there yet).
+local MANAGER = "app.MessageManager"
+
+function M.read_current()
+    local mgr = reflect.singleton(MANAGER)
+    if mgr == nil then return nil end
+    local ok, info = pcall(function() return mgr:call("get_CurrentMessageInfo") end)
+    if not ok or info == nil then return nil end
+
+    local out = {}
+    local sok, name = pcall(M.extract_speaker_name, info, mgr)
+    if sok and type(name) == "string" and name ~= "" then out.speaker = name end
+    local tok, kind = pcall(M.extract_dialogue_type, info)
+    if tok and type(kind) == "string" and kind ~= "" then out.kind = kind end
+    local dok, d = pcall(M.extract_line_seconds, info)
+    if dok and type(d) == "number" then out.seconds = d end
+    return out
 end
 
 return M

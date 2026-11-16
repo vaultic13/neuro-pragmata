@@ -173,6 +173,20 @@ re.on_draw_ui(function()
     imgui.text(hack_line())
     local scene = scene_line()
     if scene ~= nil then imgui.text(scene) end
+    local session = dispatcher.session and dispatcher.session()
+    if type(session) == "table" then
+        imgui.text(string.format("Connected to: %s (%s)",
+            tostring(session.display_name), tostring(session.character_id)))
+    end
+    local dlg = loaded("pragmata.dialogue")
+    local last = dlg and dlg.last_line
+    if type(last) == "table" then
+        local mode = dlg.transport and dlg.transport() or "?"
+        local open = dlg.line_open and dlg.line_open() and ", speaking" or ""
+        imgui.text(string.format("Last dialogue line (%s%s): reply %s (%s, source %s)",
+            mode, open, tostring(last.reply), tostring(last.kind),
+            tostring(last.source or "none")))
+    end
     local file = log.session_file()
     if type(file) == "string" then imgui.text("Session log: reframework/data/" .. file) end
 

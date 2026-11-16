@@ -46,6 +46,14 @@ you solve one. It is a hint about urgency, not a queue: the mod still keeps
 exactly one force outstanding at a time, first come first served. Defaults are
 per family in `mod_config.puzzle_force_priority`.
 
+The enemy grid's force is also **`silent: true`**: Neuro solves it without
+saying anything out loud about it, because a fight brings many of them and
+commenting on each would be noise. A failed answer is still retried and the
+priority still applies. The environmental hacks and the scene-prompt force
+send no `silent` key (the server default, `false`). Set per family in
+`mod_config.puzzle_force_silent`, and for scene prompts in
+`mod_config.cutscene_prompt_force_silent`.
+
 **All three of Diana's abilities take no arguments.** Their schema is exactly
 `{"type": "object"}`. There is nothing to choose: Scan is a single input
 command, Overdrive is a single driver call, and Auto-Hack's engine entry point
@@ -1182,15 +1190,56 @@ are verbatim from real sessions except where marked as illustrative.
 
 ### Dialogue
 
+Subtitled lines are reported as **spoken lines**, not context
+(`mod_config.dialogue_transport = "speech"`, the default):
+
+```json
+{"command":"speech/started","game":"Pragmata","data":{"id":"pragmata-1795000000-12",
+ "speaker":"Hugh","text":"Check.","reply":"maybe","expected_duration_ms":2400}}
+{"command":"speech/ended","game":"Pragmata","data":{"id":"pragmata-1795000000-12"}}
 ```
-Dialogue: [Conversation] Diana says "Let's finish this!"
-Dialogue: [Conversation] Hugh says "Check."
+(Illustrative.)
+
+- A line **starts** when its subtitle appears and **ends** when the subtitle
+  changes or has been gone for `dialogue_end_grace_frames` (12). A skipped
+  line ends the same way. An end is always sent, also when scripts reload.
+  While a line is open, Neuro doesn't start talking and stops if she was
+  talking.
+- `id` is `pragmata-<boot time>-<n>`, new for every line.
+- `speaker` is the resolved name, or `mod_config.dialogue_unnamed_speaker`
+  ("Unknown voice") when the game shows none. `text` is the whole subtitle;
+  wrapped halves are joined. The line is **not** also sent as context.
+- `expected_duration_ms` is the subtitle's display time read from the game,
+  sent only when it reads as plausible (`dialogue_send_duration`). The server
+  uses it only if an end never arrives.
+- `reply` says how much the line matters:
+
+| reply | lines |
+|---|---|
+| `never` | combat barks, chatter while exploring, hints, remarks on pickups and gimmicks |
+| `maybe` | ordinary talk (Shelter, stage conversations, anything unclassified) |
+| `always` | talks the game flags as serious, cutscene lines, scripted events |
+
+  Which sources count as `never` is set in `mod_config.dialogue_ambient_sources`.
+  Lines back to back form one stretch; only the last line's `reply` counts.
+- `responder` (`"neuro"` / `"evil"`) goes with `always` lines only, and only
+  when `mod_config.dialogue_responder` is set. Otherwise the server picks.
+
+The mod logs the server's startup acknowledgement (the character reached)
+and shows it in the mod menu.
+
+With `dialogue_transport = "context"` (a server without the speech messages),
+each line goes out once as silent context instead:
+
+```
+Dialogue: [Conversation, ambient] Diana says "Let's finish this!"
 ```
 
-Format is `Dialogue: [<Type>] <Speaker> says "<text>"`, or
-`Dialogue: [<Type>] "<text>"` when no speaker resolves. `<Type>` is the
-dialogue category from the engine's `MessageInfo`. Multi-line wrapped subtitles
-are combined, so each utterance is forwarded once.
+Format is `Dialogue: [<Type>, <level>] <Speaker> says "<text>"`, or
+`Dialogue: [<Type>, <level>] "<text>"` when no speaker resolves. `<Type>` is the
+dialogue category from the engine's `MessageInfo`. `<level>` is the reply as a
+word (`ambient` = never, `dialogue` = maybe, `important` = always;
+`mod_config.dialogue_reply_labels`).
 
 A collectible document is announced by the Archive's "New Archive entry" line
 and read with `pragmata_archive_info`.

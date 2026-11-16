@@ -296,11 +296,37 @@ end
 local _last_incoming = nil
 function M.last_incoming() return _last_incoming end
 
+-- The server's startup acknowledgement: which character this connection
+-- reached. { session_id, character_id ("neuro" / "evil"), display_name }, or
+-- nil before one arrives. Informational (the mod menu; a speech line's
+-- responder is set in mod_config, not taken from here).
+local _session = nil
+function M.session() return _session end
+
+local function on_startup_ack(data)
+    local s = type(data) == "table" and data.session or nil
+    if type(s) ~= "table" then
+        log.warn("dispatcher: startup acknowledgement without a session")
+        return
+    end
+    _session = {
+        session_id   = s.sessionId,
+        character_id = s.characterId,
+        display_name = s.displayName,
+    }
+    log.info("dispatcher: connected to " .. tostring(s.displayName)
+          .. " (" .. tostring(s.characterId) .. ")")
+end
+
 function M.handle_incoming(msg, send_fn)
     _last_incoming = os.time()
     local cmd = msg.command
     if cmd == "actions/reregister_all" then
         reregister_all()
+        return
+    end
+    if cmd == "startup" then
+        on_startup_ack(msg.data)
         return
     end
     if cmd ~= "action" then

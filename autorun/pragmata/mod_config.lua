@@ -96,6 +96,19 @@ M.puzzle_force_priority = {
 -- frozen until someone answers it.
 M.cutscene_prompt_force_priority = "High"
 
+-- Ask silently: true = the AI picks its answer without saying anything out
+-- loud about it (failed answers are still retried and the priority still
+-- applies). Meant for frequent, routine requests not worth commenting on.
+-- false (or missing) = the AI may talk about the request as usual.
+M.puzzle_force_silent = {
+    snake   = true,     -- enemy grid: many per fight
+    circuit = false,
+    buttons = false,
+}
+
+-- The same for the request to press a scene prompt.
+M.cutscene_prompt_force_silent = false
+
 -- ----------------------------------------------------------------
 -- How hacks are presented to the AI
 -- ----------------------------------------------------------------
@@ -195,6 +208,57 @@ M.hide_abilities_in_shelter = true
 
 -- Hide the hacking actions in the Shelter.
 M.hide_hacking_in_shelter = true
+
+-- ----------------------------------------------------------------
+-- Dialogue
+-- ----------------------------------------------------------------
+-- How subtitle lines reach the AI:
+--   "speech"   as spoken lines (speech/started + speech/ended): she hears
+--              who says what, doesn't talk over a line, and after the
+--              dialogue goes quiet replies according to the line's level
+--   "context"  as silent context text ("Dialogue: [Conversation, ambient]
+--              Diana says ..."), the way it worked before; for a server
+--              without the speech messages
+M.dialogue_transport = "speech"
+
+-- Speaker name sent for a line the game shows with no speaker.
+M.dialogue_unnamed_speaker = "Unknown voice"
+
+-- How long a subtitle must be gone before its line counts as ended, in
+-- frames. Bridges a flicker between wrapped halves or pages.
+M.dialogue_end_grace_frames = 12
+
+-- Send each line's expected length, read from the game. The server only uses
+-- it if a line's end never arrives. false = never send it.
+M.dialogue_send_duration = true
+
+-- Who answers lines that must be answered ("important"), when more than one
+-- character listens: "neuro" or "evil". nil = the server picks.
+M.dialogue_responder = nil
+
+-- Each subtitle line is given one of three levels; it is the line's reply
+-- in "speech" mode, and the second word of its tag in "context" mode
+-- ("Dialogue: [Conversation, ambient] ..."):
+--   ambient    chatter and barks, not worth answering          (reply "never")
+--   dialogue   ordinary talk the AI may comment on             (reply "maybe")
+--   important  story beats: serious talks, cutscenes, events   (reply "always")
+-- Serious talks, cutscenes and scripted events are always "important". Talks
+-- from the sources below are "ambient"; everything else is "dialogue".
+-- Sources: battle, stage_chat, stage_tips, gimmick, item, shelter, stage.
+M.dialogue_ambient_sources = {
+    battle     = true,   -- combat barks
+    stage_chat = true,   -- chatter while exploring
+    stage_tips = true,   -- hints
+    gimmick    = true,   -- remarks on doors, switches and the like
+    item       = true,   -- remarks on pickups
+}
+
+-- The word shown in the tag for each level.
+M.dialogue_reply_labels = {
+    never  = "ambient",
+    maybe  = "dialogue",
+    always = "important",
+}
 
 -- ----------------------------------------------------------------
 -- Non-English games
